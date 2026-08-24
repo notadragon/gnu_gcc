@@ -48,6 +48,16 @@ template <int N> struct ParmRef {
 };
 template <int N> int ParmRef<N>::f(int rhs) { return rhs; }
 
+// The Clang AutoReturn case (a deduced return type on the out-of-line
+// definition), added now that GCC-4 (gcc-bugs/pending_reports.md, fixed
+// gnu_gcc 677b81146d0) no longer crashes GCC on this shape for an
+// unrelated reason -- see dcl.contract.res-auto-return-parm.C for that
+// bug's own dedicated regression test.
+template <class T> struct AutoReturn {
+  auto f(T v) pre(v != T());
+};
+template <class T> auto AutoReturn<T>::f(T v) { return v; }
+
 // Controls: these always worked and must keep working.
 template <int N> struct InlineDef {
   int f(int rhs) pre(rhs >= 0) { return rhs; }
@@ -72,6 +82,12 @@ int main() {
   ParmRef<2> pr2;
   pr2.f(-1);
   expect(1, "ParmRef<2> bad");
+
+  AutoReturn<int> ar;
+  ar.f(1);
+  expect(0, "AutoReturn good");
+  ar.f(0);
+  expect(1, "AutoReturn bad");
 
   InlineDef<1> id;
   id.f(-1);
