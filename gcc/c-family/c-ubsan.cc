@@ -28,6 +28,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "stor-layout.h"
 #include "builtins.h"
 #include "gimplify.h"
+#include "langhooks.h"
 #include "stringpool.h"
 #include "attribs.h"
 #include "asan.h"
@@ -865,11 +866,13 @@ ubsan_maybe_instrument_array_ref (tree *expr_p, bool ignore_off_by_one)
   tree factor = NULL_TREE;
   int index_n = 0;  /* the operand position of INDEX in the parent tree.  */
 
+  bool do_sanitize
+    = sanitize_flags_p (SANITIZE_BOUNDS | SANITIZE_BOUNDS_STRICT);
   if (!ubsan_array_ref_instrumented_p (*expr_p)
-      && sanitize_flags_p (SANITIZE_BOUNDS | SANITIZE_BOUNDS_STRICT)
+      && (do_sanitize || flag_contracts_p3100)
       && current_function_decl != NULL_TREE)
     {
-      if (TREE_CODE (*expr_p) == ARRAY_REF)
+      if (TREE_CODE (*expr_p) == ARRAY_REF && do_sanitize)
 	{
 	  op0 = TREE_OPERAND (*expr_p, 0);
 	  op1 = TREE_OPERAND (*expr_p, 1);
@@ -880,9 +883,45 @@ ubsan_maybe_instrument_array_ref (tree *expr_p, bool ignore_off_by_one)
 	    TREE_OPERAND (*expr_p, 1)
 	      = build2 (COMPOUND_EXPR, TREE_TYPE (op1), e, op1);
 	}
-      else if (is_instrumentable_pointer_array_address (*expr_p, &op0, &op1,
-							&index_p, &index_n,
-							&factor))
+      else if (TREE_CODE (*expr_p) == ARRAY_REF && flag_contracts_p3100)
+	{
+	  /* P3100 implicit array-bounds contract assertion, when the sanitizer
+	     is off.  Only the statically-known-bound case is handled: the array
+	     operand has an ARRAY_TYPE with a constant upper domain bound.  The
+	     C++ langhook resolves the per-site semantic and builds a guarded
+	     index (out-of-range -> the defined valid index 0) that REPLACES the
+	     original index outright.  */
+	  op0 = TREE_OPERAND (*expr_p, 0);
+	  op1 = TREE_OPERAND (*expr_p, 1);
+	  tree atype = TREE_TYPE (op0);
+	  tree domain = (TREE_CODE (atype) == ARRAY_TYPE
+			 ? TYPE_DOMAIN (atype) : NULL_TREE);
+	  tree maxv = domain ? TYPE_MAX_VALUE (domain) : NULL_TREE;
+	  if (maxv != NULL_TREE && TREE_CODE (maxv) == INTEGER_CST)
+	    {
+	      /* First out-of-range index = max + 1 (+ 1 more when a one-past
+		 address is being formed rather than an element accessed).  */
+	      tree bound
+		= fold_build2 (PLUS_EXPR, TREE_TYPE (maxv), maxv,
+			       build_int_cst (TREE_TYPE (maxv),
+					      1 + ignore_off_by_one));
+	      /* Skip a constant index that is provably in range.  */
+	      if (!(TREE_CODE (op1) == INTEGER_CST
+		    && tree_int_cst_sgn (op1) >= 0
+		    && tree_int_cst_lt (op1, bound)))
+		{
+		  tree g = lang_hooks.build_implicit_bounds_check
+			     (current_function_decl, EXPR_LOCATION (*expr_p),
+			      op1, bound);
+		  if (g != NULL_TREE)
+		    TREE_OPERAND (*expr_p, 1) = g;
+		}
+	    }
+	}
+      else if (do_sanitize
+	       && is_instrumentable_pointer_array_address (*expr_p, &op0, &op1,
+							   &index_p, &index_n,
+							   &factor))
 	{
 	  tree e
 	    = ubsan_instrument_bounds_pointer_address (EXPR_LOCATION (*expr_p),
@@ -906,8 +945,30 @@ static tree
 ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
 					  enum ubsan_null_ckind ckind)
 {
+  if (current_function_decl == NULL_TREE)
+    return NULL_TREE;
+
+  /* P3100 routes these two UB categories to the contract-violation
+     machinery.  Every sibling null/alignment gate got that treatment; this
+     one did not, so a configured null-dereference or misalignment check
+     silently did not happen for a reference binding (int &r = *p) or a
+     null-this member call (p->f ()) -- two of the three syntactic shapes
+     of the same UB, with the third (a plain *p) correctly enforced.
+     Resolve both reactions up front so they can widen the gate below.  */
+  int p3100_null_reaction = IMPLICIT_UB_NONE;
+  int p3100_align_reaction = IMPLICIT_UB_NONE;
+  if (flag_contracts_p3100)
+    {
+      p3100_null_reaction = lang_hooks.resolve_implicit_ub_semantic
+	(current_function_decl, loc, "ub:expr.unary.dereference.nullptr");
+      p3100_align_reaction = lang_hooks.resolve_implicit_ub_semantic
+	(current_function_decl, loc, "ub:basic.align.object.alignment");
+    }
+  bool p3100_null = (p3100_null_reaction != IMPLICIT_UB_NONE);
+  bool p3100_align = (p3100_align_reaction != IMPLICIT_UB_NONE);
+
   if (!sanitize_flags_p (SANITIZE_ALIGNMENT | SANITIZE_NULL)
-      || current_function_decl == NULL_TREE)
+      && !p3100_null && !p3100_align)
     return NULL_TREE;
 
   tree type = TREE_TYPE (ptype);
@@ -915,7 +976,7 @@ ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
   bool instrument = false;
   unsigned int mina = 0;
 
-  if (sanitize_flags_p (SANITIZE_ALIGNMENT))
+  if (sanitize_flags_p (SANITIZE_ALIGNMENT) || p3100_align)
     {
       mina = min_align_of_type (type);
       if (mina <= 1)
@@ -933,7 +994,8 @@ ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
     }
   else
     {
-      if (sanitize_flags_p (SANITIZE_NULL) && TREE_CODE (op) == ADDR_EXPR)
+      if ((sanitize_flags_p (SANITIZE_NULL) || p3100_null)
+	  && TREE_CODE (op) == ADDR_EXPR)
 	{
 	  /* tree_single_nonzero_p will not return true for non-weak
 	     non-automatic decls with -fno-delete-null-pointer-checks,
@@ -947,7 +1009,7 @@ ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
 	  flag_delete_null_pointer_checks
 	    = save_flag_delete_null_pointer_checks;
 	}
-      else if (sanitize_flags_p (SANITIZE_NULL))
+      else if (sanitize_flags_p (SANITIZE_NULL) || p3100_null)
 	instrument = true;
       if (mina && mina > 1)
 	{
@@ -964,9 +1026,50 @@ ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
     ptype = build_pointer_type (TREE_TYPE (ptype));
   tree kind = build_int_cst (ptype, ckind);
   tree align = build_int_cst (pointer_sized_int_node, mina);
+  /* Operand 3 is the P3100 implicit-UB null reaction, operands 4/5 the null
+     contract handler entry point and its static data-block address;
+     operands 6/7/8 the same for alignment.  Carry the resolved reactions
+     and handlers, mirroring instrument_mem_ref -- the reaction has to
+     travel as an operand rather than be re-derived later, because by
+     expansion time cfun->decl may be an inlined-into function with a
+     different configuration.  */
+  tree reaction = build_int_cst (unsigned_type_node, p3100_null_reaction);
+  tree align_reaction
+    = build_int_cst (unsigned_type_node, p3100_align_reaction);
+  tree entryt = null_pointer_node;
+  tree data_addrt = null_pointer_node;
+  if (p3100_null_reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE
+      || p3100_null_reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE)
+    {
+      tree entry = NULL_TREE, data_addr = NULL_TREE;
+      if (lang_hooks.build_implicit_ub_handler
+	    (current_function_decl, loc, "ub:expr.unary.dereference.nullptr",
+	     p3100_null_reaction, &entry, &data_addr))
+	{
+	  entryt = build_fold_addr_expr (entry);
+	  data_addrt = data_addr;
+	}
+    }
+  tree align_entryt = null_pointer_node;
+  tree align_data_addrt = null_pointer_node;
+  if (p3100_align_reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE
+      || p3100_align_reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE)
+    {
+      tree entry = NULL_TREE, data_addr = NULL_TREE;
+      if (lang_hooks.build_implicit_ub_handler
+	    (current_function_decl, loc, "ub:basic.align.object.alignment",
+	     p3100_align_reaction, &entry, &data_addr))
+	{
+	  align_entryt = build_fold_addr_expr (entry);
+	  align_data_addrt = data_addr;
+	}
+    }
   tree call
     = build_call_expr_internal_loc (loc, IFN_UBSAN_NULL, void_type_node,
-				    3, op, kind, align);
+				    UBSAN_NULL_NUM_OPS, op, kind, align,
+				    reaction, entryt, data_addrt,
+				    align_reaction, align_entryt,
+				    align_data_addrt);
   TREE_SIDE_EFFECTS (call) = 1;
   return fold_build2 (COMPOUND_EXPR, TREE_TYPE (op), call, op);
 }

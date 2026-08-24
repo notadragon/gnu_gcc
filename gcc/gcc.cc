@@ -1205,7 +1205,7 @@ proper position among the other output files.  */
     %{fgnu-tm:%:include(libitm.spec)%(link_itm)}\
     " STACK_SPLIT_SPEC "\
     %{fprofile-arcs|fcondition-coverage|fpath-coverage|fprofile-generate*|coverage:-lgcov} " SANITIZER_SPEC " \
-    %{!nostdlib:%{!r:%{!nodefaultlibs:%(link_ssp) %(link_gcc_c_sequence)}}}\
+    %{!nostdlib:%{!r:%{!nodefaultlibs:%(link_ssp) %(link_gcc_c_sequence) %{fcontracts-p4299:-lcontracts}}}}\
     %{!nostdlib:%{!r:%{!nostartfiles:%E}}} %{T*}  \n%(post_link) }}}}}}"
 #endif
 

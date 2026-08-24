@@ -28,25 +28,7 @@ along with GCC; see the file COPYING3.  If not see
 #define GCC_CP_CONTRACT_H
 
 #include <cstdint>
-
-/* Contract assertion kind */
-/* Must match relevant enums in <contracts> header  */
-
-enum contract_assertion_kind : uint16_t {
-  CAK_INVALID = 0 ,
-  CAK_PRE = 1 ,
-  CAK_POST = 2 ,
-  CAK_ASSERT = 3,
-};
-
-/* Per P2900R14 + D3290R3 + extensions.  */
-enum contract_evaluation_semantic : uint16_t {
-  CES_INVALID = 0,
-  CES_IGNORE = 1,
-  CES_OBSERVE = 2,
-  CES_ENFORCE = 3,
-  CES_QUICK = 4,
-};
+#include "c-family/contracts-config.h"
 
 enum detection_mode : uint16_t {
   CDM_UNSPECIFIED = 0,
@@ -54,15 +36,70 @@ enum detection_mode : uint16_t {
   CDM_EVAL_EXCEPTION = 2
 };
 
-/* Contract evaluation_semantic */
-#define CONTRACT_EVALUATION_SEMANTIC(NODE) \
-  (TREE_OPERAND (CONTRACT_CHECK (NODE), 0))
-
-#define CONTRACT_ASSERTION_KIND(NODE) \
-  (TREE_OPERAND (CONTRACT_CHECK (NODE), 1))
-
 #define CONTRACT_CHECK(NODE) \
   (TREE_CHECK3 (NODE, ASSERTION_STMT, PRECONDITION_STMT, POSTCONDITION_STMT))
+
+/* Group 1 -- Structural (ops 0-6, immutable after parse).  */
+
+/* The assertion kind (CAK_PRE, CAK_POST, CAK_ASSERT).  */
+#define CONTRACT_ASSERTION_KIND(NODE) \
+  (TREE_OPERAND (CONTRACT_CHECK (NODE), 0))
+
+/* The parsed condition of the contract.  */
+#define CONTRACT_CONDITION(NODE) \
+  (TREE_OPERAND (CONTRACT_CHECK (NODE), 1))
+
+/* The raw comment of the contract.  */
+#define CONTRACT_COMMENT(NODE) \
+  (TREE_OPERAND (CONTRACT_CHECK (NODE), 2))
+
+/* A std::source_location, if provided.  */
+#define CONTRACT_STD_SOURCE_LOC(NODE) \
+  (TREE_OPERAND (CONTRACT_CHECK (NODE), 3))
+
+/* The user-defined diagnostic message (P3099), or NULL_TREE if none.  */
+#define CONTRACT_MESSAGE(NODE) \
+  (TREE_OPERAND (CONTRACT_CHECK (NODE), 4))
+
+/* The assertion-control label (P3400), or NULL_TREE if none.  */
+#define CONTRACT_LABEL(NODE) \
+  (TREE_OPERAND (CONTRACT_CHECK (NODE), 5))
+
+/* The requires-clause constraint (P4283), or NULL_TREE if none.  */
+#define CONTRACT_REQUIRES_CLAUSE(NODE) \
+  (TREE_OPERAND (CONTRACT_CHECK (NODE), 6))
+
+/* Group 2 -- Config resolution inputs (ops 7-8, eager, set at parse time).  */
+
+/* Bitmask of semantics allowed by the label's allowed_semantics facet
+   (uint16_t INTEGER_CST).  NULL_TREE means CES_ALL_ALLOWED.  */
+#define CONTRACT_ALLOWED_MASK(NODE) \
+  (TREE_OPERAND (CONTRACT_CHECK (NODE), 7))
+
+/* Group names from the label's group_names facet (TREE_LIST of
+   STRING_CSTs), populated lazily by fill_query_groups.
+   NULL_TREE = not yet extracted; error_mark_node = no groups.  */
+#define CONTRACT_GROUPS(NODE) \
+  (TREE_OPERAND (CONTRACT_CHECK (NODE), 8))
+
+/* Group 3 -- Evaluation semantics (ops 9-10, lazy, NULL_TREE=unresolved).  */
+
+/* The runtime callee-side evaluation semantic.  */
+#define CONTRACT_EVALUATION_SEMANTIC(NODE) \
+  (TREE_OPERAND (CONTRACT_CHECK (NODE), 9))
+
+/* The constexpr callee-side evaluation semantic.  */
+#define CONTRACT_CONSTEXPR_EVALUATION_SEMANTIC(NODE) \
+  (TREE_OPERAND (CONTRACT_CHECK (NODE), 10))
+
+/* The runtime dynamic-selector descriptor (P3595 output.dynamic), set
+   lazily by ensure_evaluation_semantic when !in_ce.  NULL_TREE means the
+   contract has no dynamic selection.  When present it is a TREE_LIST whose
+   TREE_PURPOSE is an IDENTIFIER_NODE (the selector name) and whose
+   TREE_VALUE is an INTEGER_CST packing
+   (dyn_linkage << 1 | dyn_provideweak).  */
+#define CONTRACT_DYNAMIC(NODE) \
+  (TREE_OPERAND (CONTRACT_CHECK (NODE), 11))
 
 /* True if NODE is any kind of contract.  */
 #define CONTRACT_P(NODE)			\
@@ -91,26 +128,22 @@ enum detection_mode : uint16_t {
 #define DECL_HAS_CONTRACTS_P(NODE) \
   (get_fn_contract_specifiers (NODE) != NULL_TREE)
 
-/* The parsed condition of the contract.  */
-#define CONTRACT_CONDITION(NODE) \
-  (TREE_OPERAND (CONTRACT_CHECK (NODE), 2))
-
 /* True iff the condition of the contract NODE is not yet parsed.  */
 #define CONTRACT_CONDITION_DEFERRED_P(NODE) \
   (TREE_CODE (CONTRACT_CONDITION (NODE)) == DEFERRED_PARSE)
 
-/* The raw comment of the contract.  */
-#define CONTRACT_COMMENT(NODE) \
-  (TREE_OPERAND (CONTRACT_CHECK (NODE), 3))
+/* Group 4 -- Postcondition-specific (ops 11-12, POSTCONDITION_STMT only).  */
 
-/* A std::source_location, if provided.  */
-#define CONTRACT_STD_SOURCE_LOC(NODE) \
-  (TREE_OPERAND (CONTRACT_CHECK (NODE), 4))
-
-/* The VAR_DECL of a postcondition result. For deferred contracts, this
+/* The VAR_DECL of a postcondition result.  For deferred contracts, this
    is an IDENTIFIER.  */
 #define POSTCONDITION_IDENTIFIER(NODE) \
-  (TREE_OPERAND (POSTCONDITION_STMT_CHECK (NODE), 5))
+  (TREE_OPERAND (POSTCONDITION_STMT_CHECK (NODE), 12))
+
+/* The postcondition captures -- a TREE_LIST of capture VAR_DECLs with
+   DECL_INITIAL set to the initializer expression, or NULL_TREE if the
+   postcondition has no captures (P3098).  */
+#define POSTCONDITION_CAPTURES(NODE) \
+  (TREE_OPERAND (POSTCONDITION_STMT_CHECK (NODE), 13))
 
 /* For a FUNCTION_DECL of a guarded function, this holds the function decl
    where pre contract checks are emitted.  */
@@ -148,10 +181,18 @@ enum contract_match_kind
 
 extern void init_contracts			(void);
 
-extern tree grok_contract			(tree, tree, tree, cp_expr, location_t);
+extern tree grok_contract			(tree, tree, cp_expr,
+						 location_t,
+						 tree = NULL_TREE,
+						 tree = NULL_TREE,
+						 tree = NULL_TREE);
 extern tree build_contract_specifiers		(vec<tree, va_gc> *);
 extern tree contract_specifiers_concat		(tree, tree);
+extern void resolve_contract_label		(tree, tree, location_t);
+extern void reresolve_contract_label_facets (tree, tree, location_t);
 extern tree finish_contract_condition		(cp_expr);
+extern tree finish_contract_message		(tree, tree, tree, location_t);
+extern bool maybe_define_contract_wrapper	(tree);
 extern void update_late_contract		(tree, tree, cp_expr);
 extern void check_redecl_contract		(tree, tree);
 extern tree invalidate_contract			(tree);
@@ -169,6 +210,8 @@ extern void update_contract_arguments		(tree, tree);
 extern tree make_postcondition_variable		(cp_expr);
 extern tree make_postcondition_variable		(cp_expr, tree);
 extern void check_param_in_postcondition	(tree, location_t);
+extern void check_selected_pack_index_params	(tree, location_t);
+extern bool defer_postcondition_pack_index_check;
 extern void check_postconditions_in_redecl	(tree, tree);
 extern void maybe_update_postconditions		(tree);
 extern void rebuild_postconditions		(tree);
@@ -185,11 +228,13 @@ extern void maybe_apply_function_contracts	(tree);
 extern void finish_function_outlined_contracts	(tree);
 extern void set_contract_functions		(tree, tree, tree);
 
-extern tree maybe_contract_wrap_call		(tree, tree);
+extern tree maybe_contract_wrap_call		(tree, tree,
+						 bool = false);
 extern bool emit_contract_wrapper_func		(bool);
 extern void maybe_emit_violation_handler_wrappers (void);
 
 extern tree build_contract_check		(tree);
+extern void check_handle_contract_violation	(tree);
 
 /* Test if EXP is a contract const wrapper node.  */
 
@@ -214,8 +259,70 @@ strip_contract_const_wrapper (tree exp)
     return exp;
 }
 
-/* TODO : decide if we should push the tests into contracts.cc  */
 extern contract_evaluation_semantic get_evaluation_semantic (const_tree);
+extern contract_evaluation_semantic get_constexpr_evaluation_semantic
+  (const_tree);
+extern contract_evaluation_semantic ensure_evaluation_semantic
+  (tree, tree, bool);
+/* P3100: resolve the evaluation semantic for a synthesized implicit contract
+   assertion guarding core-language UB (UB_ID names the P3100 identifier /
+   config group).  ALLOWED is the base set of C++26 semantics this kind of
+   check can emit (a subset of CES_ALL_ALLOWED); "assume" is always added, and
+   the P4298 noexcept variants are added under -fcontracts-p4298.  A configured
+   semantic outside the resulting set is clamped via the resolution fallback
+   order.  */
+extern contract_evaluation_semantic resolve_implicit_contract_semantic
+  (tree, location_t, const char *, uint16_t = CES_ALL_ALLOWED);
+/* P3100: build the GENERIC reaction to append at a value-returning function's
+   fall-off point for the resolved semantic SEM (NULL_TREE for assume /
+   none).  */
+extern tree build_implicit_flow_off_check
+  (tree, location_t, contract_evaluation_semantic);
+/* P3100: reaction for control flowing off the end of a coroutine with no
+   return_void ({stmt.return.coroutine.flow.off}); NULL_TREE for
+   assume/ignore.  */
+extern tree build_implicit_coroutine_flow_off_check
+  (tree, location_t, contract_evaluation_semantic);
+/* P3100: build `if (!cond) <reaction>` for a configurable [[assume (cond)]]
+   whose site resolves to a checking semantic (see build_assume_call).  */
+extern tree cp_build_assume_check
+  (location_t, tree, contract_evaluation_semantic);
+/* P3100: build the guarded replacement for an integer division/remainder
+   DIV_RESULT (dividend OP0, divisor OP1) for the resolved semantic SEM (not
+   assume): on OP1 == 0 produce the reaction value without executing the
+   trapping division.  */
+extern tree build_implicit_divide_check
+  (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
+/* P3100: build the guarded replacement for an integer shift SHIFT_RESULT (OP0
+   shifted by OP1) whose shift amount may be out of range, for semantic SEM.  */
+extern tree build_implicit_shift_check
+  (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
+/* P3100: build the guarded replacement for a signed division/remainder
+   DIV_RESULT whose quotient (OP0 / OP1) is not representable (OP0 == MIN,
+   OP1 == -1), for semantic SEM.  */
+extern tree build_implicit_divide_overflow_check
+  (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
+/* P3100: build the guarded replacement for a floating-point-to-integer
+   conversion CONVERTED (of the single-evaluation floating value EXPR) whose
+   truncated value may not be representable in the destination integer type, for
+   semantic SEM ({conv.fpint}).  */
+extern tree build_implicit_float_cast_check
+  (tree, location_t, contract_evaluation_semantic, tree, tree);
+/* P3100: build the guarded replacement for an integer/enumeration ->
+   enumeration conversion CONVERTED (of the single-evaluation source value EXPR)
+   whose value may be outside the target enumeration ENUMTYPE's value range, for
+   a non-fixed-underlying-type enum, for semantic SEM
+   ({expr.static.cast.enum.outside.range}).  */
+extern tree build_implicit_enum_cast_check
+  (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
+/* P3100: for a pure virtual FN_ORIGINAL, return the FUNCTION_DECL of the
+   __cxa_pure_virtual terminus variant selected by the implicit contract
+   configuration for ub:class.abstract.pure.virtual (resolved at the location of
+   the class that declares FN_ORIGINAL, where its vtable is emitted), or
+   NULL_TREE to use the legacy __cxa_pure_virtual.  */
+extern tree build_implicit_pure_virtual_terminus (tree);
+extern bool contract_constexpr_ignored_p (const_tree);
+extern bool contract_constexpr_terminating_p (const_tree);
 
 /* Will this contract be ignored.  */
 
@@ -239,7 +346,8 @@ inline bool
 contract_terminating_p (const_tree contract)
 {
   return (get_evaluation_semantic (contract) == CES_ENFORCE
-	  || get_evaluation_semantic (contract) == CES_QUICK);
+	  || get_evaluation_semantic (contract) == CES_QUICK
+	  || get_evaluation_semantic (contract) == CES_NOEXCEPT_ENFORCE);
 }
 
 #endif /* ! GCC_CP_CONTRACT_H */

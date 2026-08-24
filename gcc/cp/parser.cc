@@ -2731,6 +2731,8 @@ static bool cp_parser_using_declaration
   (cp_parser *, bool);
 static void cp_parser_using_directive
   (cp_parser *);
+static void cp_parser_contract_control_using_directive
+  (cp_parser *);
 static void cp_parser_using_enum
   (cp_parser *);
 static tree cp_parser_alias_declaration
@@ -3002,6 +3004,12 @@ static tree cp_parser_yield_expression
 
 /* Contracts */
 
+static tree cp_parser_diagnostic_message
+  (cp_parser *parser, bool *non_string_p = nullptr);
+static tree cp_parser_contract_message
+  (cp_parser *parser);
+static cp_expr cp_parser_contract_result_name
+  (cp_parser *parser, bool postcondition_p);
 static tree cp_parser_contract_assert
   (cp_parser *parser, cp_token *token);
 
@@ -3156,8 +3164,17 @@ static void cp_parser_pre_parsed_nested_name_specifier
   (cp_parser *);
 static bool cp_parser_cache_group
   (cp_parser *, enum cpp_ttype, unsigned);
+/* What kind of token range cp_parser_cache_defarg is collecting.  The three
+   modes share the depth-tracking + Core-issue-325 (`<' might start a
+   template-argument-list) disambiguation loop and differ only in how a
+   depth-0 comma is resolved.  */
+enum cp_defarg_cache_mode {
+  cp_defarg_cache_defarg,   /* A default argument; a parameter list follows.  */
+  cp_defarg_cache_nsdmi,    /* An NSDMI; a declarator list follows.  */
+  cp_defarg_cache_capture   /* A postcondition init-capture; a capture follows.  */
+};
 static tree cp_parser_cache_defarg
-  (cp_parser *parser, bool nsdmi);
+  (cp_parser *parser, cp_defarg_cache_mode mode);
 static void cp_parser_parse_tentatively
   (cp_parser *);
 static void cp_parser_commit_to_tentative_parse
@@ -8540,6 +8557,22 @@ cp_parser_postfix_expression (cp_parser *parser, bool address_p, bool cast_p,
       }
       break;
 
+    case RID_CONTRACT_CONTROL:
+      {
+	cp_lexer_consume_token (parser->lexer);
+	matching_parens parens;
+	parens.require_open (parser);
+
+	auto aco_override
+	  = make_temp_override (in_assertion_control_expression_p, true);
+
+	postfix_expression
+	  = cp_parser_constant_expression (parser, NIC_NONE, NULL);
+
+	parens.require_close (parser);
+	break;
+      }
+
     case RID_TYPEID:
       {
 	tree type;
@@ -12823,6 +12856,20 @@ cp_parser_lambda_expression (cp_parser* parser,
 
   LAMBDA_EXPR_LOCATION (lambda_expr) = token->location;
   LAMBDA_EXPR_CONSTEVAL_BLOCK_P (lambda_expr) = consteval_block_p;
+
+  /* Remember whether this lambda lexically appears within a contract
+     predicate: either the introducer is being parsed directly in a
+     contract-condition scope, or it is nested inside a lambda that is
+     itself in a contract predicate.  This is used later to const-qualify
+     by-reference captures of entities declared outside the predicate.  */
+  if (flag_contracts)
+    {
+      tree enclosing = current_lambda_expr ();
+      if (processing_contract_condition
+	  || (enclosing
+	      && LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (enclosing)))
+	LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (lambda_expr) = true;
+    }
 
   if (cxx_dialect >= cxx20)
     /* C++20 allows lambdas in unevaluated context.  */;
@@ -17955,6 +18002,8 @@ cp_parser_block_declaration (cp_parser *parser,
       token2 = cp_lexer_peek_nth_token (parser->lexer, 2);
       if (token2->keyword == RID_NAMESPACE)
 	cp_parser_using_directive (parser);
+      else if (token2->keyword == RID_CONTRACT_CONTROL)
+	cp_parser_contract_control_using_directive (parser);
       else if (token2->keyword == RID_ENUM)
 	cp_parser_using_enum (parser);
       /* If the second token after 'using' is '=', then we have an
@@ -19338,36 +19387,14 @@ cp_parser_static_assert (cp_parser *parser, bool member_p)
       /* Parse the separating `,'.  */
       cp_parser_require (parser, CPP_COMMA, RT_COMMA);
 
-      /* Parse the message expression.  */
-      bool string_lit = true;
-      for (unsigned int i = 1; ; ++i)
-	{
-	  cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, i);
-	  if (cp_parser_is_pure_string_literal (tok))
-	    continue;
-	  else if (tok->type == CPP_CLOSE_PAREN)
-	    break;
-	  string_lit = false;
-	  break;
-	}
-      if (!string_lit)
-	{
-	  location_t loc = cp_lexer_peek_token (parser->lexer)->location;
-	  if (cxx_dialect < cxx26)
-	    pedwarn (loc, OPT_Wc__26_extensions,
-		     "%<static_assert%> with non-string message only "
-		     "available with %<-std=c++2c%> or %<-std=gnu++2c%>");
-
-	  message = cp_parser_conditional_expression (parser);
-	  if (TREE_CODE (message) == STRING_CST)
-	    message = build1_loc (loc, PAREN_EXPR, TREE_TYPE (message),
-				  message);
-	}
-      else if (cxx_dialect >= cxx26)
-	message = cp_parser_unevaluated_string_literal (parser);
-      else
-	message = cp_parser_string_literal (parser, /*translate=*/false,
-					    /*wide_ok=*/true);
+      /* Parse the diagnostic-message.  */
+      bool non_string = false;
+      location_t msg_loc = cp_lexer_peek_token (parser->lexer)->location;
+      message = cp_parser_diagnostic_message (parser, &non_string);
+      if (non_string && cxx_dialect < cxx26)
+	pedwarn (msg_loc, OPT_Wc__26_extensions,
+		 "%<static_assert%> with non-string message only "
+		 "available with %<-std=c++2c%> or %<-std=gnu++2c%>");
 
       /* A `)' completes the static assertion.  */
       if (!parens.require_close (parser))
@@ -25141,6 +25168,42 @@ cp_parser_using_directive (cp_parser* parser)
   cp_parser_require (parser, CPP_SEMICOLON, RT_SEMICOLON);
 }
 
+/* Parse a contract-control using directive:
+     using contract_control namespace_opt nested-name-specifier_opt
+       namespace-name ;
+   Names from the specified namespace become visible only within
+   assertion-control expressions in the enclosing scope.  */
+
+static void
+cp_parser_contract_control_using_directive (cp_parser* parser)
+{
+  /* Consume `using'.  */
+  cp_parser_require_keyword (parser, RID_USING, RT_USING);
+  /* Consume `contract_control'.  */
+  cp_lexer_consume_token (parser->lexer);
+  /* Optionally consume `namespace'.  */
+  if (cp_lexer_next_token_is_keyword (parser->lexer, RID_NAMESPACE))
+    cp_lexer_consume_token (parser->lexer);
+
+  tree namespace_decl;
+  /* Look for the optional `::' operator.  */
+  cp_parser_global_scope_opt (parser, /*current_scope_valid_p=*/false);
+  /* And the optional nested-name-specifier.  */
+  cp_parser_nested_name_specifier_opt (parser,
+				       /*typename_keyword_p=*/false,
+				       /*check_dependency_p=*/true,
+				       /*type_p=*/false,
+				       /*is_declaration=*/true);
+  /* Get the namespace being used.  */
+  namespace_decl = cp_parser_namespace_name (parser);
+
+  if (namespace_decl && namespace_decl != error_mark_node)
+    finish_contract_control_using_directive (namespace_decl);
+
+  /* Look for the final `;'.  */
+  cp_parser_require (parser, CPP_SEMICOLON, RT_SEMICOLON);
+}
+
 /* Parse a string literal or constant expression yielding a string.
    The constant expression uses extra parens to avoid ambiguity with "x" (expr).
 
@@ -27934,19 +27997,29 @@ cp_parser_type_id_1 (cp_parser *parser, cp_parser_flags flags,
   if (type_specifier_seq.type == error_mark_node)
     return error_mark_node;
 
-  /* There might or might not be an abstract declarator.  */
-  cp_parser_parse_tentatively (parser);
-  /* Look for the declarator.  */
-  abstract_declarator
-    = cp_parser_declarator (parser, CP_PARSER_DECLARATOR_ABSTRACT,
-			    CP_PARSER_FLAGS_NONE, NULL,
-			    /*parenthesized_p=*/NULL,
-			    /*member_p=*/false,
-			    /*friend_p=*/false,
-			    /*static_p=*/false);
-  /* Check to see if there really was a declarator.  */
-  if (!cp_parser_parse_definitely (parser))
+  /* There might or might not be an abstract declarator.  In a trailing return
+     type, a function contract specifier (pre/post, P3400) can follow the type;
+     a labelled contract such as post<label>(...) otherwise looks like a
+     template-id and is consumed here as an abstract-declarator, dropping the
+     contract.  So do not attempt an abstract-declarator when a contract
+     introducer follows.  */
+  if (is_trailing_return && cp_maybe_function_contract_specifier (parser))
     abstract_declarator = nullptr;
+  else
+    {
+      cp_parser_parse_tentatively (parser);
+      /* Look for the declarator.  */
+      abstract_declarator
+	= cp_parser_declarator (parser, CP_PARSER_DECLARATOR_ABSTRACT,
+				CP_PARSER_FLAGS_NONE, NULL,
+				/*parenthesized_p=*/NULL,
+				/*member_p=*/false,
+				/*friend_p=*/false,
+				/*static_p=*/false);
+      /* Check to see if there really was a declarator.  */
+      if (!cp_parser_parse_definitely (parser))
+	abstract_declarator = nullptr;
+    }
 
   /* If we found * or & and similar after the type-specifier, it's not
      a type alias.  */
@@ -28828,7 +28901,7 @@ cp_parser_parameter_declaration (cp_parser *parser,
       if (!template_parm_p && at_class_scope_p ()
 	  && TYPE_BEING_DEFINED (current_class_type)
 	  && !LAMBDA_TYPE_P (current_class_type))
-	default_argument = cp_parser_cache_defarg (parser, /*nsdmi=*/false);
+	default_argument = cp_parser_cache_defarg (parser, cp_defarg_cache_defarg);
 
       /* A constrained-type-specifier may declare a type
 	 template-parameter.  */
@@ -33817,11 +33890,112 @@ cp_parser_late_contract_condition (cp_parser *parser, tree fn, tree contract)
      it const when processing the contract condition.  */
   current_class_ref = view_as_const (current_class_ref);
 
-  /* Parse the condition, ensuring that parameters or the return variable
-     aren't flagged for use outside the body of a function.  */
   begin_scope (sk_contract, fn);
-  bool old_pc = processing_postcondition;
-  processing_postcondition = POSTCONDITION_P (contract);
+  bool old_pc = processing_postcondition_predicate;
+
+  /* Parse deferred postcondition captures (P3098) inside the contract scope
+     BEFORE enabling processing_postcondition_predicate -- capture initializers
+     must be able to reference non-const value parameters.  */
+  tree captures = NULL_TREE;
+  if (TREE_CODE (contract) == POSTCONDITION_STMT
+      && POSTCONDITION_CAPTURES (contract)
+      && TREE_CODE (POSTCONDITION_CAPTURES (contract)) == TREE_LIST)
+    {
+      tree cap_info_list = POSTCONDITION_CAPTURES (contract);
+
+      /* Check if this is deferred capture data (TREE_VALUE is an
+	 IDENTIFIER_NODE) vs already-parsed captures (TREE_VALUE is
+	 a VAR_DECL).  */
+      tree first_val = TREE_VALUE (cap_info_list);
+      if (TREE_CODE (first_val) == IDENTIFIER_NODE)
+	{
+	  /* Deferred captures: re-parse initializers.  */
+	  for (tree info = cap_info_list; info; info = TREE_CHAIN (info))
+	    {
+	      tree name = TREE_VALUE (info);
+	      tree purpose = TREE_PURPOSE (info);
+	      bool is_pack = TREE_LANG_FLAG_0 (info);
+	      tree init_expr;
+
+	      if (!purpose)
+		{
+		  /* Plain parameter capture -- look up the param by name.  */
+		  tree decl = cp_parser_lookup_name_simple (parser, name,
+							   input_location);
+		  if (decl && decl != error_mark_node
+		      && TREE_CODE (decl) == PARM_DECL)
+		    init_expr = decl;
+		  else
+		    continue;
+		}
+	      else
+		{
+		  /* Init-capture: purpose holds token_cache pointer.  */
+		  cp_token_cache *cache
+		    = (cp_token_cache *)(intptr_t) tree_to_uhwi (purpose);
+		  cp_parser_push_lexer_for_tokens (parser, cache);
+		  init_expr = cp_parser_assignment_expression (parser);
+		  cp_parser_pop_lexer (parser);
+		}
+
+	      /* P3098 Section 4.4.1: Captures are NOT const-ified.
+		 Strip top-level const as in the immediate parsing path.
+		 This exemption may change if the design evolves.  */
+	      tree cap_type = unlowered_expr_type (init_expr);
+	      if (cap_type == error_mark_node)
+		continue;
+	      if (!cap_type)
+		/* The initializer is type-dependent with no deducible type yet
+		   (e.g. a member access on a dependent object, where
+		   unlowered_expr_type is null).  Defer via decltype so the
+		   capture carries a dependent type that tsubst resolves at
+		   instantiation; the const-ification exemption is reapplied
+		   there.  Mirrors the immediate parsing path in
+		   cp_parser_function_contract_specifier.  */
+		cap_type = finish_decltype_type (init_expr, /*id_or_member=*/true,
+						 tf_warning_or_error);
+	      else
+		{
+		  if (is_pack && PACK_EXPANSION_P (cap_type))
+		    cap_type = PACK_EXPANSION_PATTERN (cap_type);
+		  cap_type = cp_build_qualified_type (cap_type,
+						     cp_type_quals (cap_type)
+						     & ~TYPE_QUAL_CONST);
+		}
+
+	      /* Pack captures: wrap init and type in pack expansion.  */
+	      if (is_pack)
+		{
+		  init_expr = make_pack_expansion (init_expr);
+		  if (init_expr == error_mark_node)
+		    continue;
+		  cap_type = make_pack_expansion (cap_type);
+		  if (purpose)
+		    {
+		      PACK_EXPANSION_PARAMETER_PACKS (cap_type)
+			= uses_parameter_packs (
+			    PACK_EXPANSION_PATTERN (init_expr));
+		      PACK_EXPANSION_AUTO_P (cap_type) = true;
+		    }
+		}
+
+	      tree var = build_lang_decl (VAR_DECL, name, cap_type);
+	      DECL_ARTIFICIAL (var) = 1;
+	      DECL_INITIAL (var) = init_expr;
+	      captures = tree_cons (NULL_TREE, var, captures);
+	    }
+	  captures = nreverse (captures);
+	  POSTCONDITION_CAPTURES (contract) = captures;
+
+	  /* Push captures into scope for the predicate.  */
+	  for (tree cap = captures; cap; cap = TREE_CHAIN (cap))
+	    pushdecl (TREE_VALUE (cap));
+	}
+    }
+
+  /* NOW enable postcondition predicate processing.  */
+  processing_postcondition_predicate = POSTCONDITION_P (contract);
+
   /* Build a fake variable for the result identifier.  */
   tree result = NULL_TREE;
   const bool undeduced_result_type_p
@@ -33834,13 +34008,26 @@ cp_parser_late_contract_condition (cp_parser *parser, tree fn, tree contract)
 	++processing_template_decl;
     }
   cp_expr parsed_condition = cp_parser_conditional_expression (parser);
+
+  tree message = cp_parser_contract_message (parser);
+
   /* Commit to changes.  */
   update_late_contract (contract, result, parsed_condition);
   if (undeduced_result_type_p)
     --processing_template_decl;
+  /* Now that the condition is no longer deferred -- and we've left the
+     result-variable's template-processing scope -- finalize the diagnostic
+     message the same way grok_contract does for non-deferred contracts, so a
+     late-parsed (member-function) postcondition's message is a bare STRING_CST
+     (or NULL) rather than a raw location-wrapped / cexpr expression.  The
+     message is not result-dependent, so extracting it here (with
+     processing_template_decl restored) lets a cexpr_str message be
+     constant-evaluated.  */
+  finish_contract_message (contract, message, parsed_condition,
+			   EXPR_LOCATION (contract));
 
   /* Leave our temporary scope for the postcondition result.  */
-  processing_postcondition = old_pc;
+  processing_postcondition_predicate = old_pc;
   gcc_checking_assert (scope_chain && scope_chain->bindings
 		       && scope_chain->bindings->kind == sk_contract);
   pop_bindings_and_leave_scope ();
@@ -33883,6 +34070,223 @@ cp_parser_late_contracts (cp_parser *parser, tree fndecl)
   update_fn_contract_specifiers (fndecl, contracts);
 }
 
+/* Parse a diagnostic-message: either an unevaluated-string or a
+   constant-expression with .size() and .data() members.
+   Used by both static_assert and contract assertions (P3099).
+
+   The caller has already consumed the comma before the message.
+   The closing paren is NOT consumed.
+
+   If NON_STRING_P is non-null, *NON_STRING_P is set to true when the
+   message was parsed as a non-string-literal expression (the caller may
+   want to issue a pedwarn for pre-C++26 modes).  */
+
+static tree
+cp_parser_diagnostic_message (cp_parser *parser, bool *non_string_p)
+{
+  if (non_string_p)
+    *non_string_p = false;
+
+  /* Look ahead to determine if the message is a pure string literal.  */
+  bool string_lit = true;
+  for (unsigned int i = 1; ; ++i)
+    {
+      cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, i);
+      if (cp_parser_is_pure_string_literal (tok))
+	continue;
+      else if (tok->type == CPP_CLOSE_PAREN)
+	break;
+      string_lit = false;
+      break;
+    }
+
+  if (!string_lit)
+    {
+      if (non_string_p)
+	*non_string_p = true;
+      location_t loc = cp_lexer_peek_token (parser->lexer)->location;
+      tree message = cp_parser_conditional_expression (parser);
+      if (TREE_CODE (message) == STRING_CST)
+	message = build1_loc (loc, PAREN_EXPR, TREE_TYPE (message), message);
+      return message;
+    }
+  else if (cxx_dialect >= cxx26)
+    return cp_parser_unevaluated_string_literal (parser);
+  else
+    return cp_parser_string_literal (parser, /*translate=*/false,
+				     /*wide_ok=*/true);
+}
+
+/* Parse an optional diagnostic-message for a contract assertion (P3099).
+   Returns the parsed message tree, or NULL_TREE if no comma follows or
+   -fcontracts-p3099 is not active.  */
+
+static tree
+cp_parser_contract_message (cp_parser *parser)
+{
+  if (!flag_contracts_p3099
+      || !cp_lexer_next_token_is (parser->lexer, CPP_COMMA))
+    return NULL_TREE;
+
+  cp_lexer_consume_token (parser->lexer);
+  return cp_parser_diagnostic_message (parser);
+}
+
+/* Parse an optional assertion-control-specifier: < constant-expression >
+   Returns the parsed expression tree or NULL_TREE if no label present.
+   The < must be the next token; > is handled eagerly (as for template args).
+   Requires -fcontracts-p3400; without it, diagnoses and returns NULL_TREE.  */
+
+static tree
+cp_parser_assertion_control_specifier (cp_parser *parser)
+{
+  if (!cp_lexer_next_token_is (parser->lexer, CPP_LESS))
+    return NULL_TREE;
+
+  if (!flag_contracts_p3400)
+    {
+      error_at (cp_lexer_peek_token (parser->lexer)->location,
+		"assertion-control labels require %<-fcontracts-p3400%>");
+      /* Skip over the <...> to recover.  */
+      unsigned depth = 1;
+      cp_lexer_consume_token (parser->lexer);
+      while (depth > 0)
+	{
+	  cp_token *tok = cp_lexer_peek_token (parser->lexer);
+	  if (tok->type == CPP_GREATER)
+	    --depth;
+	  else if (tok->type == CPP_LESS)
+	    ++depth;
+	  else if (tok->type == CPP_RSHIFT)
+	    depth = depth >= 2 ? depth - 2 : 0;
+	  else if (tok->type == CPP_EOF)
+	    break;
+	  cp_lexer_consume_token (parser->lexer);
+	}
+      return NULL_TREE;
+    }
+
+  /* Consume the <.  */
+  cp_lexer_consume_token (parser->lexer);
+
+  /* Treat > eagerly, as in template argument lists.  */
+  bool saved_greater_than_is_operator_p
+    = parser->greater_than_is_operator_p;
+  parser->greater_than_is_operator_p = false;
+
+  /* Enable contract-control name lookup so that names from
+     using contract_control namespace directives are visible.  */
+  auto aco_override
+    = make_temp_override (in_assertion_control_expression_p, true);
+
+  /* Parse the constant-expression.  */
+  cp_expr label_expr
+    = cp_parser_constant_expression (parser, NIC_NONE, NULL);
+
+  parser->greater_than_is_operator_p = saved_greater_than_is_operator_p;
+
+  /* Handle >>, which is two > tokens in this context.  */
+  if (cp_lexer_next_token_is (parser->lexer, CPP_RSHIFT))
+    {
+      cp_token *token = cp_lexer_peek_token (parser->lexer);
+      token->type = CPP_GREATER;
+    }
+  else if (!cp_parser_require (parser, CPP_GREATER, RT_GREATER))
+    return error_mark_node;
+  else
+    { /* '>' consumed by require.  */ }
+
+  if (label_expr == error_mark_node)
+    return error_mark_node;
+
+  return label_expr;
+}
+
+/* Parse an optional requires-clause on a contract assertion (P4283).
+
+   If the next token is `requires', parse the constraint expression and
+   return it.  Otherwise return NULL_TREE.  Diagnoses errors if the flag
+   is not enabled or the function is not templated.  */
+
+static tree
+cp_parser_contract_requires_clause (cp_parser *parser)
+{
+  if (cp_lexer_peek_token (parser->lexer)->keyword != RID_REQUIRES)
+    return NULL_TREE;
+
+  location_t loc = cp_lexer_peek_token (parser->lexer)->location;
+
+  if (!flag_contracts_p4283)
+    {
+      error_at (loc,
+		"requires clause on contract assertions requires "
+		"%<-fcontracts-p4283%>");
+      /* Skip requires(...) to recover.  */
+      cp_lexer_consume_token (parser->lexer);
+      if (cp_lexer_next_token_is (parser->lexer, CPP_OPEN_PAREN))
+	cp_parser_skip_to_closing_parenthesis (parser, true, false, true);
+      return error_mark_node;
+    }
+
+  if (!processing_template_decl)
+    {
+      error_at (loc,
+		"requires clause on contract assertion only allowed on "
+		"templated functions");
+      cp_lexer_consume_token (parser->lexer);
+      if (cp_lexer_next_token_is (parser->lexer, CPP_OPEN_PAREN))
+	cp_parser_skip_to_closing_parenthesis (parser, true, false, true);
+      return error_mark_node;
+    }
+
+  /* Parse the requires-clause (including consuming 'requires').  Pass
+     lambda_p=true so that a '(' following the constraint (which is the
+     contract predicate) is not mistaken for a postfix function-call.  */
+  return cp_parser_requires_clause_opt (parser, /*lambda_p=*/true);
+}
+
+/* Parse an optional result-name-introducer
+
+     result-name-introducer:
+       identifier ':'
+
+   immediately inside a contract's condition parentheses.  Always parsed
+   -- even when POSTCONDITION_P is false -- so that a result name
+   misplaced on a precondition or contract_assert (which cannot declare
+   one) gets a targeted diagnostic naming the real problem, instead of
+   having its identifier fall through and be parsed as the start of the
+   predicate.  Doing so turns what was a "found ':' in
+   nested-name-specifier" cascade into one accurate error.
+
+   Returns the parsed identifier, or NULL_TREE if none is present or one
+   was present and rejected.
+
+   Note the grammar in the working paper writes attributed-identifier
+   here; an attribute on the result name is not accepted, matching the
+   pre-existing behaviour of the code this replaced.  */
+
+static cp_expr
+cp_parser_contract_result_name (cp_parser *parser, bool postcondition_p)
+{
+  if (!cp_lexer_next_token_is (parser->lexer, CPP_NAME)
+      || cp_lexer_peek_nth_token (parser->lexer, 2)->type != CPP_COLON)
+    return NULL_TREE;
+
+  /* The CPP_NAME above guarantees this succeeds.  */
+  cp_expr identifier = cp_parser_identifier (parser);
+  cp_parser_require (parser, CPP_COLON, RT_COLON);
+
+  if (!postcondition_p)
+    {
+      error_at (identifier.get_location (),
+		"result name %qE not allowed outside of post condition "
+		"specifier", identifier.get_value ());
+      return NULL_TREE;
+    }
+
+  return identifier;
+}
+
 static tree
 cp_parser_contract_assert (cp_parser *parser, cp_token *token)
 {
@@ -33899,6 +34303,21 @@ cp_parser_contract_assert (cp_parser *parser, cp_token *token)
   token = cp_lexer_consume_token (parser->lexer);
   location_t loc = token->location;
 
+  /* Parse optional assertion-control-specifier: < constant-expression >  */
+  tree label = cp_parser_assertion_control_specifier (parser);
+
+  /* Parse optional requires-clause (P4283).  */
+  tree requires_clause = cp_parser_contract_requires_clause (parser);
+
+  /* If the requires-clause was ill-formed, skip to end of statement to
+     avoid cascading errors from the missing predicate.  */
+  if (requires_clause == error_mark_node)
+    {
+      cp_parser_skip_to_end_of_statement (parser);
+      cp_parser_consume_semicolon_at_end_of_statement (parser);
+      return error_mark_node;
+    }
+
   location_t attrs_loc = cp_lexer_peek_token (parser->lexer)->location;
   tree std_attrs = cp_parser_std_attribute_spec_seq (parser);
   if (std_attrs)
@@ -33909,8 +34328,35 @@ cp_parser_contract_assert (cp_parser *parser, cp_token *token)
       std_attrs = NULL_TREE;
     }
 
+  /* Reject captures on contract_assert (P3098: captures only on post).  */
+  if (cp_lexer_next_token_is (parser->lexer, CPP_OPEN_SQUARE))
+    {
+      error_at (cp_lexer_peek_token (parser->lexer)->location,
+		"postcondition captures only allowed on %<post%> assertions");
+      /* Skip the entire [...] to recover.  */
+      cp_lexer_consume_token (parser->lexer);
+      unsigned depth = 1;
+      while (depth > 0)
+	{
+	  cp_token *t = cp_lexer_consume_token (parser->lexer);
+	  if (t->type == CPP_OPEN_SQUARE)
+	    ++depth;
+	  else if (t->type == CPP_CLOSE_SQUARE)
+	    --depth;
+	  else if (t->type == CPP_EOF)
+	    break;
+	}
+    }
+
   matching_parens parens;
   parens.require_open (parser);
+
+  /* A result name is only meaningful on a postcondition; diagnose one here
+     rather than letting it fall through as the start of the predicate.
+     Recovery is to carry on and parse the predicate: the introducer has
+     been consumed, so the rest of the assertion is still intelligible.  */
+  cp_parser_contract_result_name (parser, false);
+
   /* Enable location wrappers when parsing contracts.  */
   auto suppression = make_temp_override (suppress_location_wrappers, 0);
 
@@ -33921,15 +34367,19 @@ cp_parser_contract_assert (cp_parser *parser, cp_token *token)
 
   /* Parse the condition.  */
   begin_scope (sk_contract, current_function_decl);
-  bool old_pc = processing_postcondition;
-  processing_postcondition = false;
+  bool old_pc = processing_postcondition_predicate;
+  processing_postcondition_predicate = false;
   cp_expr condition = cp_parser_conditional_expression (parser);
+
+  tree message = cp_parser_contract_message (parser);
+
   gcc_checking_assert (scope_chain && scope_chain->bindings
 		       && scope_chain->bindings->kind == sk_contract);
   /* Build the contract.  */
-  tree contract = grok_contract (cont_assert, /*mode*/NULL_TREE,
-			    /*result*/NULL_TREE, condition, loc);
-  processing_postcondition = old_pc;
+  tree contract = grok_contract (cont_assert,
+			    /*result*/NULL_TREE, condition, loc, message,
+			    label, requires_clause);
+  processing_postcondition_predicate = old_pc;
   pop_bindings_and_leave_scope ();
 
   /* Revert (any) constification of the current class object.  */
@@ -33972,6 +34422,39 @@ cp_function_contract_specifier_intro (cp_parser *parser)
 /* Look ahead to see if this might introduce a function contract specifier.
    If not return NULL_TREE, if successful return the name (pre or post).  */
 
+/* Starting at token N, which must be an opening (, [ or {, return the
+   index just past the matching close, or 0 if there is none before EOF.
+   Used by cp_maybe_function_contract_specifier so that a bracketed group
+   can be stepped over atomically.  */
+
+static size_t
+cp_skip_balanced_group (cp_parser *parser, size_t n)
+{
+  cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, n);
+  enum cpp_ttype open = tok->type, close;
+
+  switch (open)
+    {
+    case CPP_OPEN_PAREN:   close = CPP_CLOSE_PAREN;  break;
+    case CPP_OPEN_SQUARE:  close = CPP_CLOSE_SQUARE; break;
+    case CPP_OPEN_BRACE:   close = CPP_CLOSE_BRACE;  break;
+    default:               return n;
+    }
+
+  unsigned depth = 0;
+  for (;;)
+    {
+      tok = cp_lexer_peek_nth_token (parser->lexer, n);
+      if (tok->type == CPP_EOF)
+	return 0;
+      if (tok->type == open)
+	++depth;
+      else if (tok->type == close && --depth == 0)
+	return n + 1;
+      ++n;
+    }
+}
+
 static tree
 cp_maybe_function_contract_specifier (cp_parser *parser)
 {
@@ -33980,8 +34463,113 @@ cp_maybe_function_contract_specifier (cp_parser *parser)
     return NULL_TREE;
 
   size_t n = 2;
+  /* Skip optional assertion-control-specifier: < constant-expression >
+
+     The constant-expression may itself contain <, > or ; inside a
+     bracketed group -- a relational operator in a parenthesized
+     subexpression, say, or a statement in a lambda body.  Step over any
+     such group atomically so that only the angle brackets that actually
+     delimit the specifier are counted.  */
+  if (cp_lexer_nth_token_is (parser->lexer, n, CPP_LESS))
+    {
+      unsigned depth = 1;
+      ++n;
+      while (depth > 0)
+	{
+	  cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, n);
+	  if (tok->type == CPP_OPEN_PAREN
+	      || tok->type == CPP_OPEN_SQUARE
+	      || tok->type == CPP_OPEN_BRACE)
+	    {
+	      n = cp_skip_balanced_group (parser, n);
+	      if (n == 0)
+		return NULL_TREE;
+	      continue;
+	    }
+	  if (tok->type == CPP_LESS)
+	    ++depth;
+	  else if (tok->type == CPP_GREATER)
+	    --depth;
+	  else if (tok->type == CPP_RSHIFT && cxx_dialect != cxx98)
+	    {
+	      if (depth >= 2)
+		depth -= 2;
+	      else
+		--depth;
+	    }
+	  else if (tok->type == CPP_EOF || tok->type == CPP_SEMICOLON)
+	    return NULL_TREE;
+	  ++n;
+	}
+    }
+  /* Skip optional requires-clause (P4283).  The constraint need not be
+     parenthesized -- "pre requires Foo<T> (x > 0)" is a legitimate
+     constraint-logical-or-expression -- so skip forward over whatever
+     follows, stepping atomically over bracketed groups, until the token
+     that opens the predicate.  Stop at anything that cannot appear inside
+     a constraint, so a malformed clause falls through to the tentative
+     parse rather than running away.  */
+  if (cp_lexer_nth_token_is_keyword (parser->lexer, n, RID_REQUIRES))
+    {
+      ++n;
+      for (;;)
+	{
+	  cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, n);
+	  if (tok->type == CPP_EOF || tok->type == CPP_SEMICOLON
+	      || tok->type == CPP_CLOSE_PAREN || tok->type == CPP_COMMA)
+	    return NULL_TREE;
+	  if (tok->type == CPP_OPEN_BRACE || tok->type == CPP_OPEN_SQUARE)
+	    {
+	      /* A requires-expression body, or a lambda introducer inside
+		 the constraint.  */
+	      n = cp_skip_balanced_group (parser, n);
+	      if (n == 0)
+		return NULL_TREE;
+	      continue;
+	    }
+	  if (tok->type == CPP_OPEN_PAREN)
+	    {
+	      /* Either a parenthesized piece of the constraint or the
+		 predicate itself.  It is the predicate exactly when
+		 nothing constraint-like follows it.  */
+	      size_t after = cp_skip_balanced_group (parser, n);
+	      if (after == 0)
+		return NULL_TREE;
+	      cp_token *next = cp_lexer_peek_nth_token (parser->lexer, after);
+	      if (next->type == CPP_OPEN_PAREN
+		  || next->type == CPP_NAME
+		  || next->type == CPP_AND_AND
+		  || next->type == CPP_OR_OR
+		  || next->type == CPP_NOT
+		  || next->type == CPP_SCOPE)
+		{
+		  n = after;
+		  continue;
+		}
+	      break;
+	    }
+	  ++n;
+	}
+    }
   if (cp_nth_tokens_can_be_std_attribute_p (parser, n))
     n = cp_parser_skip_std_attribute_spec_seq (parser, n);
+  /* Skip optional postcondition capture list: [ ... ] */
+  if (cp_lexer_nth_token_is (parser->lexer, n, CPP_OPEN_SQUARE))
+    {
+      unsigned depth = 1;
+      ++n;
+      while (depth > 0)
+	{
+	  cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, n);
+	  if (tok->type == CPP_OPEN_SQUARE)
+	    ++depth;
+	  else if (tok->type == CPP_CLOSE_SQUARE)
+	    --depth;
+	  else if (tok->type == CPP_EOF || tok->type == CPP_SEMICOLON)
+	    return NULL_TREE;
+	  ++n;
+	}
+    }
   if (cp_lexer_nth_token_is (parser->lexer, n, CPP_OPEN_PAREN))
     return contract_name;
   return NULL_TREE;
@@ -34014,6 +34602,22 @@ cp_parser_function_contract_specifier (cp_parser *parser)
   location_t loc = token->location;
   bool postcondition_p = id_equal (contract_name, "post");
 
+  /* Parse optional assertion-control-specifier: < constant-expression >  */
+  tree label = cp_parser_assertion_control_specifier (parser);
+
+  /* Parse optional requires-clause (P4283).  */
+  tree requires_clause = cp_parser_contract_requires_clause (parser);
+
+  /* If the requires-clause was ill-formed, skip to the end of the contract
+     specifier (consuming the predicate paren group if present) to avoid
+     cascading errors.  */
+  if (requires_clause == error_mark_node)
+    {
+      if (cp_lexer_next_token_is (parser->lexer, CPP_OPEN_PAREN))
+	cp_parser_skip_to_closing_parenthesis (parser, true, false, true);
+      return error_mark_node;
+    }
+
   location_t attrs_loc = cp_lexer_peek_token (parser->lexer)->location;
   tree std_attrs = cp_parser_std_attribute_spec_seq (parser);
   if (std_attrs)
@@ -34024,26 +34628,245 @@ cp_parser_function_contract_specifier (cp_parser *parser)
       std_attrs = NULL_TREE;
     }
 
+  /* Parse optional postcondition capture list: [ capture-list ].
+
+     First pass: validate syntax, reject ill-formed captures, and save
+     token caches for init-capture initializer expressions.  The actual
+     expression parsing happens inside the contract scope (below) so that
+     initializers see const-ified outer variables.  Capture names are NOT
+     visible to each other's initializers (only to the predicate).  */
+
+  struct pending_capture {
+    tree name;			/* IDENTIFIER_NODE */
+    location_t loc;		/* source location of capture */
+    cp_token_cache *init_tokens; /* init-capture expr tokens, or NULL */
+    tree param_decl;		/* for plain captures: the PARM_DECL */
+    bool pack_expansion;	/* true for ...id or id... pack captures */
+  };
+  auto_vec<pending_capture, 4> pending_captures;
+  bool captures_error = false;
+
+  if (cp_lexer_next_token_is (parser->lexer, CPP_OPEN_SQUARE))
+    {
+      location_t capture_loc = cp_lexer_peek_token (parser->lexer)->location;
+      if (!postcondition_p)
+	{
+	  error_at (capture_loc,
+		    "postcondition captures only allowed on %<post%> assertions");
+	  captures_error = true;
+	}
+      else if (!flag_contracts_p3098)
+	{
+	  error_at (capture_loc,
+		    "postcondition captures require %<-fcontracts-p3098%>");
+	  captures_error = true;
+	}
+
+      cp_lexer_consume_token (parser->lexer); /* consume '[' */
+      bool first = true;
+      while (!cp_lexer_next_token_is (parser->lexer, CPP_CLOSE_SQUARE)
+	     && !cp_lexer_next_token_is (parser->lexer, CPP_EOF))
+	{
+	  if (!first)
+	    {
+	      if (!cp_lexer_next_token_is (parser->lexer, CPP_COMMA))
+		break;
+	      cp_lexer_consume_token (parser->lexer);
+	    }
+	  first = false;
+
+	  location_t item_loc = cp_lexer_peek_token (parser->lexer)->location;
+
+	  /* Reject `this' capture.  */
+	  if (cp_lexer_next_token_is_keyword (parser->lexer, RID_THIS))
+	    {
+	      error_at (item_loc,
+		        "cannot capture %<this%> in postcondition captures");
+	      cp_lexer_consume_token (parser->lexer);
+	      captures_error = true;
+	      continue;
+	    }
+
+	  /* Reject `*this' capture.  */
+	  if (cp_lexer_next_token_is (parser->lexer, CPP_MULT)
+	      && cp_lexer_nth_token_is_keyword (parser->lexer, 2, RID_THIS))
+	    {
+	      error_at (item_loc,
+		        "cannot capture %<this%> in postcondition captures");
+	      cp_lexer_consume_token (parser->lexer);
+	      cp_lexer_consume_token (parser->lexer);
+	      captures_error = true;
+	      continue;
+	    }
+
+	  /* Reject default capture `=' or `&'.  */
+	  if (cp_lexer_next_token_is (parser->lexer, CPP_EQ))
+	    {
+	      error_at (item_loc,
+		        "default capture not allowed in postcondition captures");
+	      cp_lexer_consume_token (parser->lexer);
+	      captures_error = true;
+	      continue;
+	    }
+	  if (cp_lexer_next_token_is (parser->lexer, CPP_AND)
+	      && (cp_lexer_nth_token_is (parser->lexer, 2, CPP_CLOSE_SQUARE)
+		  || cp_lexer_nth_token_is (parser->lexer, 2, CPP_COMMA)))
+	    {
+	      error_at (item_loc,
+		        "default capture not allowed in postcondition captures");
+	      cp_lexer_consume_token (parser->lexer);
+	      captures_error = true;
+	      continue;
+	    }
+
+	  /* Reject by-reference capture.  */
+	  if (cp_lexer_next_token_is (parser->lexer, CPP_AND))
+	    {
+	      error_at (item_loc,
+		        "capture-by-reference not allowed in "
+		        "postcondition captures");
+	      cp_lexer_consume_token (parser->lexer);
+	      if (cp_lexer_next_token_is (parser->lexer, CPP_NAME))
+		cp_lexer_consume_token (parser->lexer);
+	      if (cp_lexer_next_token_is (parser->lexer, CPP_EQ))
+		{
+		  cp_lexer_consume_token (parser->lexer);
+		  unsigned depth = 0;
+		  while (true)
+		    {
+		      cp_token *t = cp_lexer_peek_token (parser->lexer);
+		      if (t->type == CPP_EOF)
+			break;
+		      if (depth == 0
+			  && (t->type == CPP_COMMA
+			      || t->type == CPP_CLOSE_SQUARE))
+			break;
+		      if (t->type == CPP_OPEN_PAREN
+			  || t->type == CPP_OPEN_SQUARE
+			  || t->type == CPP_OPEN_BRACE)
+			++depth;
+		      else if (t->type == CPP_CLOSE_PAREN
+			       || t->type == CPP_CLOSE_SQUARE
+			       || t->type == CPP_CLOSE_BRACE)
+			{
+			  if (depth == 0)
+			    break;
+			  --depth;
+			}
+		      cp_lexer_consume_token (parser->lexer);
+		    }
+		}
+	      captures_error = true;
+	      continue;
+	    }
+
+	  /* Check for leading ... (pack expansion: [...x = args]).  */
+	  bool init_pack_expansion = false;
+	  if (cp_lexer_next_token_is (parser->lexer, CPP_ELLIPSIS))
+	    {
+	      init_pack_expansion = true;
+	      cp_lexer_consume_token (parser->lexer);
+	    }
+
+	  /* Valid identifier -- plain capture or init-capture.  */
+	  if (!cp_lexer_next_token_is (parser->lexer, CPP_NAME))
+	    {
+	      error_at (item_loc,
+			"expected identifier in postcondition capture");
+	      captures_error = true;
+	      break;
+	    }
+
+	  cp_token *id_tok = cp_lexer_peek_token (parser->lexer);
+	  tree capture_id = id_tok->u.value;
+	  location_t id_loc = id_tok->location;
+	  cp_lexer_consume_token (parser->lexer);
+
+	  if (cp_lexer_next_token_is (parser->lexer, CPP_EQ))
+	    {
+	      /* Init-capture: save token range for the initializer expr.
+		 Delimiting the initializer has the same Core-issue-325
+		 ambiguity as a default argument (a `<' in the initializer
+		 might start a template-argument-list whose commas must not be
+		 mistaken for capture separators), so reuse the same token-cache
+		 machinery in capture mode -- see cp_parser_cache_defarg.  */
+	      cp_lexer_consume_token (parser->lexer); /* consume '=' */
+	      tree init_defarg
+		= cp_parser_cache_defarg (parser, cp_defarg_cache_capture);
+	      if (init_defarg == error_mark_node)
+		{
+		  captures_error = true;
+		  break;
+		}
+	      cp_token_cache *cache = DEFPARSE_TOKENS (init_defarg);
+	      /* Check for trailing ... (pack expansion: [args...]).  */
+	      if (!init_pack_expansion
+		  && cp_lexer_next_token_is (parser->lexer, CPP_ELLIPSIS))
+		{
+		  init_pack_expansion = true;
+		  cp_lexer_consume_token (parser->lexer);
+		}
+
+	      if (!captures_error)
+		{
+		  pending_capture pc;
+		  pc.name = capture_id;
+		  pc.loc = id_loc;
+		  pc.init_tokens = cache;
+		  pc.param_decl = NULL_TREE;
+		  pc.pack_expansion = init_pack_expansion;
+		  pending_captures.safe_push (pc);
+		}
+	    }
+	  else
+	    {
+	      /* Check for trailing ... (pack expansion: [args...]).  */
+	      if (!init_pack_expansion
+		  && cp_lexer_next_token_is (parser->lexer, CPP_ELLIPSIS))
+		{
+		  init_pack_expansion = true;
+		  cp_lexer_consume_token (parser->lexer);
+		}
+
+	      /* Plain capture: must name a function parameter.  */
+	      tree decl = cp_parser_lookup_name_simple (parser, capture_id,
+						       id_loc);
+	      if (decl == error_mark_node || decl == NULL_TREE
+		  || TREE_CODE (decl) != PARM_DECL)
+		{
+		  error_at (id_loc,
+			    "only function parameters can be captured by copy "
+			    "in postcondition captures");
+		  captures_error = true;
+		}
+	      else if (init_pack_expansion
+		       && !function_parameter_pack_p (decl))
+		{
+		  error_at (id_loc,
+			    "pack expansion %<...%> on non-pack parameter %qD",
+			    decl);
+		  captures_error = true;
+		}
+	      else if (!captures_error)
+		{
+		  pending_capture pc;
+		  pc.name = capture_id;
+		  pc.loc = id_loc;
+		  pc.init_tokens = NULL;
+		  pc.param_decl = decl;
+		  pc.pack_expansion = init_pack_expansion;
+		  pending_captures.safe_push (pc);
+		}
+	    }
+	}
+      cp_parser_require (parser, CPP_CLOSE_SQUARE, RT_CLOSE_SQUARE);
+    }
+
   matching_parens parens;
   parens.require_open (parser);
 
   /* Check for postcondition identifiers.  */
-  cp_expr identifier;
-  if (postcondition_p && cp_lexer_next_token_is (parser->lexer, CPP_NAME)
-      && cp_lexer_peek_nth_token (parser->lexer, 2)->type == CPP_COLON)
-    identifier = cp_parser_identifier (parser);
-
-  if (identifier == error_mark_node)
-    {
-      cp_parser_skip_to_closing_parenthesis (parser,
-					     /*recovering=*/true,
-					     /*or_comma=*/false,
-					     /*consume_paren=*/true);
-      return error_mark_node;
-    }
-
-  if (identifier)
-    cp_parser_require (parser, CPP_COLON, RT_COLON);
+  cp_expr identifier = cp_parser_contract_result_name (parser, postcondition_p);
 
   tree contract;
   if (current_class_type && TYPE_BEING_DEFINED (current_class_type))
@@ -34051,7 +34874,6 @@ cp_parser_function_contract_specifier (cp_parser *parser)
       /* Defer the parsing of pre/post contracts inside class definitions.  */
       cp_token *first = cp_lexer_peek_token (parser->lexer);
 
-      /* Skip until we reach a closing token ).  */
       cp_parser_skip_to_closing_parenthesis (parser,
 					     /*recovering=*/false,
 					     /*or_comma=*/false,
@@ -34063,51 +34885,211 @@ cp_parser_function_contract_specifier (cp_parser *parser)
 
       parens.require_close (parser);
 
-      /* Build a deferred-parse node.  */
       tree condition = make_node (DEFERRED_PARSE);
       DEFPARSE_TOKENS (condition) = cp_token_cache_new (first, last);
       DEFPARSE_INSTANTIATIONS (condition) = NULL;
 
-      /* And its corresponding contract.  */
       if (identifier)
 	identifier.maybe_add_location_wrapper ();
-      contract = grok_contract (contract_name, /*mode*/NULL_TREE, identifier,
-				condition, loc);
+      contract = grok_contract (contract_name, identifier,
+				condition, loc, /*message*/NULL_TREE, label,
+				requires_clause);
+
+      /* Save pending capture data for late parsing (P3098).
+	 We store a TREE_LIST directly in POSTCONDITION_CAPTURES where:
+	   TREE_PURPOSE = identifier (name)
+	   TREE_VALUE = cp_token_cache* cast to tree (for init-captures)
+	               or PARM_DECL (for plain captures -- NULL for deferred,
+	               will be re-looked-up during late parsing)
+	   TREE_INT_CST = whether it's an init-capture (1) or plain (0)
+	 We use a simpler encoding: TREE_VALUE is the identifier,
+	 and we use TREE_PURPOSE to hold the token cache (or null).  */
+      if (contract != error_mark_node && !captures_error
+	  && !pending_captures.is_empty ()
+	  && POSTCONDITION_P (CONTRACT_CHECK (contract)))
+	{
+	  tree cap_list = NULL_TREE;
+	  for (int i = pending_captures.length () - 1; i >= 0; i--)
+	    {
+	      pending_capture &pc = pending_captures[i];
+	      /* Encode: TREE_PURPOSE = token_cache (cast), TREE_VALUE = name.
+		 For plain captures (no init_tokens), TREE_PURPOSE is NULL.
+		 TREE_LANG_FLAG_0 encodes pack_expansion.  */
+	      tree purpose = pc.init_tokens
+			     ? build_int_cst (ptr_type_node,
+					      (HOST_WIDE_INT)(intptr_t)
+					      pc.init_tokens)
+			     : NULL_TREE;
+	      tree node = tree_cons (purpose, pc.name, cap_list);
+	      TREE_LANG_FLAG_0 (node) = pc.pack_expansion;
+	      cap_list = node;
+	    }
+	  POSTCONDITION_CAPTURES (CONTRACT_CHECK (contract)) = cap_list;
+	}
     }
   else
     {
       /* Enable location wrappers when parsing contracts.  */
       auto suppression = make_temp_override (suppress_location_wrappers, 0);
 
-      /* If we have a current class object, see if we need to consider
-       it const when processing the contract condition.  */
       tree current_class_ref_copy = current_class_ref;
       current_class_ref = view_as_const (current_class_ref);
 
-      /* Parse the condition, ensuring that parameters or the return variable
-       aren't flagged for use outside the body of a function.  */
       begin_scope (sk_contract, current_function_decl);
-      bool old_pc = processing_postcondition;
-      processing_postcondition = postcondition_p;
+      bool old_pc = processing_postcondition_predicate;
+
+      /* Parse capture initializers inside the contract scope where they
+	 see const-ified outer variables.  We do NOT set
+	 processing_postcondition_predicate yet -- capture initializers must
+	 be able to reference non-const value parameters (that is the whole
+	 point of captures).  */
+      tree captures = NULL_TREE;
+      if (!captures_error && !pending_captures.is_empty ())
+	{
+	  for (unsigned i = 0; i < pending_captures.length (); i++)
+	    {
+	      pending_capture &pc = pending_captures[i];
+	      tree init_expr;
+
+	      if (pc.init_tokens)
+		{
+		  /* Init-capture: parse the saved token cache.  */
+		  cp_parser_push_lexer_for_tokens (parser, pc.init_tokens);
+		  init_expr = cp_parser_assignment_expression (parser);
+		  cp_parser_pop_lexer (parser);
+		}
+	      else
+		{
+		  /* Plain parameter capture: copy-init from parameter.  */
+		  init_expr = pc.param_decl;
+		}
+
+	      /* Build a VAR_DECL for this capture.  Type is deduced from
+		 the initializer (auto-like semantics).
+
+		 P3098 Section 4.4.1: Captures are NOT const-ified -- they
+		 are local to the assertion.  Strip top-level const from
+		 the deduced type since the initializer was looked up in
+		 the contract scope where variables are const-ified.  This
+		 matches lambda by-copy capture semantics.  Note: this
+		 exemption may change if the design evolves.  */
+	      tree type = unlowered_expr_type (init_expr);
+	      if (type == error_mark_node)
+		{
+		  captures_error = true;
+		  break;
+		}
+	      if (!type)
+		/* The initializer is type-dependent with no deducible type yet
+		   (e.g. a member access on a dependent object, where
+		   unlowered_expr_type is null).  Defer via decltype so the
+		   capture carries a dependent type that tsubst resolves at
+		   instantiation; the const-ification exemption is reapplied
+		   there.  */
+		type = finish_decltype_type (init_expr, /*id_or_member=*/true,
+					     tf_warning_or_error);
+	      else
+		{
+		  /* For plain pack captures, the PARM_DECL type is already
+		     TYPE_PACK_EXPANSION -- strip to element type before
+		     re-wrapping.  */
+		  if (pc.pack_expansion && PACK_EXPANSION_P (type))
+		    type = PACK_EXPANSION_PATTERN (type);
+		  type = cp_build_qualified_type (type,
+						  cp_type_quals (type)
+						  & ~TYPE_QUAL_CONST);
+		}
+
+	      /* Pack captures: wrap init and type in pack expansion.  */
+	      if (pc.pack_expansion)
+		{
+		  init_expr = make_pack_expansion (init_expr);
+		  if (init_expr == error_mark_node)
+		    {
+		      captures_error = true;
+		      break;
+		    }
+		  if (pc.init_tokens)
+		    {
+		      /* Init-capture pack: the element type may not contain
+			 packs (e.g., [... x = args * 2]).  Build the type
+			 pack expansion manually using packs from the init
+			 expression, matching lambda init-capture behavior.  */
+		      tree packs = uses_parameter_packs (
+				     PACK_EXPANSION_PATTERN (init_expr));
+		      type = make_pack_expansion (type);
+		      if (type == error_mark_node)
+			{
+			  type = cxx_make_type (TYPE_PACK_EXPANSION);
+			  PACK_EXPANSION_PATTERN (type)
+			    = cp_build_qualified_type (
+				unlowered_expr_type (
+				  PACK_EXPANSION_PATTERN (init_expr)),
+				0);
+			}
+		      PACK_EXPANSION_PARAMETER_PACKS (type) = packs;
+		      PACK_EXPANSION_AUTO_P (type) = true;
+		    }
+		  else
+		    {
+		      /* Plain pack capture: element type from the pack
+			 pattern should already contain template parms.  */
+		      type = make_pack_expansion (type);
+		      if (type == error_mark_node)
+			{
+			  captures_error = true;
+			  break;
+			}
+		    }
+		}
+
+	      tree var = build_lang_decl (VAR_DECL, pc.name, type);
+	      DECL_ARTIFICIAL (var) = 1;
+	      DECL_SOURCE_LOCATION (var) = pc.loc;
+	      DECL_INITIAL (var) = init_expr;
+
+	      /* Prepend to captures list (reversed later).  */
+	      captures = tree_cons (NULL_TREE, var, captures);
+	    }
+	  captures = nreverse (captures);
+	}
+
+      /* Now push all capture VAR_DECLs into scope so they shadow
+	 parameters in the predicate.  */
+      if (!captures_error)
+	for (tree cap = captures; cap; cap = TREE_CHAIN (cap))
+	  pushdecl (TREE_VALUE (cap));
+
+      /* NOW enable postcondition processing -- the predicate must see
+	 the check_param_in_postcondition restriction, but captures
+	 (parsed above) must not.  */
+      processing_postcondition_predicate = postcondition_p;
+
       tree result = NULL_TREE;
       if (identifier)
 	{
-	  /* Build a fake variable for the result identifier.  */
 	  result = make_postcondition_variable (identifier);
 	  ++processing_template_decl;
 	}
       cp_expr condition = cp_parser_conditional_expression (parser);
-      /* Build the contract.  */
-      contract = grok_contract (contract_name, /*mode*/NULL_TREE, result,
-				condition, loc);
+      tree message = cp_parser_contract_message (parser);
+
+      contract = grok_contract (contract_name, result,
+				condition, loc, message, label,
+				requires_clause);
+
+      /* Store captures on the postcondition node.  */
+      if (!captures_error && captures && contract != error_mark_node
+	  && POSTCONDITION_P (contract))
+	POSTCONDITION_CAPTURES (CONTRACT_CHECK (contract)) = captures;
+
       if (identifier)
 	--processing_template_decl;
-      processing_postcondition = old_pc;
+      processing_postcondition_predicate = old_pc;
       gcc_checking_assert (scope_chain && scope_chain->bindings
 			   && scope_chain->bindings->kind == sk_contract);
       pop_bindings_and_leave_scope ();
 
-      /* Revert (any) constification of the current class object.  */
       current_class_ref = current_class_ref_copy;
 
       if (contract != error_mark_node)
@@ -34708,6 +35690,12 @@ cp_parser_constraint_requires_parens (cp_parser *parser, bool lambda_p)
 	  /* A primary-constraint-expression followed by a '[[' is not a
 	     postfix expression.  */
 	  if (cp_lexer_nth_token_is (parser->lexer, 2, CPP_OPEN_SQUARE))
+	    return pce_ok;
+
+	  /* In a contract requires-clause (lambda_p), a following '[' opens the
+	     postcondition capture list, not a subscript -- mirror the '(' case
+	     (the contract predicate) above.  */
+	  if (lambda_p)
 	    return pce_ok;
 
 	  gcc_fallthrough ();
@@ -37028,7 +38016,7 @@ cp_parser_save_member_function_body (cp_parser* parser,
 static tree
 cp_parser_save_nsdmi (cp_parser* parser)
 {
-  return cp_parser_cache_defarg (parser, /*nsdmi=*/true);
+  return cp_parser_cache_defarg (parser, cp_defarg_cache_nsdmi);
 }
 
 /* Parse a template-argument-list, as well as the trailing ">" (but
@@ -39076,8 +40064,9 @@ cp_parser_cache_group (cp_parser *parser,
    NSDMI).  If that succeeds, then we stop caching.  */
 
 static tree
-cp_parser_cache_defarg (cp_parser *parser, bool nsdmi)
+cp_parser_cache_defarg (cp_parser *parser, cp_defarg_cache_mode mode)
 {
+  const bool nsdmi = (mode == cp_defarg_cache_nsdmi);
   unsigned depth = 0;
   int maybe_template_id = 0;
   cp_token *first_token;
@@ -39105,6 +40094,28 @@ cp_parser_cache_defarg (cp_parser *parser, bool nsdmi)
 	  /* In valid code, a default argument must be
 	     immediately followed by a `,' `)', or `...'.  */
 	case CPP_COMMA:
+	  if (depth == 0 && maybe_template_id
+	      && mode == cp_defarg_cache_capture)
+	    {
+	      /* Core-issue-325 disambiguation for a postcondition
+		 init-capture.  The comma ends this capture iff a capture
+		 -- optional `...', an identifier, then `=', `,' or `]' --
+		 follows it; otherwise the comma is inside a
+		 template-argument-list in the initializer (e.g.
+		 [p = f<1, 2>()]).  A peek suffices: a capture's grammar is
+		 trivial and, unlike a parameter list, is not
+		 self-delimiting, so we do not tentatively parse it.  */
+	      unsigned n = 2;
+	      if (cp_lexer_nth_token_is (parser->lexer, n, CPP_ELLIPSIS))
+		++n;
+	      if (cp_lexer_nth_token_is (parser->lexer, n, CPP_NAME)
+		  && (cp_lexer_nth_token_is (parser->lexer, n + 1, CPP_EQ)
+		      || cp_lexer_nth_token_is (parser->lexer, n + 1, CPP_COMMA)
+		      || cp_lexer_nth_token_is (parser->lexer, n + 1,
+						CPP_CLOSE_SQUARE)))
+		done = true;
+	      break;
+	    }
 	  if (depth == 0 && maybe_template_id)
 	    {
 	      /* If we've seen a '<', we might be in a

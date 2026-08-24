@@ -1,0 +1,4 @@
+[
+  {"match": {"kind": "implicit", "namespace": "nx_enf", "group": "ub:stmt.return.coroutine.flow.off"}, "output": {"semantic": "noexcept_enforce"}},
+  {"match": {"kind": "implicit", "namespace": "nx_obs", "group": "ub:stmt.return.coroutine.flow.off"}, "output": {"semantic": "noexcept_observe"}}
+]

@@ -1,0 +1,4 @@
+[
+  {"match": {"kind": "pre"}, "output": {"semantic": "observe"}},
+  {"match": {"kind": "contract_assert"}, "output": {"semantic": "ignore"}}
+]

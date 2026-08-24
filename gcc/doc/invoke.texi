@@ -223,11 +223,20 @@ in the following sections.
 -fconstexpr-depth=@var{n}  -fconstexpr-cache-depth=@var{n}
 -fconstexpr-loop-limit=@var{n}  -fconstexpr-ops-limit=@var{n}
 -fcontracts
--fcontract-evaluation-semantic=@r{[}ignore@r{|}observe@r{|}enforce@r{|}quick_enforce@r{]}
+-fcontract-evaluation-semantic=@r{[}ignore@r{|}observe@r{|}enforce@r{|}quick_enforce@r{|}assume@r{|}noexcept_enforce@r{|}noexcept_observe@r{]}
 -fcontracts-conservative-ipa  -fcontract-checks-outlined
 -fcontract-disable-optimized-checks
 -fcontracts-client-check=@r{[}none@r{|}pre@r{|}all@r{]}
 -fcontracts-definition-check=@r{[}on@r{|}off@r{]}
+-fcontract-group-evaluation-semantic=@var{group}:@var{semantic}
+-fcontract-configuration=@var{json}  -fcontract-configuration-file=@var{file}
+-fcontracts-allow-assume  -Wcontract-configuration
+-Wcontract-constexpr-side-effect
+-fcontracts-p3850  -fcontracts-p3097  -fcontracts-p3098  -fcontracts-p3099
+-fcontracts-p3100  -fcontracts-p3290  -fcontracts-p3400  -fcontracts-p4283
+-fcontracts-p4298  -fcontracts-p4299  -fcontracts-p4301
+-fsanitize-semantic=@var{check}:@var{semantic}
+-fsanitize-noncontract-callbacks
 -fcoroutines  -fdiagnostics-all-candidates
 -fno-elide-constructors
 -fno-enforce-eh-specs
@@ -3378,6 +3387,18 @@ fails, the execution is terminated immediately (without calling any handler).
 At compile-time there is no difference in behaviour between this option and
 the @code{enforce} case, since no handler is invoked at compile time.
 
+'@code{assume}' The predicate is not evaluated and the compiler may assume it
+holds, eliding code on the assumption that a violation cannot occur.  A
+violated predicate is therefore undefined behaviour.  For a contract written
+in the source this requires @option{-fcontracts-allow-assume}.
+
+'@code{noexcept_enforce}' As @code{enforce}, except that the handler is
+invoked in a non-throwing context: a handler that exits by throwing
+terminates rather than propagating.  Requires @option{-fcontracts-p4298}.
+
+'@code{noexcept_observe}' As @code{observe}, with the same non-throwing
+handler context.  Requires @option{-fcontracts-p4298}.
+
 @opindex fcontracts-conservative-ipa
 @opindex fno-contracts-conservative-ipa
 @item -fcontracts-conservative-ipa
@@ -3419,6 +3440,107 @@ This option introduces the ability to disable callee/definition-side checks,
 which are otherwise enabled by default when the contracts feature is active.
 
 The variable @var{mode} has the values '@code{on}' and '@code{off}'.
+
+@opindex fcontract-group-evaluation-semantic
+@item -fcontract-group-evaluation-semantic=@var{group}:@var{semantic}
+Set the evaluation semantic for contract assertions belonging to the
+identification group @var{group}, overriding
+@option{-fcontract-evaluation-semantic} for those assertions.  May be given
+more than once.  Groups are attached to an assertion by an
+assertion-control label.
+
+@opindex fcontract-configuration
+@item -fcontract-configuration=@var{json}
+@opindex fcontract-configuration-file
+@item -fcontract-configuration-file=@var{file}
+Supply a JSON contract configuration, either inline or from @var{file}.
+A configuration is an array of entries, each pairing a @code{match} object
+against a contract assertion with an @code{output} object giving the
+evaluation semantic to use.  Entries are considered in the order written
+and the first match wins, interleaved with any
+@option{-fcontract-evaluation-semantic} and
+@option{-fcontract-group-evaluation-semantic} options according to their
+position on the command line.
+
+@opindex Wcontract-configuration
+@opindex Wno-contract-configuration
+@item -Wcontract-configuration
+Warn about a contract configuration that is accepted but suspect, such as
+an entry that can never match.  Malformed configuration is an error rather
+than a warning and is reported regardless.
+
+@opindex Wcontract-constexpr-side-effect
+@opindex Wno-contract-constexpr-side-effect
+@item -Wcontract-constexpr-side-effect
+Warn when the predicate of a contract assertion, evaluated during constant
+evaluation, modifies an object of the enclosing evaluation.  Such a program
+is well formed, and the modification is performed, but its meaning depends
+on the evaluation semantic chosen for the assertion: under the @code{ignore}
+semantic the predicate is not evaluated and the modification does not happen
+at all.  Enabled by default.
+
+This warning is limited to constant evaluation, which is where the compiler
+evaluates the predicate itself and can observe the modification.  A
+side-effecting predicate that is only ever evaluated at run time is not
+diagnosed.
+
+@opindex fcontracts-allow-assume
+@opindex fno-contracts-allow-assume
+@item -fcontracts-allow-assume
+Permit the @code{assume} evaluation semantic to be selected for contract
+assertions written in the source.  Because @code{assume} makes a violated
+predicate undefined behaviour rather than a diagnosed error, it must be
+opted into explicitly.
+
+@opindex fcontracts-p3850
+@item -fcontracts-p3850
+Enable all of the contracts extension papers listed below.  Equivalent to
+giving each @option{-fcontracts-p@var{nnnn}} option individually.
+
+@opindex fcontracts-p3097
+@opindex fcontracts-p3098
+@opindex fcontracts-p3099
+@opindex fcontracts-p3100
+@opindex fcontracts-p3290
+@opindex fcontracts-p3400
+@opindex fcontracts-p4283
+@opindex fcontracts-p4298
+@opindex fcontracts-p4299
+@opindex fcontracts-p4301
+@item -fcontracts-p3097
+@itemx -fcontracts-p3098
+@itemx -fcontracts-p3099
+@itemx -fcontracts-p3100
+@itemx -fcontracts-p3290
+@itemx -fcontracts-p3400
+@itemx -fcontracts-p4283
+@itemx -fcontracts-p4298
+@itemx -fcontracts-p4299
+@itemx -fcontracts-p4301
+Enable an individual proposed extension to the contracts facility, named
+after the WG21 paper that proposes it: contracts on virtual functions
+(P3097), postcondition captures (P3098), the @code{comment} and
+@code{message} accessors (P3099), implicit contract assertions for
+undefined behaviour (P3100), integration with @code{assert} (P3290),
+assertion-control labels (P3400), @code{requires} clauses on contract
+assertions (P4283), non-throwing evaluation semantics (P4298), contracts
+for C (P4299), and context reports for the violation handler (P4301).
+Each defines its own feature-test macro.
+
+@opindex fsanitize-semantic
+@item -fsanitize-semantic=@var{check}:@var{semantic}
+Route the sanitizer check @var{check} to the contract-violation handler
+with the given evaluation semantic, instead of reporting it through the
+sanitizer runtime.  Requires @option{-fcontracts-p3100}; without it the
+option has no effect and a warning is issued.  May be given more than
+once.
+
+@opindex fsanitize-noncontract-callbacks
+@opindex fno-sanitize-noncontract-callbacks
+@item -fsanitize-noncontract-callbacks
+Suppress routing of sanitizer checks to the contract-violation handler
+even under @option{-fcontracts-p3100}, restoring the ordinary sanitizer
+reporting path.
 
 @opindex fcoroutines
 @opindex fno-coroutines

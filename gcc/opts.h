@@ -484,6 +484,35 @@ extern const struct sanitizer_opts_s
   bool can_trap;
 } sanitizer_opts[];
 
+/* Contract-evaluation semantic requested per sanitizer check via
+   -fsanitize-semantic= (P3100/ASan contract routing).  The full enum is
+   defined in c-family/contracts-config.h; it is only opaque-forward-
+   declared here because this header (and opts.cc, which implements the
+   accessor below) is linked into every language's compiler proper, not
+   just the ones with a c-family front end, and so must not depend on
+   c-family object code.  Callers that need the enum's values already
+   include c-family/contracts-config.h for the CES_* constants.  */
+enum contract_evaluation_semantic : unsigned short;
+
+/* Return the contract-evaluation semantic explicitly requested for the
+   sanitizer check identified by SANITIZE_BIT (a single SANITIZE_* value,
+   not a group) via -fsanitize-semantic=, or CES_INVALID (0) if none was
+   set for that check.  */
+extern enum contract_evaluation_semantic
+explicit_sanitizer_semantic (sanitize_code_type sanitize_bit);
+
+/* Return the final, resolved contract-evaluation semantic for the
+   sanitizer check identified by SANITIZE_BIT (a single SANITIZE_* value,
+   not a group): the explicit -fsanitize-semantic= value if one was set
+   for this check (explicit_sanitizer_semantic != CES_INVALID), otherwise
+   the value derived from -fsanitize/-fsanitize-recover/-fsanitize-trap
+   (CES_ASSUME if the check is not in -fsanitize=, else CES_QUICK if
+   -fsanitize-trap=, else CES_OBSERVE if -fsanitize-recover=, else
+   CES_ENFORCE).  This is the value later passes (P3100 ASan
+   routing) should consume.  */
+extern enum contract_evaluation_semantic
+resolved_sanitizer_semantic (sanitize_code_type sanitize_bit);
+
 extern const struct zero_call_used_regs_opts_s
 {
   const char *const name;

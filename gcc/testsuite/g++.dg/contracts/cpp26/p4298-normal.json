@@ -1,0 +1,4 @@
+[
+  {"match": {"location": "p4298-normal.C:20", "caller": false}, "output": {"semantic": "noexcept_observe"}},
+  {"output": {"semantic": "noexcept_enforce"}}
+]

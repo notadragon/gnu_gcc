@@ -1,0 +1,5 @@
+[
+  {"match": {"kind": "implicit",
+             "group": "ub:conv.lval.valid.representation"},
+   "output": {"semantic": "quick_enforce"}}
+]

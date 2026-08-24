@@ -477,6 +477,8 @@ USER_H = $(srcdir)/ginclude/float.h \
 	 $(srcdir)/ginclude/stdatomic.h \
 	 $(srcdir)/ginclude/stdckdint.h \
 	 $(srcdir)/ginclude/stdcountof.h \
+	 $(srcdir)/ginclude/contracts.h \
+	 $(srcdir)/ginclude/stdcontracts.h \
 	 $(EXTRA_HEADERS)
 
 USER_H_INC_NEXT_PRE = @user_headers_inc_next_pre@
@@ -1329,7 +1331,8 @@ C_COMMON_OBJS = c-family/c-common.o c-family/c-cppbuiltin.o c-family/c-dump.o \
   c-family/c-semantics.o c-family/c-ada-spec.o \
   c-family/c-ubsan.o c-family/known-headers.o \
   c-family/c-attribs.o c-family/c-warn.o c-family/c-spellcheck.o \
-  c-family/c-type-mismatch.o
+  c-family/c-type-mismatch.o \
+  c-family/contracts-config.o
 
 # Analyzer object files
 ANALYZER_OBJS = \

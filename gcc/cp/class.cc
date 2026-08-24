@@ -3260,7 +3260,7 @@ check_for_override (tree decl, tree ctype)
       if (DECL_DESTRUCTOR_P (decl))
 	TYPE_HAS_NONTRIVIAL_DESTRUCTOR (ctype) = true;
 
-      if (DECL_HAS_CONTRACTS_P (decl))
+      if (DECL_HAS_CONTRACTS_P (decl) && !flag_contracts_p3097)
 	error_at (DECL_SOURCE_LOCATION (decl),
 		  "contracts cannot be added to virtual functions");
     }
@@ -10686,14 +10686,27 @@ build_vtbl_initializer (tree binfo,
 	     So, we replace these functions with __pure_virtual.  */
 	  if (DECL_PURE_VIRTUAL_P (fn_original))
 	    {
-	      fn = abort_fndecl;
+	      /* P3100: point the slot at a contract-aware terminus when the
+		 class's implicit contract configuration selects a checking
+		 semantic for ub:class.abstract.pure.virtual; otherwise keep
+		 the legacy __cxa_pure_virtual.  The slot stays a plain
+		 function pointer -- only its value changes.  */
+	      tree pv_terminus
+		= build_implicit_pure_virtual_terminus (fn_original);
+	      fn = pv_terminus ? pv_terminus : abort_fndecl;
 	      if (!TARGET_VTABLE_USES_DESCRIPTORS)
 		{
-		  if (abort_fndecl_addr == NULL)
-		    abort_fndecl_addr
-		      = fold_convert (vfunc_ptr_type_node,
-				      build_fold_addr_expr (fn));
-		  init = abort_fndecl_addr;
+		  if (pv_terminus)
+		    init = fold_convert (vfunc_ptr_type_node,
+					 build_fold_addr_expr (fn));
+		  else
+		    {
+		      if (abort_fndecl_addr == NULL)
+			abort_fndecl_addr
+			  = fold_convert (vfunc_ptr_type_node,
+					  build_fold_addr_expr (fn));
+		      init = abort_fndecl_addr;
+		    }
 		}
 	    }
 	  /* Likewise for deleted virtuals.  */

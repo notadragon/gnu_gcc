@@ -2643,6 +2643,11 @@ GLIBCXX_3.4.37 {
 
 } GLIBCXX_3.4.36;
 
+# Note: the C++26 contracts runtime is not exported from libstdc++.so.  While
+# contracts remain experimental, the C++ runtime lives in libstdc++exp (a
+# static archive, which needs no symbol versioning) and the pure-C ABI core
+# lives in the separate libcontracts library (its own LIBCONTRACTS_1.0 node).
+
 # Symbols in the support library (libsupc++) have their own tag.
 CXXABI_1.3 {
 

@@ -1030,10 +1030,47 @@ export namespace std::contracts
   using std::contracts::assertion_kind;
   using std::contracts::evaluation_semantic;
   using std::contracts::detection_mode;
+  using std::contracts::evaluation_semantic_set;
+  using std::contracts::violation_handled;
   using std::contracts::contract_violation;
+  using std::contracts::is_nonthrowing;
   using std::contracts::invoke_default_contract_violation_handler;
 }
 #endif // __cpp_lib_contracts
+
+#if __cpp_lib_contracts_api
+export namespace std::contracts
+{
+  using std::contracts::handle_enforced_contract_violation;
+  using std::contracts::handle_observed_contract_violation;
+  using std::contracts::handle_quick_enforced_contract_violation;
+}
+#endif // __cpp_lib_contracts_api
+
+#if __cpp_lib_contracts_labels
+export namespace std::contracts::labels
+{
+  using std::contracts::labels::empty_label_t;
+  using std::contracts::labels::empty_label;
+  using std::contracts::labels::semantic_computation_label;
+  using std::contracts::labels::allowed_semantics_label;
+  using std::contracts::labels::local_violation_label;
+  using std::contracts::labels::compute_comment_label;
+  using std::contracts::labels::compute_message_label;
+  using std::contracts::labels::queryable_label;
+  using std::contracts::labels::identification_label;
+  using std::contracts::labels::review_t;
+  using std::contracts::labels::review;
+  using std::contracts::labels::fixed_message_label_t;
+  using std::contracts::labels::assertion_group_label;
+  using std::contracts::labels::operator""group;
+  using std::contracts::labels::operator|;
+}
+// The short-name lookup <contracts> installs for the #include path; it is
+// a using-directive rather than a declaration, so the export-completeness
+// check that walks std for public non-uglified decls does not see it.
+export using contract_control namespace std::contracts::labels;
+#endif // __cpp_lib_contracts_labels
 
 // 17.12.2 <coroutine>
 #if __cpp_lib_coroutine

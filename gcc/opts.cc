@@ -38,6 +38,12 @@ along with GCC; see the file COPYING3.  If not see
 #include "version.h"
 #include "selftest.h"
 #include "file-prefix-map.h"
+/* For contract_semantic_from_name / CES_* (-fsanitize-semantic=).  This
+   header is enum-and-inline-function only (see the comment there), so
+   including it here does not create a link dependency on c-family
+   object code, which is not linked into every language's compiler
+   proper.  */
+#include "c-family/contracts-config.h"
 
 /* In this file all option sets are explicit.  */
 #undef OPTION_SET_P
@@ -189,6 +195,157 @@ bool dwarf_based_debuginfo_p ()
   return ((write_symbols & CTF_DEBUG)
 	  || (write_symbols & BTF_DEBUG)
 	  || (write_symbols & CODEVIEW_DEBUG));
+}
+
+/* See the comment on the declaration in opts.h.  Operates on the active
+   global_options, like the other simple flag-query helpers above this
+   point in the file (the option-set-must-be-explicit convention below
+   applies only to option-processing code, not query accessors like this
+   one that later passes call outside of option handling).  */
+
+enum contract_evaluation_semantic
+explicit_sanitizer_semantic (sanitize_code_type sanitize_bit)
+{
+  if (sanitize_bit == 0)
+    return CES_INVALID;
+
+  unsigned bit
+    = (unsigned) __builtin_ctzll ((unsigned long long) sanitize_bit);
+  if (bit >= SANITIZE_CODE_TYPE_BITS)
+    return CES_INVALID;
+
+  return (enum contract_evaluation_semantic) flag_sanitize_semantic[bit];
+}
+
+/* P3100: TRUE iff CHECK_BIT names a sanitizer check whose detected
+   error is actually ROUTED to the C++ contract-violation handler at run time
+   (as opposed to merely having a lowered evaluation semantic).  The routed
+   report is invoked from inside the sanitizer runtime's implicitly-noexcept
+   report destructor (libasan's ScopedInErrorReport, or libubsan's ScopedReport
+   for the vptr check), so a throwing handler can never propagate -- it hits
+   "exception escaping a noexcept function" and std::terminate()s several frames
+   below any user catch/RAII (see asan_report.cpp / ubsan_diag.cpp).  A routed
+   check therefore offers only NON-throwing realizations: assume (off),
+   quick_enforce (terminate without calling the
+   handler; always available), and the D4298 noexcept_enforce/noexcept_observe
+   semantics (call the handler, then terminate / continue), which are gated on
+   -fcontracts-p4298 exactly like the ordinary-contract path.  Plain throwing
+   enforce/observe and ignore are never available for a routed check.
+
+   The user-space address check (ASan) and a growing set of UBSan runtime checks
+   (vptr, alignment, object-size, nonnull-attribute, returns-nonnull-attribute,
+   pointer-overflow) are wired for routing.  New routed checks OR their routing
+   bit into ROUTED_SANITIZER_BITS and reuse routed_sanitizer_default_semantic
+   below; not-yet-routed checks keep the generic {assume, enforce, observe iff
+   can_recover, quick_enforce iff can_trap} model.  A check "is routed" iff its
+   flag mask includes any routing bit, so the multi-bit "address" name
+   (SANITIZE_ADDRESS | SANITIZE_USER_ADDRESS) is treated as routed as a whole;
+   only the SANITIZE_USER_ADDRESS bit is ever consulted for the actual runtime
+   routing decision (see resolved_sanitizer_semantic callers), so the shared
+   SANITIZE_ADDRESS bit's stored value is inert.  (The routed UBSan checks are
+   each a single dedicated bit, so they have no such shared-family subtlety.)
+   quick_enforce is realized in the routing runtime (a wire byte -> silent
+   terminate), not as a compile-time trap, so it is offered for a routed check
+   regardless of the check's can_trap capability (ASan and vptr both lack
+   can_trap yet offer quick_enforce; the other routed UBSan checks have can_trap
+   but still route quick_enforce through the runtime, not a trap).  */
+
+/* Full libubsan coverage: every UBSan runtime check that reports through
+   libubsan's ScopedReport is routed, including the ones that also have a native
+   front-end (Group-B) path -- if a program configures both the native implicit
+   check and the overlapping -fsanitize= check, both fire (double-check is
+   intentional; a future driver change will auto-translate overlapping
+   -fsanitize= into contract config).  ASan (SANITIZE_USER_ADDRESS) rides the
+   same routed set.  The two ASan pointer-pair checks (SANITIZE_POINTER_COMPARE,
+   SANITIZE_POINTER_SUBTRACT) are also routed: they report through the ASan
+   runtime (not libubsan), each via its own dedicated wire byte so the address
+   routing scope is unchanged (see emit_asan_contract_semantic_descriptor and
+   libsanitizer/asan/asan_report.cpp).  Clang additionally routes function /
+   unsigned-integer-overflow / implicit-conversion / local-bounds / objc-cast,
+   which GCC has no bit for.
+
+   ThreadSanitizer (SANITIZE_THREAD) is also routed: it reports a data race
+   through libtsan's OutputReport (not libasan / libubsan), governed by its own
+   dedicated wire byte __tsan_contract_semantic (see
+   emit_tsan_contract_semantic_descriptor and
+   libsanitizer/tsan/tsan_rtl_report.cpp).  Like the other whole-program
+   tools it has no compile-time trap and no per-access recover/abort codegen
+   variant; continue-vs-terminate is decided in the runtime report leg from the
+   wire byte, so its routed allowed set {assume, quick_enforce,
+   noexcept_enforce, noexcept_observe} is granted uniformly by
+   routed_sanitizer_check_p, and noexcept_observe is offered even though native
+   thread has can_recover=false (the routed runtime provides the continue).  */
+#define ROUTED_SANITIZER_BITS \
+  (SANITIZE_USER_ADDRESS | SANITIZE_VPTR | SANITIZE_ALIGNMENT \
+   | SANITIZE_OBJECT_SIZE | SANITIZE_NONNULL_ATTRIBUTE \
+   | SANITIZE_RETURNS_NONNULL_ATTRIBUTE | SANITIZE_POINTER_OVERFLOW \
+   | SANITIZE_NULL | SANITIZE_SHIFT_BASE | SANITIZE_SHIFT_EXPONENT \
+   | SANITIZE_DIVIDE | SANITIZE_SI_OVERFLOW | SANITIZE_BOOL | SANITIZE_ENUM \
+   | SANITIZE_FLOAT_CAST | SANITIZE_BOUNDS | SANITIZE_RETURN \
+   | SANITIZE_UNREACHABLE | SANITIZE_VLA | SANITIZE_BUILTIN \
+   | SANITIZE_FLOAT_DIVIDE \
+   | SANITIZE_POINTER_COMPARE | SANITIZE_POINTER_SUBTRACT \
+   | SANITIZE_THREAD)
+
+static inline bool
+routed_sanitizer_check_p (sanitize_code_type check_flag)
+{
+  return (check_flag & ROUTED_SANITIZER_BITS) != 0;
+}
+
+/* P3100: derive the evaluation semantic for a ROUTED sanitizer check
+   CHECK_BIT that has no explicit -fsanitize-semantic= override, per OPTS.
+   The derivation is p4298-gated:
+
+     build                 default (-fsanitize=)   -fsanitize-recover=
+     with    -fcontracts-p4298   noexcept_enforce   noexcept_observe
+     without -fcontracts-p4298   quick_enforce      *hard error*
+
+   -fsanitize-trap= yields quick_enforce (always available) in either build.
+   The "recover without -fcontracts-p4298" combination has no non-throwing
+   realization other than terminating (which would silently drop the user's
+   requested continue-on-violation), so it is a hard error, reported once at
+   option-finalization time (see finish_options); here it maps to CES_INVALID
+   so no descriptor is emitted on the doomed compile.  */
+
+static enum contract_evaluation_semantic
+routed_sanitizer_default_semantic (struct gcc_options *opts,
+				   sanitize_code_type check_bit)
+{
+  if (!(opts->x_flag_sanitize & check_bit))
+    return CES_ASSUME;
+  if (opts->x_flag_sanitize_trap & check_bit)
+    return CES_QUICK;
+  if (opts->x_flag_sanitize_recover & check_bit)
+    return opts->x_flag_contracts_p4298 ? CES_NOEXCEPT_OBSERVE : CES_INVALID;
+  return opts->x_flag_contracts_p4298 ? CES_NOEXCEPT_ENFORCE : CES_QUICK;
+}
+
+/* See the comment on the declaration in opts.h.  Same active-global-
+   options convention as explicit_sanitizer_semantic immediately above.
+   P3100: an explicit -fsanitize-semantic= entry always wins;
+   otherwise the semantic is derived from -fsanitize/-recover/-trap.
+   P3100: a ROUTED check (routed_sanitizer_check_p) uses the
+   p4298-gated non-throwing derivation instead of the generic one.  */
+
+enum contract_evaluation_semantic
+resolved_sanitizer_semantic (sanitize_code_type sanitize_bit)
+{
+  enum contract_evaluation_semantic explicit_sem
+    = explicit_sanitizer_semantic (sanitize_bit);
+  if (explicit_sem != CES_INVALID)
+    return explicit_sem;
+
+  if (routed_sanitizer_check_p (sanitize_bit))
+    return routed_sanitizer_default_semantic (&global_options, sanitize_bit);
+
+  if (!(flag_sanitize & sanitize_bit))
+    return CES_ASSUME;
+  if (flag_sanitize_trap & sanitize_bit)
+    return CES_QUICK;
+  if (flag_sanitize_recover & sanitize_bit)
+    return CES_OBSERVE;
+  return CES_ENFORCE;
 }
 
 /* All flag uses below need to explicitly reference the option sets
@@ -1100,6 +1257,32 @@ maybe_prepend_dump_dir_name (const gcc_options &opts)
   return nullptr;
 }
 
+/* Return the sanitizer_opts[] entry that is the canonical name for
+   CHECK_BIT (a single SANITIZE_* bit): the first table entry, in
+   declaration order, whose flag mask includes CHECK_BIT, skipping the
+   "all" and "undefined" meta-group entries (whose masks cover many
+   otherwise-unrelated checks and so are never a check's own name).
+   Used to de-duplicate the P3100 -fsanitize-semantic-print
+   debug seam across sanitizer_opts[] aliases that share bits, e.g.
+   "address" and "kernel-address" both include SANITIZE_ADDRESS, or
+   "shift" and "shift-base"/"shift-exponent" both include their component
+   bits -- each such group is printed exactly once, under its broadest/
+   first name.  Returns NULL if no non-meta entry contains CHECK_BIT.  */
+
+static const struct sanitizer_opts_s *
+canonical_sanitizer_opt (sanitize_code_type check_bit)
+{
+  for (int i = 0; sanitizer_opts[i].name != NULL; ++i)
+    {
+      if (strcmp (sanitizer_opts[i].name, "all") == 0
+	  || strcmp (sanitizer_opts[i].name, "undefined") == 0)
+	continue;
+      if (sanitizer_opts[i].flag & check_bit)
+	return &sanitizer_opts[i];
+    }
+  return NULL;
+}
+
 /* After all options at LOC have been read into OPTS and OPTS_SET,
    finalize settings of those options and diagnose incompatible
    combinations.  */
@@ -1376,6 +1559,181 @@ finish_options (struct gcc_options *opts, struct gcc_options *opts_set,
 	&& sanitizer_opts[i].flag != SANITIZE_VPTR)
       error_at (loc, "%<-fsanitize-trap=%s%> is not supported",
 		sanitizer_opts[i].name);
+
+  /* P3100: -fsanitize/-fsanitize-recover/-fsanitize-trap are all
+     finalized above, so this is where the per-check contract-evaluation
+     semantic is fully resolved.  The effect of -fsanitize-semantic= is purely
+     in later ASan-routing passes via resolved_sanitizer_semantic (opts.h); the
+     only thing to do here is the minimal -fsanitize-semantic-print debug seam
+     so the lowering is independently testable.  (The allowed-set
+     validation is done at parse time in parse_sanitizer_semantic_options,
+     against the named check entry, so that multi-bit and aliased checks
+     are handled correctly and no out-of-set semantic is ever stored.)  */
+
+  /* P3100: a ROUTED check under -fsanitize-recover= with no explicit
+     -fsanitize-semantic= override derives noexcept_observe, which requires
+     -fcontracts-p4298.  Without that flag there is no non-throwing way to
+     honor the requested continue-on-violation (terminating would silently
+     drop it), so this is a hard error here at option-finalization time --
+     routed_sanitizer_default_semantic returns CES_INVALID for exactly this
+     case.  (The default -fsanitize= path falls back to quick_enforce and is
+     always fine.)  The D4298 noexcept_{enforce,observe} semantics -- whether
+     requested explicitly via -fsanitize-semantic= (stored p4298-independently
+     at parse time) or derived from -fsanitize-recover= -- also require
+     -fcontracts-p4298; that gate is applied HERE rather than at parse time
+     because flag_contracts_p4298 is a C++-only Var not reliably set during
+     driver-side option parsing.  Routing is only in effect under
+     -fcontracts-p3100 and when the global opt-out
+     -fsanitize-noncontract-callbacks is not set (see the descriptor emission in
+     cp/decl2.cc); when routing is off there is nothing to gate.  */
+  if (opts->x_flag_contracts_p3100
+      && !opts->x_flag_sanitize_noncontract_callbacks
+      && !opts->x_flag_contracts_p4298)
+    {
+      sanitize_code_type remaining = ROUTED_SANITIZER_BITS;
+      while (remaining)
+	{
+	  unsigned bit = (unsigned)
+	    __builtin_ctzll ((unsigned long long) remaining);
+	  remaining &= remaining - 1;
+	  if (bit >= SANITIZE_CODE_TYPE_BITS)
+	    continue;
+	  sanitize_code_type check_bit = (sanitize_code_type) 1UL << bit;
+	  if (!(opts->x_flag_sanitize & check_bit))
+	    continue;
+	  const struct sanitizer_opts_s *canon
+	    = canonical_sanitizer_opt (check_bit);
+	  const char *cname = canon ? canon->name : "address";
+
+	  unsigned char stored = opts->x_flag_sanitize_semantic[bit];
+	  if (stored == CES_NOEXCEPT_ENFORCE || stored == CES_NOEXCEPT_OBSERVE)
+	    /* Explicit -fsanitize-semantic=<check>:noexcept_* without p4298.  */
+	    error_at (loc,
+		      "%<-fsanitize-semantic=%s:%s%> requires "
+		      "%<-fcontracts-p4298%>", cname,
+		      contract_semantic_name
+			((contract_evaluation_semantic) stored));
+	  else if (stored == CES_INVALID
+		   && !(opts->x_flag_sanitize_trap & check_bit)
+		   && (opts->x_flag_sanitize_recover & check_bit))
+	    /* Derived noexcept_observe (from -fsanitize-recover=) without p4298;
+	       there is no non-throwing way to honor continue-on-violation.  */
+	    error_at (loc,
+		      "%<-fsanitize-recover=%s%> routing to the "
+		      "contract-violation handler requires "
+		      "%<-fcontracts-p4298%> (for the %<noexcept_observe%> "
+		      "semantic; a throwing handler cannot propagate from a "
+		      "routed sanitizer check)",
+		      cname);
+	}
+    }
+
+  /* P3100: the resolved evaluation semantic selects which of the
+     sanitizer's OWN code paths a routed check is integrated along -- a
+     CONTINUING semantic (observe / noexcept_observe) rides the sanitizer's
+     RECOVER path; a TERMINATING semantic (enforce / noexcept_enforce /
+     quick_enforce) rides the sanitizer's NON-recovering (noreturn/abort) path,
+     the same path the sanitizer uses when it will not recover.  We realize this
+     by driving flag_sanitize_recover from the semantic (asan.cc's recover_p and
+     ubsan.cc's vptr expander both read it): SET the check's bit for a
+     continuing semantic, CLEAR it for a terminating one.
+
+     Both directions matter, and neither can be left to the check's default:
+       * Continuing: the routing runtime returns from the report call to resume
+         execution, so the instrumented code needs a fallthrough edge and must
+         not keep live values in call-clobbered registers across the call.  The
+         default noreturn variant would leave the following access running with
+         clobbered registers (a stack-buffer-overflow crashes; a heap one
+         survives only by register-allocation luck).
+       * Terminating: a check whose DEFAULT is recover (e.g. vptr, always
+         recoverable) would otherwise land a terminating semantic on the RECOVER
+         path -- but some checks only DETECT on the noreturn path (vptr's
+         use-after-lifetime shapes: with the noreturn handler GCC keeps the
+         poisoned vptr observable; the recover/fallthrough variant lets the dead
+         object present a valid base vptr and the miss is not reported).  So a
+         terminating semantic must be forced onto the noreturn path or it
+         silently misses those, and quick_enforce could even fail to terminate.
+         (stock `-fsanitize-recover=vptr` shows the same non-detection, so this
+         is a property of the recover path, not of the contract integration.)
+     The semantic drives the codegen here, so this may override an explicit
+     -fsanitize-recover=/-fno-sanitize-recover= for a routed check -- consistent
+     with -fsanitize-recover=/-fsanitize-trap= lowering into the semantic.
+
+     LTO: this must also hold at LTRANS, where with -fno-fat-lto-objects the
+     ASan pass runs and the C++-only -fcontracts-p3100 is NOT streamed into the
+     LTO options section.  So the EXPLICIT case is keyed on the streamed
+     flag_sanitize_semantic (-fsanitize-semantic= is a Common option, streamed
+     and re-parsed at LTRANS), NOT on flag_contracts_p3100 -- otherwise the
+     LTRANS codegen would be non-recover, the routed continue would re-fault,
+     and (with the crash-state gate now skipped on the routed path) loop
+     forever.  The DERIVED-default continue case (a routed check with no
+     explicit -fsanitize-semantic= but -fsanitize-recover= set) needs no LTRANS
+     handling: -fsanitize-recover= is itself streamed, so flag_sanitize_recover
+     already carries it there; that path stays -fcontracts-p3100-gated (it is
+     only meaningful with routing on, and only matters in the front end).  */
+  {
+    sanitize_code_type remaining = ROUTED_SANITIZER_BITS;
+    while (remaining)
+      {
+	unsigned bit = (unsigned)
+	  __builtin_ctzll ((unsigned long long) remaining);
+	remaining &= remaining - 1;
+	if (bit >= SANITIZE_CODE_TYPE_BITS)
+	  continue;
+	sanitize_code_type check_bit = (sanitize_code_type) 1UL << bit;
+	if (!(opts->x_flag_sanitize & check_bit))
+	  continue;
+	unsigned char stored = opts->x_flag_sanitize_semantic[bit];
+	enum contract_evaluation_semantic sem;
+	if (stored != CES_INVALID)
+	  /* Explicit -fsanitize-semantic=<check>:<semantic> -- streamed, so
+	     this arm also fires at LTRANS.  */
+	  sem = (enum contract_evaluation_semantic) stored;
+	else if (opts->x_flag_contracts_p3100
+		 && !opts->x_flag_sanitize_noncontract_callbacks)
+	  /* Derived default (front end only; LTRANS covered via streamed
+	     -fsanitize-recover=).  */
+	  sem = routed_sanitizer_default_semantic (opts, check_bit);
+	else
+	  continue;
+	if (sem == CES_NOEXCEPT_OBSERVE || sem == CES_OBSERVE)
+	  opts->x_flag_sanitize_recover |= check_bit;
+	else if (sem == CES_NOEXCEPT_ENFORCE || sem == CES_ENFORCE
+		 || sem == CES_QUICK)
+	  opts->x_flag_sanitize_recover &= ~check_bit;
+      }
+  }
+
+  if (opts->x_flag_sanitize_semantic_print)
+    for (int i = 0; sanitizer_opts[i].name != NULL; ++i)
+      {
+	if (sanitizer_opts[i].flag == 0
+	    || strcmp (sanitizer_opts[i].name, "all") == 0
+	    || strcmp (sanitizer_opts[i].name, "undefined") == 0)
+	  continue;
+
+	unsigned lsb
+	  = (unsigned) __builtin_ctzll ((unsigned long long)
+					 sanitizer_opts[i].flag);
+	sanitize_code_type check_bit = (sanitize_code_type) 1UL << lsb;
+	if (canonical_sanitizer_opt (check_bit) != &sanitizer_opts[i])
+	  continue;
+
+	/* P3100: a routed check's semantic is keyed on its routing bit
+	   (e.g. SANITIZE_USER_ADDRESS for "address"), not on the shared family
+	   bit that happens to be lowest (SANITIZE_ADDRESS, also used by
+	   kernel-address).  Resolve against the routing bit so the print
+	   reflects the actual routed semantic.  */
+	sanitize_code_type resolve_bit = check_bit;
+	if (sanitizer_opts[i].flag & ROUTED_SANITIZER_BITS)
+	  resolve_bit = (sanitize_code_type)
+	    (sanitizer_opts[i].flag & ROUTED_SANITIZER_BITS);
+
+	if (opts->x_flag_sanitize & check_bit)
+	  fprintf (stderr, "%s: %s\n", sanitizer_opts[i].name,
+		   contract_semantic_name (
+		     resolved_sanitizer_semantic (resolve_bit)));
+      }
 
   /* When instrumenting the pointers, we don't want to remove
      the null pointer checks.  */
@@ -2432,6 +2790,233 @@ parse_sanitizer_options (const char *p, location_t loc, int scode,
   return flags;
 }
 
+/* Parse the comma-separated <check>:<semantic> pairs of P (the argument
+   to -fsanitize-semantic=) at location LOC, recording the resolved
+   contract-evaluation semantic into OPTS->x_flag_sanitize_semantic.
+
+   CHECK is resolved via the sanitizer_opts[] name table -- the same
+   name-matching used for -fsanitize=/-fsanitize-recover=/-fsanitize-trap=,
+   including group names such as "undefined" or "all", which set every
+   member bit.  SEMANTIC is resolved via the shared
+   contract_semantic_from_name table (c-family/contracts-config.h).
+
+   An unrecognized CHECK or SEMANTIC name is a hard error_at.
+
+   P3100: whether a given semantic is allowed for a given check
+   is ALSO enforced here, at parse time, against the capability fields of
+   the named sanitizer_opts[] entry: the allowed set is {assume, enforce}
+   always, plus observe iff the entry can_recover, plus quick_enforce iff
+   it can_trap, and never ignore.  A request outside that set is a hard
+   error (never clamped), and the semantic is not stored.  Validating the
+   named entry (rather than a per-bit guess in finish_options) is what
+   makes multi-bit checks (e.g. shift-exponent, a bit exclusive to the
+   multi-bit "shift" entry) and aliased names (e.g. kernel-address vs
+   address, which share SANITIZE_ADDRESS) both correct: the error names
+   the exact check the user typed, and no out-of-set semantic -- in
+   particular CES_IGNORE -- is ever stored for any bit.  */
+
+static void
+parse_sanitizer_semantic_options (struct gcc_options *opts, const char *p,
+				  location_t loc)
+{
+  while (*p != 0)
+    {
+      const char *comma = strchr (p, ',');
+      size_t pair_len = comma ? (size_t) (comma - p) : strlen (p);
+
+      if (pair_len == 0)
+	{
+	  if (comma == NULL)
+	    break;
+	  p = comma + 1;
+	  continue;
+	}
+
+      const char *colon = (const char *) memchr (p, ':', pair_len);
+      if (colon == NULL)
+	error_at (loc, "%<-fsanitize-semantic=%> argument %q.*s is not of "
+		  "the form %<check:semantic%>", (int) pair_len, p);
+      else
+	{
+	  size_t check_len = colon - p;
+	  size_t semantic_len = pair_len - check_len - 1;
+	  const char *semantic_str = colon + 1;
+
+	  const struct sanitizer_opts_s *check = NULL;
+	  for (int i = 0; sanitizer_opts[i].name != NULL; ++i)
+	    if (check_len == sanitizer_opts[i].len
+		&& memcmp (p, sanitizer_opts[i].name, check_len) == 0)
+	      {
+		check = &sanitizer_opts[i];
+		break;
+	      }
+
+	  if (check == NULL)
+	    error_at (loc, "%<-fsanitize-semantic=%> unknown sanitizer "
+		      "check %q.*s", (int) check_len, p);
+	  else
+	    {
+	      char semantic_buf[64];
+	      size_t copy_len = semantic_len < sizeof (semantic_buf) - 1
+				 ? semantic_len : sizeof (semantic_buf) - 1;
+	      memcpy (semantic_buf, semantic_str, copy_len);
+	      semantic_buf[copy_len] = 0;
+
+	      contract_evaluation_semantic semantic
+		= contract_semantic_from_name (semantic_buf);
+	      if (semantic == CES_INVALID)
+		error_at (loc, "%<-fsanitize-semantic=%> unknown contract "
+			  "evaluation semantic %qs", semantic_buf);
+	      else
+		{
+		  /* P3100: validate and store PER MEMBER BIT against
+		     that bit's OWN capability, mirroring how stock GCC handles
+		     -fsanitize-recover=/-trap= for group names.
+
+		     A member bit's allowed set is {assume, enforce} always,
+		     plus observe iff its canonical check can_recover, plus
+		     quick_enforce iff can_trap, and never ignore.
+
+		     Whether an unsupported request is a hard error or a silent
+		     skip depends on whether CHECK is an individual check or a
+		     meta-group.  The only meta-group names are "undefined" and
+		     "all" -- the same two entries canonical_sanitizer_opt skips
+		     and the same two that stock GCC special-cases for
+		     -fsanitize-recover=/-trap= group masking.  A meta-group
+		     silently skips members that don't support the semantic,
+		     leaving them at their derived value, exactly like stock
+		     -fsanitize-recover=undefined (which does not error and does
+		     not touch non-recoverable members such as return/vptr).
+		     Every other name -- including aliases that cover several
+		     bits of one logical check (address, kernel-address,
+		     bounds-strict, shift) and single sub-checks (shift-base) --
+		     is an individual check and errors on an unsupported
+		     semantic, exactly like stock -fsanitize-recover=return.
+		     "ignore" is out of every member's set, so it is always a
+		     hard error, individual or meta-group (a sanitizer check can
+		     never be silently skipped), and is diagnosed up front
+		     before the store logic.  */
+		  if (semantic == CES_IGNORE)
+		    {
+		      error_at (loc,
+				"%<-fsanitize-semantic=%s:%s%> is not supported",
+				check->name, contract_semantic_name (semantic));
+		      if (comma == NULL)
+			break;
+		      p = comma + 1;
+		      continue;
+		    }
+
+		  bool is_group = (strcmp (check->name, "undefined") == 0
+				   || strcmp (check->name, "all") == 0);
+
+		  /* P3100: a ROUTED check's report is invoked from
+		     libasan's implicitly-noexcept ScopedInErrorReport
+		     destructor, so a throwing handler can never propagate (it
+		     std::terminate()s -- see routed_sanitizer_check_p).  Its
+		     allowed set is therefore the NON-throwing one: {assume,
+		     quick_enforce} always, plus the D4298
+		     noexcept_{enforce,observe} semantics iff -fcontracts-p4298.
+		     Plain throwing enforce/observe are rejected with a message
+		     suggesting the noexcept name (or quick_enforce); the
+		     noexcept semantics without -fcontracts-p4298 are rejected
+		     naming that flag.  The decision is per NAMED check (not
+		     per-bit): the multi-bit "address" name is routed as a
+		     whole, so every bit it covers gets the routed allowed set
+		     uniformly (the shared SANITIZE_ADDRESS bit's stored value
+		     is inert -- only SANITIZE_USER_ADDRESS is read for
+		     routing).  */
+		  bool routed = routed_sanitizer_check_p (check->flag);
+
+		  bool errored = false;
+		  {
+		    sanitize_code_type remaining = check->flag;
+		    while (remaining)
+		      {
+			unsigned bit = (unsigned)
+			  __builtin_ctzll ((unsigned long long) remaining);
+			remaining &= remaining - 1;
+			if (bit >= SANITIZE_CODE_TYPE_BITS)
+			  continue;
+
+			const sanitize_code_type this_bit
+			  = (sanitize_code_type) 1UL << bit;
+			const struct sanitizer_opts_s *canon
+			  = canonical_sanitizer_opt (this_bit);
+
+			unsigned allowed;
+			if (routed)
+			  {
+			    /* p4298-INDEPENDENT here: the noexcept semantics are
+			       accepted and STORED regardless of -fcontracts-p4298
+			       so that the p4298 gate can be applied later, in
+			       finish_options, where the C++-only flag_contracts_
+			       p4298 is reliably set (during driver-side option
+			       parsing that flag is not yet applied -- it is not a
+			       Common option -- so reading it here would spuriously
+			       reject a valid request; see the routed p4298 check in
+			       finish_options).  The p4298-independent rejections
+			       (plain throwing enforce/observe) stay here.  */
+			    allowed = (1u << CES_ASSUME) | (1u << CES_QUICK)
+				      | (1u << CES_NOEXCEPT_ENFORCE)
+				      | (1u << CES_NOEXCEPT_OBSERVE);
+			  }
+			else
+			  {
+			    allowed = (1u << CES_ASSUME) | (1u << CES_ENFORCE);
+			    if (canon && canon->can_recover)
+			      allowed |= (1u << CES_OBSERVE);
+			    if (canon && canon->can_trap)
+			      allowed |= (1u << CES_QUICK);
+			  }
+
+			if (allowed & (1u << semantic))
+			  opts->x_flag_sanitize_semantic[bit]
+			    = (unsigned char) semantic;
+			else if (!is_group && !errored)
+			  {
+			    /* Individual check whose semantic is unsupported:
+			       hard error, naming the check the user typed.
+			       For a routed check, tailor the diagnostic to
+			       point at the usable non-throwing alternative.
+			       (The noexcept-requires-p4298 gate is applied in
+			       finish_options, not here.)  */
+			    if (routed && semantic == CES_ENFORCE)
+			      error_at (loc,
+					"%<-fsanitize-semantic=%s:enforce%> is "
+					"not supported for a routed sanitizer "
+					"check (a throwing handler cannot "
+					"propagate); use %<noexcept_enforce%> "
+					"(with %<-fcontracts-p4298%>) or "
+					"%<quick_enforce%>", check->name);
+			    else if (routed && semantic == CES_OBSERVE)
+			      error_at (loc,
+					"%<-fsanitize-semantic=%s:observe%> is "
+					"not supported for a routed sanitizer "
+					"check (a throwing handler cannot "
+					"propagate); use %<noexcept_observe%> "
+					"with %<-fcontracts-p4298%>", check->name);
+			    else
+			      error_at (loc,
+					"%<-fsanitize-semantic=%s:%s%> is not "
+					"supported", check->name,
+					contract_semantic_name (semantic));
+			    errored = true;
+			  }
+			/* else: group member that can't support SEMANTIC --
+			   silently skip, leave at derived value.  */
+		      }
+		  }
+		}
+	    }
+	}
+
+      if (comma == NULL)
+	break;
+      p = comma + 1;
+    }
+}
+
 /* Parse string values of no_sanitize attribute passed in VALUE.
    Values are separated with comma.  */
 
@@ -2871,6 +3456,10 @@ common_handle_option (struct gcc_options *opts,
       opts->x_flag_sanitize_trap
 	= parse_sanitizer_options (arg, loc, code,
 				   opts->x_flag_sanitize_trap, value, true);
+      break;
+
+    case OPT_fsanitize_semantic_:
+      parse_sanitizer_semantic_options (opts, arg, loc);
       break;
 
     case OPT_fasan_shadow_offset_:

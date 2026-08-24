@@ -1,0 +1,24 @@
+## Linker version script for libcontracts.
+##
+## Copyright (C) 2026 Free Software Foundation, Inc.
+##
+## This file is part of the GNU Contracts Runtime Library (libcontracts).
+## GPLv3 with the GCC Runtime Library Exception; see COPYING3 and
+## COPYING.RUNTIME.
+
+LIBCONTRACTS_1.0 {
+  global:
+    # Chain walking + dispatch primitives.
+    __cxa_find_field;
+    __contract_dispatch_core;
+    __dispatch_with_override_core;
+    # Non-noexcept entry points (universal + specialized).
+    __cxa_contract_violation*;
+    # C contract-check helpers (D4299).
+    __c_contract_check_*;
+    # C accessor functions and P3290 C API.
+    stdc_contract_violation_*;
+    stdc_handle_*;
+  local:
+    *;
+};

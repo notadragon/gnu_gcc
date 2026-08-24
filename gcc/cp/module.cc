@@ -18104,10 +18104,14 @@ module_state::write_using_directives (elf_out *to, depset::hash &table,
   sec.begin ();
 
   unsigned num = 0;
-  auto emit_one_ns = [&](depset *parent_dep)
+  /* CONTRACT_CONTROL distinguishes a P3400 contract-control using-directive,
+     which lives in its own vector because the names it introduces are
+     visible only inside assertion-control expressions.  */
+  auto emit_vec = [&](depset *parent_dep, vec<tree, va_gc> *udirs,
+		      bool contract_control)
     {
       tree parent = parent_dep->get_entity ();
-      for (auto udir : NAMESPACE_LEVEL (parent)->using_directives)
+      for (auto udir : udirs)
 	{
 	  if (TREE_CODE (udir) != USING_DECL || !DECL_MODULE_PURVIEW_P (udir))
 	    continue;
@@ -18125,13 +18129,23 @@ module_state::write_using_directives (elf_out *to, depset::hash &table,
 	      continue;
 	    }
 
-	  dump () && dump ("Writing using-directive in %N for %N",
+	  dump () && dump ("Writing %susing-directive in %N for %N",
+			   contract_control ? "contract-control " : "",
 			   parent, target);
 	  sec.u (exported);
+	  sec.u (contract_control);
 	  write_namespace (sec, parent_dep);
 	  write_namespace (sec, target_dep);
 	  ++num;
 	}
+    };
+
+  auto emit_one_ns = [&](depset *parent_dep)
+    {
+      tree parent = parent_dep->get_entity ();
+      emit_vec (parent_dep, NAMESPACE_LEVEL (parent)->using_directives, false);
+      emit_vec (parent_dep, NAMESPACE_LEVEL (parent)->contract_control_usings,
+		true);
     };
 
   emit_one_ns (table.find_dependency (global_namespace));
@@ -18165,14 +18179,22 @@ module_state::read_using_directives (unsigned num)
   for (unsigned ix = 0; ix != num; ++ix)
     {
       bool exported = sec.u ();
+      bool contract_control = sec.u ();
       tree parent = read_namespace (sec);
       tree target = read_namespace (sec);
       if (sec.get_overrun ())
 	break;
 
-      dump () && dump ("Read using-directive in %N for %N", parent, target);
+      dump () && dump ("Read %susing-directive in %N for %N",
+		       contract_control ? "contract-control " : "",
+		       parent, target);
       if (exported || is_module () || is_partition ())
-	add_imported_using_namespace (parent, target);
+	{
+	  if (contract_control)
+	    add_imported_contract_control_using_namespace (parent, target);
+	  else
+	    add_imported_using_namespace (parent, target);
+	}
     }
 
   dump.outdent ();

@@ -13568,7 +13568,45 @@ c_finish_return (location_t loc, tree retval, tree origtype, bool musttail_p)
 	verify_sequence_points (retval);
     }
 
-  ret_stmt = build_stmt (loc, RETURN_EXPR, retval);
+  /* Check postconditions before returning (D4299).  The return value must
+     be evaluated exactly once, then bound to any result name, checked, and
+     returned -- without re-evaluating the return expression.  RETVAL is
+     "res = <expr>"; emit it as a statement so <expr> runs once and RES holds
+     the result, run the checks against RES, then return RES with no second
+     assignment.  */
+  if (flag_contracts_p4299 && c_has_active_postconditions ())
+    {
+      tree resdecl = DECL_RESULT (current_function_decl);
+      if (retval
+	  && TREE_CODE (retval) == MODIFY_EXPR
+	  && TREE_OPERAND (retval, 0) == resdecl)
+	{
+	  /* Evaluate the return value exactly once into a temporary, bind it
+	     to any result name, check the postconditions against it, then
+	     store it into the result and return.  Using an ordinary local
+	     (rather than the RESULT_DECL directly) keeps the emitted return
+	     in the normal "res = <value>" form so later passes such as
+	     inlining are unaffected (D4299).  */
+	  tree rtype = TREE_TYPE (resdecl);
+	  tree tmp = create_tmp_var_raw (rtype);
+	  DECL_CONTEXT (tmp) = current_function_decl;
+	  add_stmt (build_stmt (loc, DECL_EXPR, tmp));
+	  tree store = build2 (MODIFY_EXPR, rtype, tmp, TREE_OPERAND (retval, 1));
+	  SET_EXPR_LOCATION (store, loc);
+	  add_stmt (store);
+	  c_maybe_check_postconditions (loc, tmp);
+	  tree final = build2 (MODIFY_EXPR, rtype, resdecl, tmp);
+	  SET_EXPR_LOCATION (final, loc);
+	  ret_stmt = build_stmt (loc, RETURN_EXPR, final);
+	}
+      else
+	{
+	  c_maybe_check_postconditions (loc, retval);
+	  ret_stmt = build_stmt (loc, RETURN_EXPR, retval);
+	}
+    }
+  else
+    ret_stmt = build_stmt (loc, RETURN_EXPR, retval);
   if (no_warning)
     suppress_warning (ret_stmt, OPT_Wreturn_type);
   return add_stmt (ret_stmt);

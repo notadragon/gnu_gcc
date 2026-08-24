@@ -22,8 +22,10 @@
 
 include $(top_srcdir)/fragment.am
 
-# Convenience library for C++26 runtime.
-noinst_LTLIBRARIES = libc++26convenience.la
+# Convenience libraries for the C++26 runtime.  The contracts runtime is kept
+# in its own convenience library because its sources are compiled with the
+# experimental -fcontracts* flags; the rest of the C++26 runtime must not be.
+noinst_LTLIBRARIES = libc++26convenience.la libc++26contractsconvenience.la
 
 headers =
 
@@ -35,17 +37,35 @@ else
 inst_sources =
 endif
 
+# Non-contracts C++26 runtime components (shipped in libstdc++exp).
 sources = \
 	  debugging.cc \
 	  text_encoding.cc
 
+# Contracts runtime; compiled with the experimental -fcontracts* flags below.
+contracts_sources = \
+	  contract26.cc \
+	  contracts_abi.cc
+
 vpath % $(top_srcdir)/src/c++26
+
+contract26.lo: contract26.cc
+	$(LTCXXCOMPILE) -fcontracts -fcontracts-p3290 -fcontracts-p4301 -c $<
+contract26.o: contract26.cc
+	$(CXXCOMPILE) -fcontracts -fcontracts-p3290 -fcontracts-p4301 -c $<
+
+contracts_abi.lo: contracts_abi.cc
+	$(LTCXXCOMPILE) -fcontracts -fcontracts-p3290 -c $<
+contracts_abi.o: contracts_abi.cc
+	$(CXXCOMPILE) -fcontracts -fcontracts-p3290 -c $<
 
 
 if GLIBCXX_HOSTED
 libc__26convenience_la_SOURCES = $(sources)  $(inst_sources)
+libc__26contractsconvenience_la_SOURCES = $(contracts_sources)
 else
 libc__26convenience_la_SOURCES =
+libc__26contractsconvenience_la_SOURCES =
 endif
 
 # AM_CXXFLAGS needs to be in each subdirectory so that it can be

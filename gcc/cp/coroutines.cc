@@ -33,6 +33,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "gcc-rich-location.h"
 #include "hash-map.h"
 #include "coroutines.h"
+#include "contracts.h"
 
 /* ================= Debug. ================= */
 
@@ -4499,6 +4500,28 @@ coro_build_actor_or_destroy_function (tree orig, tree fn_type,
   return fn;
 }
 
+/* P3100: control flowing off the end of a coroutine whose promise type has no
+   usable return_void is undefined behavior ({stmt.return.coroutine.flow.off}).
+   When -fcontracts-p3100 is in effect, treat that fall-through point as an
+   implicit contract assertion: resolve its evaluation semantic and, for a
+   checking semantic, add the reaction to the current statement list before the
+   coroutine proceeds to its final suspend.  ORIG_FN_DECL is the coroutine and
+   LOC its location.  A no-op for assume/ignore (fall through as today).  */
+
+static void
+coro_maybe_add_flow_off_check (tree orig_fn_decl, location_t loc)
+{
+  if (!flag_contracts_p3100)
+    return;
+  contract_evaluation_semantic sem
+    = resolve_implicit_contract_semantic (orig_fn_decl, loc,
+					  "ub:stmt.return.coroutine.flow.off");
+  tree reaction
+    = build_implicit_coroutine_flow_off_check (orig_fn_decl, loc, sem);
+  if (reaction)
+    add_stmt (reaction);
+}
+
 /* Re-write the body as per [dcl.fct.def.coroutine] / 5.  */
 
 void
@@ -4704,6 +4727,8 @@ cp_coroutine_transform::wrap_original_function_body ()
 
       if (return_void)
 	add_stmt (return_void);
+      else
+	coro_maybe_add_flow_off_check (orig_fn_decl, loc);
       TRY_STMTS (tcb) = pop_stmt_list (TRY_STMTS (tcb));
       TRY_HANDLERS (tcb) = push_stmt_list ();
       /* Mimic what the parser does for the catch.  */
@@ -4759,6 +4784,8 @@ cp_coroutine_transform::wrap_original_function_body ()
       add_stmt (coroutine_body);
       if (return_void)
 	add_stmt (return_void);
+      else
+	coro_maybe_add_flow_off_check (orig_fn_decl, loc);
     }
 
   /* We are now doing actions associated with the end of the function, so

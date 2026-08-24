@@ -193,6 +193,12 @@ enum rid
   /* C++26 */
   RID_CONTASSERT,
 
+  /* C++ contracts extensions (P3400) */
+  RID_CONTRACT_CONTROL,
+
+  /* C contracts (D4299) */
+  RID_C_PRE, RID_C_POST, RID_C_CONTRACT_ASSERT,
+
   /* C++ transactional memory.  */
   RID_ATOMIC_NOEXCEPT, RID_ATOMIC_CANCEL, RID_SYNCHRONIZED,
 
@@ -455,6 +461,8 @@ extern machine_mode c_default_pointer_mode;
 #define D_CXX_COROUTINES 0x10000  /* In C++, only with coroutines.  */
 #define D_CXX_MODULES	0x20000  /* In C++, only with modules.  */
 #define D_CXX26         0x40000	/* In C++, C++26 only.  */
+#define D_CXX_CONTRACTS_P3400 0x80000 /* In C++, only with -fcontracts-p3400.  */
+#define D_C_CONTRACTS	0x100000 /* In C, only with -fcontracts-p4299.  */
 
 #define D_CXX_CONCEPTS_FLAGS D_CXXONLY | D_CXX_CONCEPTS
 #define D_CXX_CHAR8_T_FLAGS D_CXXONLY | D_CXX_CHAR8_T

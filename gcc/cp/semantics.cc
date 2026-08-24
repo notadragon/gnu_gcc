@@ -4807,6 +4807,13 @@ process_outer_var_ref (tree decl, tsubst_flags_t complain,
   else if (processing_contract_condition && TREE_CODE (decl) == PARM_DECL)
     /* Use of a parameter in a contract condition is fine.  */
     return decl;
+  else if (processing_postcondition_predicate && VAR_P (decl))
+    /* Use of a postcondition capture (a VAR_DECL, already remapped to the
+       instantiated capture) in the predicate is fine -- the capture is
+       available in the postcondition context.  During class-template
+       instantiation the capture's context is the instantiated function, so it
+       would otherwise look like an outer-function local.  */
+    return decl;
   else
     {
       if (complain & tf_error)

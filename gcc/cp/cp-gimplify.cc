@@ -1969,7 +1969,8 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 
   if (TREE_CODE (stmt) == INTEGER_CST
       && TYPE_REF_P (TREE_TYPE (stmt))
-      && (flag_sanitize & (SANITIZE_NULL | SANITIZE_ALIGNMENT))
+      && ((flag_sanitize & (SANITIZE_NULL | SANITIZE_ALIGNMENT))
+	  || flag_contracts_p3100)
       && !wtd->no_sanitize_p)
     {
       ubsan_maybe_instrument_reference (stmt_p);
@@ -2433,15 +2434,17 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 	}
 
       if (!wtd->no_sanitize_p
-	  && sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT)
+	  && (sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT)
+	      || flag_contracts_p3100)
 	  && TYPE_REF_P (TREE_TYPE (stmt)))
 	ubsan_maybe_instrument_reference (stmt_p);
       break;
 
     case CALL_EXPR:
       if (!wtd->no_sanitize_p
-	  && sanitize_flags_p ((SANITIZE_NULL
-				| SANITIZE_ALIGNMENT | SANITIZE_VPTR)))
+	  && (sanitize_flags_p ((SANITIZE_NULL
+				 | SANITIZE_ALIGNMENT | SANITIZE_VPTR))
+	      || flag_contracts_p3100))
 	{
 	  tree fn = CALL_EXPR_FN (stmt);
 	  if (fn != NULL_TREE
@@ -2453,7 +2456,8 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 		= TREE_CODE (fn) == ADDR_EXPR
 		  && TREE_CODE (TREE_OPERAND (fn, 0)) == FUNCTION_DECL
 		  && DECL_CONSTRUCTOR_P (TREE_OPERAND (fn, 0));
-	      if (sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT))
+	      if (sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT)
+		  || flag_contracts_p3100)
 		ubsan_maybe_instrument_member_call (stmt, is_ctor);
 	      if (sanitize_flags_p (SANITIZE_VPTR) && !is_ctor)
 		cp_ubsan_maybe_instrument_member_call (stmt);
@@ -2647,33 +2651,13 @@ cp_genericize_tree (tree* t_p, bool handle_invisiref_parm_p)
     cp_ubsan_instrument_member_accesses (t_p);
 }
 
-/* If a function that should end with a return in non-void
-   function doesn't obviously end with return, add ubsan
-   instrumentation code to verify it at runtime.  If -fsanitize=return
-   is not enabled, instrument __builtin_unreachable.  */
+/* Return the last executable statement of the (sub)body T, descending through
+   scopes, cleanup regions and statement lists, or NULL_TREE if there is none.
+   Used to decide whether control can fall off the end of a body.  */
 
-static void
-cp_maybe_instrument_return (tree fndecl)
+static tree
+cp_last_body_stmt (tree t)
 {
-  if (VOID_TYPE_P (TREE_TYPE (TREE_TYPE (fndecl)))
-      || DECL_CONSTRUCTOR_P (fndecl)
-      || DECL_DESTRUCTOR_P (fndecl)
-      || !targetm.warn_func_return (fndecl))
-    return;
-
-  if (!sanitize_flags_p (SANITIZE_RETURN, fndecl)
-      /* Don't add __builtin_unreachable () if not optimizing, it will not
-	 improve any optimizations in that case, just break UB code.
-	 Don't add it if -fsanitize=unreachable -fno-sanitize=return either,
-	 UBSan covers this with ubsan_instrument_return above where sufficient
-	 information is provided, while the __builtin_unreachable () below
-	 if return sanitization is disabled will just result in hard to
-	 understand runtime error without location.  */
-      && ((!optimize && !flag_unreachable_traps)
-	  || sanitize_flags_p (SANITIZE_UNREACHABLE, fndecl)))
-    return;
-
-  tree t = DECL_SAVED_TREE (fndecl);
   while (t)
     {
       switch (TREE_CODE (t))
@@ -2701,21 +2685,149 @@ cp_maybe_instrument_return (tree fndecl)
 		continue;
 	      }
 	  }
-	  break;
-	case RETURN_EXPR:
-	  return;
+	  return t;
 	default:
-	  break;
+	  return t;
 	}
-      break;
     }
-  if (t == NULL_TREE)
+  return NULL_TREE;
+}
+
+/* If FNDECL's body is a function-try-block, return its TRY_BLOCK (which still
+   carries FN_TRY_BLOCK_P at this point -- genericization to a TRY_CATCH_EXPR
+   happens later), descending the wrappers the front end places around a body:
+   the artificial outer scope, a cleanup region and the noexcept / throw()
+   exception-specification region.  Returns NULL_TREE otherwise (including for a
+   plain trailing try-block, which is not a function-try-block).  */
+
+static tree
+find_function_try_block (tree t)
+{
+  while (t)
+    {
+      switch (TREE_CODE (t))
+	{
+	case BIND_EXPR:
+	  t = BIND_EXPR_BODY (t);
+	  continue;
+	case MUST_NOT_THROW_EXPR:
+	case CLEANUP_POINT_EXPR:
+	  t = TREE_OPERAND (t, 0);
+	  continue;
+	case EH_SPEC_BLOCK:
+	  t = EH_SPEC_STMTS (t);
+	  continue;
+	case STATEMENT_LIST:
+	  {
+	    tree only = NULL_TREE;
+	    for (tree_stmt_iterator i = tsi_start (t); !tsi_end_p (i);
+		 tsi_next (&i))
+	      {
+		tree s = tsi_stmt (i);
+		if (TREE_CODE (s) == DEBUG_BEGIN_STMT)
+		  continue;
+		if (only)
+		  return NULL_TREE;
+		only = s;
+	      }
+	    if (!only)
+	      return NULL_TREE;
+	    t = only;
+	    continue;
+	  }
+	case TRY_BLOCK:
+	  return FN_TRY_BLOCK_P (t) ? t : NULL_TREE;
+	default:
+	  return NULL_TREE;
+	}
+    }
+  return NULL_TREE;
+}
+
+/* If a function that should end with a return in non-void
+   function doesn't obviously end with return, add ubsan
+   instrumentation code to verify it at runtime.  If -fsanitize=return
+   is not enabled, instrument __builtin_unreachable.  */
+
+static void
+cp_maybe_instrument_return (tree fndecl)
+{
+  if (VOID_TYPE_P (TREE_TYPE (TREE_TYPE (fndecl)))
+      || DECL_CONSTRUCTOR_P (fndecl)
+      || DECL_DESTRUCTOR_P (fndecl)
+      || !targetm.warn_func_return (fndecl))
     return;
+
+  /* Determine whether control can fall off the end of the function body.  If
+     the body definitely ends in a return (or we cannot tell where it ends),
+     there is no fall-off point to guard.  This detection is done first (before
+     the legacy skip gate below) so the P3100 path can act on it even at
+     -O0.  */
+  tree t = cp_last_body_stmt (DECL_SAVED_TREE (fndecl));
+  if (t == NULL_TREE || TREE_CODE (t) == RETURN_EXPR)
+    return;
+
   tree *p = &DECL_SAVED_TREE (fndecl);
   if (TREE_CODE (*p) == BIND_EXPR)
     p = &BIND_EXPR_BODY (*p);
 
   location_t loc = DECL_SOURCE_LOCATION (fndecl);
+
+  /* P3100: a value-returning function that can fall off its end without
+     returning ({stmt.return.flow.off}) is core-language UB guarded by an
+     implicit contract assertion.  Resolve the flow-off evaluation semantic
+     ONCE -- both the function-try-block fall-off guard and the after-construct
+     guard below use it, and resolving it twice would double any config-error
+     diagnostic emitted by resolve_implicit_contract_semantic.  For anything
+     other than "assume" emit the corresponding reaction; "assume" falls through
+     to the legacy behaviour below, keeping today's codegen byte-for-byte
+     identical.  */
+  if (flag_contracts_p3100)
+    {
+      contract_evaluation_semantic sem
+	= resolve_implicit_contract_semantic (fndecl, loc,
+					      "ub:stmt.return.flow.off");
+
+      /* For a function-try-block, control also reaches the end of the function
+	 by running off the end of the try-block body.  That point is inside the
+	 function-body scope -- the function-try-block's handlers can catch an
+	 exception thrown there -- so guard it separately, inside the try, in
+	 addition to the guard after the whole construct (below) which covers a
+	 handler running off its own end.  */
+      if (sem != CES_ASSUME)
+	{
+	  tree try_block = find_function_try_block (DECL_SAVED_TREE (fndecl));
+	  if (try_block)
+	    {
+	      tree *body_p = &TRY_STMTS (try_block);
+	      tree last = cp_last_body_stmt (*body_p);
+	      if (last != NULL_TREE && TREE_CODE (last) != RETURN_EXPR)
+		{
+		  tree check = build_implicit_flow_off_check (fndecl, loc, sem);
+		  if (check)
+		    append_to_statement_list (check, body_p);
+		}
+	    }
+
+	  tree check = build_implicit_flow_off_check (fndecl, loc, sem);
+	  if (check)
+	    append_to_statement_list (check, p);
+	  return;
+	}
+    }
+
+  if (!sanitize_flags_p (SANITIZE_RETURN, fndecl)
+      /* Don't add __builtin_unreachable () if not optimizing, it will not
+	 improve any optimizations in that case, just break UB code.
+	 Don't add it if -fsanitize=unreachable -fno-sanitize=return either,
+	 UBSan covers this with ubsan_instrument_return above where sufficient
+	 information is provided, while the __builtin_unreachable () below
+	 if return sanitization is disabled will just result in hard to
+	 understand runtime error without location.  */
+      && ((!optimize && !flag_unreachable_traps)
+	  || sanitize_flags_p (SANITIZE_UNREACHABLE, fndecl)))
+    return;
+
   if (sanitize_flags_p (SANITIZE_RETURN, fndecl))
     t = ubsan_instrument_return (loc);
   else
@@ -2776,6 +2888,65 @@ cp_genericize (tree fndecl)
   /* If we're a clone, the body is already GIMPLE.  */
   if (DECL_CLONED_FUNCTION_P (fndecl))
     return;
+
+  /* P3100 (assume): when -fcontracts-p3100 resolves the user-space
+     address check to assume, AddressSanitizer must not instrument -- byte
+     identical to a build without -fsanitize=address for that check.  Realize
+     this per function by marking the definition no_sanitize("address").  Unlike
+     gating the asan pass on the front-end flags (which are gone at LTRANS), the
+     no_sanitize attribute lives in DECL_ATTRIBUTES and streams through LTO, so
+     pass_asan honors it under both -flto and non-LTO.  */
+  if (flag_contracts_p3100
+      && (flag_sanitize & SANITIZE_ADDRESS)
+      && resolved_sanitizer_semantic (SANITIZE_USER_ADDRESS) == CES_ASSUME)
+    add_no_sanitize_value (fndecl, SANITIZE_ADDRESS);
+
+  /* Same for the two ASan pointer-pair checks (pointer-compare,
+     pointer-subtract): when one resolves to assume, its instrumentation
+     (__sanitizer_ptr_cmp / __sanitizer_ptr_sub) must not be emitted.  Each is a
+     dedicated ASan-family bit, so mark no_sanitize for it individually.  */
+  if (flag_contracts_p3100)
+    {
+      static const sanitize_code_type pointer_pair_bits[]
+	= { SANITIZE_POINTER_COMPARE, SANITIZE_POINTER_SUBTRACT };
+      for (unsigned i = 0; i < ARRAY_SIZE (pointer_pair_bits); ++i)
+	if ((flag_sanitize & pointer_pair_bits[i])
+	    && (resolved_sanitizer_semantic (pointer_pair_bits[i])
+		== CES_ASSUME))
+	  add_no_sanitize_value (fndecl, pointer_pair_bits[i]);
+    }
+
+  /* Same for the routed UBSan runtime checks (vptr, alignment, object-size,
+     nonnull-attribute, returns-nonnull-attribute, pointer-overflow): when one
+     resolves to assume, its instrumentation must not be emitted (byte identical
+     to a build without that -fsanitize= check), realized per function via
+     no_sanitize so it streams through LTO.  */
+  if (flag_contracts_p3100)
+    {
+      static const sanitize_code_type routed_ubsan_bits[] = {
+	SANITIZE_VPTR, SANITIZE_ALIGNMENT, SANITIZE_OBJECT_SIZE,
+	SANITIZE_NONNULL_ATTRIBUTE, SANITIZE_RETURNS_NONNULL_ATTRIBUTE,
+	SANITIZE_POINTER_OVERFLOW, SANITIZE_NULL, SANITIZE_SHIFT_BASE,
+	SANITIZE_SHIFT_EXPONENT, SANITIZE_DIVIDE, SANITIZE_SI_OVERFLOW,
+	SANITIZE_BOOL, SANITIZE_ENUM, SANITIZE_FLOAT_CAST, SANITIZE_BOUNDS,
+	SANITIZE_RETURN, SANITIZE_UNREACHABLE, SANITIZE_VLA, SANITIZE_BUILTIN,
+	SANITIZE_FLOAT_DIVIDE
+      };
+      for (unsigned i = 0; i < ARRAY_SIZE (routed_ubsan_bits); ++i)
+	if ((flag_sanitize & routed_ubsan_bits[i])
+	    && (resolved_sanitizer_semantic (routed_ubsan_bits[i])
+		== CES_ASSUME))
+	  add_no_sanitize_value (fndecl, routed_ubsan_bits[i]);
+    }
+
+  /* Same for ThreadSanitizer: when -fcontracts-p3100 resolves the thread check
+     to assume, TSan must not instrument this function (byte identical to a
+     build without -fsanitize=thread), realized per function via no_sanitize so
+     it streams through LTO -- mirror of the ASan assume line above.  */
+  if (flag_contracts_p3100
+      && (flag_sanitize & SANITIZE_THREAD)
+      && resolved_sanitizer_semantic (SANITIZE_THREAD) == CES_ASSUME)
+    add_no_sanitize_value (fndecl, SANITIZE_THREAD);
 
   /* Allow cp_genericize calls to be nested.  */
   bc_state_t save_state;
@@ -4124,15 +4295,75 @@ process_stmt_hotness_attribute (tree std_attrs, location_t attrs_loc)
   return std_attrs;
 }
 
-/* Build IFN_ASSUME internal call for assume condition ARG.  */
+/* Build the raw IFN_ASSUME internal call for assume condition ARG (the
+   status-quo lowering of [[assume (ARG)]]).  */
 
-tree
-build_assume_call (location_t loc, tree arg)
+static tree
+build_assume_ifn (location_t loc, tree arg)
 {
   if (!processing_template_decl)
     arg = fold_build_cleanup_point_expr (TREE_TYPE (arg), arg);
   return build_call_expr_internal_loc (loc, IFN_ASSUME, void_type_node,
 				       1, arg);
+}
+
+/* Build the effect of [[assume (ARG)]] at LOC.
+
+   Under -fcontracts-p3100 the assume attribute is a configurable implicit
+   contract assertion (the assumed condition being false is that core-language
+   UB).  The properties of the predicate decide both the emitted group id and
+   which semantics are available for this instance: a side-effect-free,
+   non-trapping ARG can be evaluated, so it reports the qualified group
+   "ub:dcl.attr.assume.false.pure" and supports the full checking set;
+   otherwise it reports "ub:dcl.attr.assume.false.nonpure" and only
+   assume/ignore apply (a checking semantic then clamps to ignore).  The bare
+   "ub:dcl.attr.assume.false" is the never-emitted parent of the two.  The
+   decision is deferred while still in a template -- ARG may be
+   dependent and the check is baked at instantiation, when build_assume_call is
+   called again with the substituted operand.
+
+     assume   -> the status-quo IFN_ASSUME (no runtime check);
+     ignore   -> nothing (drop the assumption; no hint);
+     checking -> `if (!ARG) <reaction>`, plus the IFN_ASSUME hint for the
+		 enforcing family (ARG then provably holds); the observing
+		 family emits the check but no hint.  */
+
+tree
+build_assume_call (location_t loc, tree arg)
+{
+  if (flag_contracts_p3100
+      && current_function_decl
+      && !processing_template_decl)
+    {
+      bool checkable = (!TREE_SIDE_EFFECTS (arg)
+			&& !generic_expr_could_trap_p (arg));
+      uint16_t allowed = checkable ? CES_ALL_ALLOWED : (1 << CES_IGNORE);
+      /* A checkable (side-effect-free, non-trapping) predicate is a
+	 distinct, separately-matchable subset of this check -- same
+	 pattern as e.g. ub:expr.unary.dereference.nullptr -- so it gets
+	 its own qualified group id; see p3100-check-table.md.  */
+      const char *group = checkable ? "ub:dcl.attr.assume.false.pure"
+				     : "ub:dcl.attr.assume.false.nonpure";
+      contract_evaluation_semantic sem
+	= resolve_implicit_contract_semantic (current_function_decl, loc,
+					      group, allowed);
+      if (sem == CES_IGNORE)
+	return void_node;
+      if (sem != CES_ASSUME)
+	{
+	  tree check = cp_build_assume_check (loc, arg, sem);
+	  if (sem == CES_ENFORCE || sem == CES_QUICK
+	      || sem == CES_NOEXCEPT_ENFORCE)
+	    {
+	      /* The predicate now provably holds; keep the optimizer hint.  */
+	      tree hint = build_assume_ifn (loc, unshare_expr (arg));
+	      check = build2 (COMPOUND_EXPR, void_type_node, check, hint);
+	    }
+	  return check;
+	}
+      /* assume: fall through to the status-quo IFN_ASSUME.  */
+    }
+  return build_assume_ifn (loc, arg);
 }
 
 /* If [[assume (cond)]] appears on this statement, handle it.  */

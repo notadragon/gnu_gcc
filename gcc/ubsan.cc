@@ -822,6 +822,71 @@ ubsan_expand_bounds_ifn (gimple_stmt_iterator *gsi)
   return true;
 }
 
+/* P3100: return the language-neutral reaction (enum implicit_ub_reaction) for
+   an implicit null-pointer-dereference contract assertion at LOC in the current
+   function, or IMPLICIT_UB_NONE when P3100 is off or the site resolves to
+   assume/ignore.  Resolution is per site (LOC feeds per-file/line config
+   matching) and per enclosing namespace (from cfun->decl); see
+   cp_resolve_implicit_ub_semantic.  */
+
+static int
+implicit_null_deref_reaction (location_t loc)
+{
+  if (!flag_contracts_p3100)
+    return IMPLICIT_UB_NONE;
+  return lang_hooks.resolve_implicit_ub_semantic (cfun->decl, loc,
+						  "ub:expr.unary.dereference.nullptr");
+}
+
+/* P3100: the reaction for an implicit misaligned-access contract assertion
+   (ub:basic.align.object.alignment) at LOC in the current function, or
+   IMPLICIT_UB_NONE when P3100 is off or the site resolves to assume.  Like
+   null-deref, a misaligned access is an lvalue with no defined substitute, so
+   "ignore" resolves to IMPLICIT_UB_NONE (the raw access) rather than
+   IMPLICIT_UB_DEFINED.  */
+
+static int
+implicit_align_reaction (location_t loc)
+{
+  if (!flag_contracts_p3100)
+    return IMPLICIT_UB_NONE;
+  return lang_hooks.resolve_implicit_ub_semantic (cfun->decl, loc,
+						  "ub:basic.align.object.alignment");
+}
+
+/* P3100: the reaction for an implicit signed-integer-overflow contract
+   assertion (ub:expr.expr.eval.signed.integer) at LOC in the current function,
+   or IMPLICIT_UB_NONE when P3100 is off or the site resolves to assume.
+   Unlike null-deref, "ignore" here resolves to IMPLICIT_UB_DEFINED (the
+   operation must still be instrumented so its result is the defined wrapped
+   value and the optimizer stops assuming
+   no overflow).  */
+
+static int
+implicit_overflow_reaction (location_t loc)
+{
+  if (!flag_contracts_p3100)
+    return IMPLICIT_UB_NONE;
+  return lang_hooks.resolve_implicit_ub_semantic (cfun->decl, loc,
+						  "ub:expr.expr.eval.signed.integer");
+}
+
+/* P3100: the reaction for an implicit invalid-value-load contract assertion
+   (ub:conv.lval.valid.representation) at LOC in the current function, or
+   IMPLICIT_UB_NONE when P3100 is off or the site resolves to assume.  Like
+   signed overflow, "ignore" resolves to IMPLICIT_UB_DEFINED here: the load is
+   instrumented so an out-of-range bool/enum value is replaced by a defined
+   valid value (0).  */
+
+static int
+implicit_invalid_value_reaction (location_t loc)
+{
+  if (!flag_contracts_p3100)
+    return IMPLICIT_UB_NONE;
+  return lang_hooks.resolve_implicit_ub_semantic
+	   (cfun->decl, loc, "ub:conv.lval.valid.representation.bool.enum");
+}
+
 /* Expand UBSAN_NULL internal call.  The type is kept on the ckind
    argument which is a constant, because the middle-end treats pointer
    conversions as useless and therefore the type of the first argument
@@ -833,12 +898,38 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
   gimple_stmt_iterator gsi = *gsip;
   gimple *stmt = gsi_stmt (gsi);
   location_t loc = gimple_location (stmt);
-  gcc_assert (gimple_call_num_args (stmt) == 3);
-  tree ptr = gimple_call_arg (stmt, 0);
-  tree ckind = gimple_call_arg (stmt, 1);
-  tree align = gimple_call_arg (stmt, 2);
+  gcc_assert (gimple_call_num_args (stmt) == UBSAN_NULL_NUM_OPS);
+  tree ptr = gimple_call_arg (stmt, UBSAN_NULL_PTR);
+  tree ckind = gimple_call_arg (stmt, UBSAN_NULL_CKIND);
+  tree align = gimple_call_arg (stmt, UBSAN_NULL_ALIGN);
   tree check_align = NULL_TREE;
   bool check_null;
+
+  /* P3100: does an implicit ub:expr.unary.dereference.nullptr contract
+     assertion apply at this site?  The reaction was resolved once at pass_ubsan
+     (pre-inline), where cfun->decl was the true enclosing function whose
+     namespace the contract config matched, and carried here as operand 3.  We
+     must NOT re-resolve it against the current cfun->decl: after inlining this
+     statement may live in a caller in a different namespace, where the config
+     would no longer match and the check would be wrongly dropped.  When it
+     does apply, its reaction takes precedence over the sanitizer's on the null
+     edge.  IMPLICIT_UB_NONE (0) means no contract -- the pure-sanitizer path,
+     byte-for-byte as before.  */
+  int p3100_reaction
+    = tree_to_shwi (gimple_call_arg (stmt, UBSAN_NULL_REACTION));
+  bool have_contract = (p3100_reaction != IMPLICIT_UB_NONE);
+  /* P3100: the alignment sub-condition carries its OWN reaction (operand 6) and
+     handler entry/data (operands 7/8), resolved independently of the null one at
+     pass_ubsan.  IMPLICIT_UB_NONE means "no alignment contract" (sanitizer or
+     nothing).  */
+  int align_reaction
+    = tree_to_shwi (gimple_call_arg (stmt, UBSAN_NULL_ALIGN_REACTION));
+  bool have_align_contract = (align_reaction != IMPLICIT_UB_NONE);
+  /* Read the alignment handler entry/data now, while STMT is still the IFN call:
+     the null-check lowering below reassigns STMT to the GIMPLE_COND it replaces
+     the call with, after which gimple_call_arg would no longer work.  */
+  tree align_entry = gimple_call_arg (stmt, UBSAN_NULL_ALIGN_ENTRY);
+  tree align_data = gimple_call_arg (stmt, UBSAN_NULL_ALIGN_DATA);
 
   basic_block cur_bb = gsi_bb (gsi);
 
@@ -854,7 +945,7 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
 	  gsi_insert_before (&gsi, g, GSI_SAME_STMT);
 	}
     }
-  check_null = sanitize_flags_p (SANITIZE_NULL);
+  check_null = sanitize_flags_p (SANITIZE_NULL) || have_contract;
   if (check_null && POINTER_TYPE_P (TREE_TYPE (ptr)))
     {
       addr_space_t as = TYPE_ADDR_SPACE (TREE_TYPE (TREE_TYPE (ptr)));
@@ -879,8 +970,11 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
   basic_block cond_bb = e->src;
   basic_block fallthru_bb = e->dest;
   basic_block then_bb = create_empty_bb (cond_bb);
-  add_bb_to_loop (then_bb, cond_bb->loop_father);
-  loops_state_set (LOOPS_NEED_FIXUP);
+  if (current_loops)
+    {
+      add_bb_to_loop (then_bb, cond_bb->loop_father);
+      loops_state_set (LOOPS_NEED_FIXUP);
+    }
 
   /* Make an edge coming from the 'cond block' into the 'then block';
      this edge is unlikely taken, so set up the probability accordingly.  */
@@ -904,15 +998,56 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
   if (dom_info_available_p (CDI_DOMINATORS))
     set_immediate_dominator (CDI_DOMINATORS, then_bb, cond_bb);
 
-  /* Put the ubsan builtin call into the newly created BB.  */
-  if (flag_sanitize_trap & ((check_align ? SANITIZE_ALIGNMENT + 0 : 0)
-			    | (check_null ? SANITIZE_NULL + 0 : 0)))
-    g = gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
-  else
+  /* P3100: a contract assertion on this dereference uses the contract reaction,
+     taking precedence over the sanitizer.  This then_bb is the NULL edge's
+     reaction (null contract, operands 3/4/5) -- or, in the alignment-only case
+     (no null edge), the alignment reaction (operands 6/7/8).  In the both-edges
+     case the ALIGNMENT edge gets its own separate then-block further below, so a
+     null-deref contract and an alignment contract at the same access each fire
+     with their own semantic.  */
+  bool null_contract_edge = (have_contract && check_null);
+  bool align_contract_edge
+    = (have_align_contract && check_align != NULL_TREE && !check_null);
+  bool use_contract_reaction = null_contract_edge || align_contract_edge;
+
+  /* Build the reaction gimple for one edge of the check.  When REACTION is a
+     P3100 contract reaction it is a nothrow handler call (noexcept_enforce/
+     observe) or a trap (quick_enforce); when REACTION is IMPLICIT_UB_NONE it
+     is the stock -fsanitize= reaction (trap, or the
+     __ubsan_handle_type_mismatch_v1[_abort] handler) selected by
+     SANITIZE_MASK.  ENTRY/DATA_ADDR are the handler entry point and static
+     data-block address carried on the IFN (built at pass_ubsan while the C++
+     langhook was still available); PTR_ARG is the pointer operand the
+     sanitizer handler wants.  The null and alignment edges share this builder
+     so their reactions stay in lockstep.  */
+  auto build_reaction = [&] (int reaction, tree entry, tree data_addr,
+			     unsigned sanitize_mask, tree ptr_arg) -> gimple *
     {
+      if (reaction != IMPLICIT_UB_NONE)
+	{
+	  /* The entry/data were built at pass_ubsan (front-end present,
+	     pre-inline cfun->decl) and carried on the IFN.  We must NOT
+	     rebuild them here via the langhook: this runs post-inline and,
+	     under LTO, at LTRANS where no C++ langhook exists (it would return
+	     false and degrade to a trap).  A null entry means quick_enforce /
+	     no handler -> trap.  */
+	  if ((reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE
+	       || reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE)
+	      && entry != NULL_TREE && !integer_zerop (entry))
+	    /* noexcept_enforce / noexcept_observe: call the nothrow contract
+	       handler entry point (the decl encodes noreturn for enforce; for
+	       observe it returns and the then-block falls through to the real
+	       access -- "report then proceed").  No EH region needed.  */
+	    return gimple_build_call (entry, 1, data_addr);
+	  /* IMPLICIT_UB_TRAP (quick_enforce).  Throwing enforce/observe are
+	     excluded from this check's allowed set on the front-end side and
+	     clamped away, so they never reach here.  */
+	  return gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
+	}
+      if (flag_sanitize_trap & sanitize_mask)
+	return gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
       enum built_in_function bcode
-	= (flag_sanitize_recover & ((check_align ? SANITIZE_ALIGNMENT + 0 : 0)
-				    | (check_null ? SANITIZE_NULL + 0 : 0)))
+	= (flag_sanitize_recover & sanitize_mask)
 	  ? BUILT_IN_UBSAN_HANDLE_TYPE_MISMATCH_V1
 	  : BUILT_IN_UBSAN_HANDLE_TYPE_MISMATCH_V1_ABORT;
       tree fn = builtin_decl_implicit (bcode);
@@ -927,10 +1062,32 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
 			     fold_convert (unsigned_char_type_node, ckind),
 			     NULL_TREE);
       data = build_fold_addr_expr_loc (loc, data);
-      g = gimple_build_call (fn, 2, data,
-			     check_align ? check_align
-			     : build_zero_cst (pointer_sized_int_node));
-    }
+      return gimple_build_call (fn, 2, data, ptr_arg);
+    };
+
+  /* Put the reaction for the first edge (null, or -- in the alignment-only
+     case -- alignment) into the newly created then_bb.  STMT is still the IFN
+     call here, so its per-edge entry/data operands are readable.  */
+  {
+    int reaction = use_contract_reaction
+		   ? (align_contract_edge ? align_reaction : p3100_reaction)
+		   : IMPLICIT_UB_NONE;
+    tree entry = use_contract_reaction
+		 ? gimple_call_arg (stmt, align_contract_edge
+					  ? UBSAN_NULL_ALIGN_ENTRY
+					  : UBSAN_NULL_ENTRY)
+		 : NULL_TREE;
+    tree data_addr = use_contract_reaction
+		     ? gimple_call_arg (stmt, align_contract_edge
+					      ? UBSAN_NULL_ALIGN_DATA
+					      : UBSAN_NULL_DATA)
+		     : NULL_TREE;
+    unsigned sanitize_mask = (check_align ? SANITIZE_ALIGNMENT + 0 : 0)
+			     | (check_null ? SANITIZE_NULL + 0 : 0);
+    tree ptr_arg = check_align ? check_align
+			       : build_zero_cst (pointer_sized_int_node);
+    g = build_reaction (reaction, entry, data_addr, sanitize_mask, ptr_arg);
+  }
   gimple_stmt_iterator gsi2 = gsi_start_bb (then_bb);
   gimple_set_location (g, loc);
   gsi_insert_after (&gsi2, g, GSI_NEW_STMT);
@@ -951,12 +1108,13 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
 
   if (check_align)
     {
+      basic_block cond2_bb = NULL;
       if (check_null)
 	{
 	  /* Split the block with the condition again.  */
 	  e = split_block (cond_bb, stmt);
 	  basic_block cond1_bb = e->src;
-	  basic_block cond2_bb = e->dest;
+	  cond2_bb = e->dest;
 
 	  /* Make an edge coming from the 'cond1 block' into the 'then block';
 	     this edge is unlikely taken, so set up the probability
@@ -998,6 +1156,43 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
       else
 	/* Replace the UBSAN_NULL with a GIMPLE_COND stmt.  */
 	gsi_replace (&gsi, g, false);
+
+      /* P3100: in the both-edges case the alignment condition's TRUE edge was
+	 inherited pointing at the shared then_bb (which holds the NULL edge's
+	 reaction).  When a contract applies to either edge, give the alignment
+	 edge its OWN then-block with its own reaction, so a null-deref contract
+	 and an alignment contract at the same access each fire independently.
+	 When neither edge is a contract the two share then_bb -- the stock
+	 -fsanitize= codegen, unchanged.  */
+      if (cond2_bb != NULL && (have_contract || have_align_contract))
+	{
+	  basic_block then_align_bb = create_empty_bb (cond2_bb);
+	  if (current_loops)
+	    {
+	      add_bb_to_loop (then_align_bb, cond2_bb->loop_father);
+	      loops_state_set (LOOPS_NEED_FIXUP);
+	    }
+	  make_single_succ_edge (then_align_bb, fallthru_bb, EDGE_FALLTHRU);
+	  edge te = find_edge (cond2_bb, then_bb);
+	  redirect_edge_and_branch (te, then_align_bb);
+	  te->probability = profile_probability::very_unlikely ();
+	  then_align_bb->count = te->count ();
+	  if (dom_info_available_p (CDI_DOMINATORS))
+	    set_immediate_dominator (CDI_DOMINATORS, then_align_bb, cond2_bb);
+
+	  /* Build the alignment edge's reaction with the shared builder: its own
+	     contract reaction (operands 6/7/8, captured above as align_entry/
+	     align_data since STMT is no longer the IFN call) or, when the alignment
+	     edge is a pure sanitizer check, the stock type-mismatch handler.  */
+	  gimple *ag
+	    = build_reaction (have_align_contract ? align_reaction
+						  : IMPLICIT_UB_NONE,
+			      align_entry, align_data, SANITIZE_ALIGNMENT,
+			      check_align);
+	  gimple_set_location (ag, loc);
+	  gimple_stmt_iterator agsi = gsi_start_bb (then_align_bb);
+	  gsi_insert_after (&agsi, ag, GSI_NEW_STMT);
+	}
     }
   return false;
 }
@@ -1444,16 +1639,40 @@ instrument_mem_ref (tree mem, tree base, gimple_stmt_iterator *iter,
 		    bool is_lhs)
 {
   enum ubsan_null_ckind ikind = is_lhs ? UBSAN_STORE_OF : UBSAN_LOAD_OF;
+  location_t site_loc = gimple_location (gsi_stmt (*iter));
+  /* A P3100 ub:expr.unary.dereference.nullptr assertion also wants the null
+     check on this dereference, even when -fsanitize=null is not enabled.
+     Resolve the reaction HERE, at pass_ubsan (pre-inline), where cfun->decl is
+     the true enclosing function whose namespace the contract config matches.
+     The value is carried as the 4th operand on IFN_UBSAN_NULL so it survives
+     inlining and LTO -- ubsan_expand_null_ifn (post-inline) must NOT re-resolve
+     it, since cfun->decl there may be a caller in a different namespace.  When
+     no contract applies the reaction is IMPLICIT_UB_NONE (0), which every
+     consumer treats exactly as the old "no contract, sanitizer only" path.  */
+  int p3100_reaction = implicit_null_deref_reaction (site_loc);
+  bool p3100_null = (p3100_reaction != IMPLICIT_UB_NONE);
+  /* A P3100 ub:basic.align.object.alignment assertion wants the alignment edge
+     generated even when -fsanitize=alignment is not enabled.  Its reaction is
+     carried independently (operands 6/7/8), and ubsan_expand_null_ifn routes the
+     null and alignment edges to separate then-blocks, so both a null-deref
+     contract and an alignment contract can apply at the same access.  */
+  int p3100_align_reaction = implicit_align_reaction (site_loc);
+  bool want_align_contract = (p3100_align_reaction != IMPLICIT_UB_NONE);
   unsigned int align = 0;
-  if (sanitize_flags_p (SANITIZE_ALIGNMENT))
+  if (sanitize_flags_p (SANITIZE_ALIGNMENT) || want_align_contract)
     {
       align = min_align_of_type (TREE_TYPE (base));
       if (align <= 1)
 	align = 0;
     }
+  /* Only a type that actually needs alignment (> 1) has an alignment edge; if
+     none, the align contract has nothing to check.  This differs from
+     want_align_contract, which is true whenever a config selects an alignment
+     reaction regardless of whether this access has an alignment edge.  */
+  bool p3100_align_active = (want_align_contract && align != 0);
   if (align == 0)
     {
-      if (!sanitize_flags_p (SANITIZE_NULL))
+      if (!sanitize_flags_p (SANITIZE_NULL) && !p3100_null)
 	return;
       addr_space_t as = TYPE_ADDR_SPACE (TREE_TYPE (base));
       if (!ADDR_SPACE_GENERIC_P (as)
@@ -1467,8 +1686,57 @@ instrument_mem_ref (tree mem, tree base, gimple_stmt_iterator *iter,
     ikind = UBSAN_MEMBER_ACCESS;
   tree kind = build_int_cst (build_pointer_type (TREE_TYPE (base)), ikind);
   tree alignt = build_int_cst (pointer_sized_int_node, align);
-  gcall *g = gimple_build_call_internal (IFN_UBSAN_NULL, 3, t, kind, alignt);
-  gimple_set_location (g, gimple_location (gsi_stmt (*iter)));
+  tree reactiont = build_int_cst (unsigned_type_node, p3100_reaction);
+  tree align_reactiont
+    = build_int_cst (unsigned_type_node,
+		     p3100_align_active ? p3100_align_reaction
+					: IMPLICIT_UB_NONE);
+  /* For a P3100 noexcept_enforce/observe check, build the contract violation
+     handler entry point and its static data block HERE, at pass_ubsan, while
+     the C++ front-end langhook is still available and cfun->decl is the true
+     (pre-inline) enclosing function.  The handler entry decl and data-block
+     address are carried on the IFN so ubsan_expand_null_ifn (which runs at
+     sanopt, post-inline and -- crucially -- at LTRANS where no C++ langhook
+     exists) can emit the call by reading the IR instead of re-deriving it.
+     quick_enforce (trap) and the pure-sanitizer path carry null operands and
+     fall back to a trap / the sanitizer handler at expansion time.  The null
+     reaction uses operands 4/5; the alignment reaction operands 7/8.  */
+  tree entryt = null_pointer_node;
+  tree data_addrt = null_pointer_node;
+  if (p3100_reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE
+      || p3100_reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE)
+    {
+      tree entry = NULL_TREE, data_addr = NULL_TREE;
+      if (lang_hooks.build_implicit_ub_handler
+	    (cfun->decl, site_loc,
+	     "ub:expr.unary.dereference.nullptr", p3100_reaction,
+	     &entry, &data_addr))
+	{
+	  entryt = build_fold_addr_expr (entry);
+	  data_addrt = data_addr;
+	}
+    }
+  tree align_entryt = null_pointer_node;
+  tree align_data_addrt = null_pointer_node;
+  if (p3100_align_active
+      && (p3100_align_reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE
+	  || p3100_align_reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE))
+    {
+      tree entry = NULL_TREE, data_addr = NULL_TREE;
+      if (lang_hooks.build_implicit_ub_handler
+	    (cfun->decl, site_loc,
+	     "ub:basic.align.object.alignment", p3100_align_reaction,
+	     &entry, &data_addr))
+	{
+	  align_entryt = build_fold_addr_expr (entry);
+	  align_data_addrt = data_addr;
+	}
+    }
+  gcall *g = gimple_build_call_internal (IFN_UBSAN_NULL, UBSAN_NULL_NUM_OPS,
+					 t, kind, alignt, reactiont, entryt,
+					 data_addrt, align_reactiont,
+					 align_entryt, align_data_addrt);
+  gimple_set_location (g, site_loc);
   gsi_safe_insert_before (iter, g);
 }
 
@@ -1605,6 +1873,10 @@ tree
 ubsan_build_overflow_builtin (tree_code code, location_t loc, tree lhstype,
 			      tree op0, tree op1, tree *datap)
 {
+  /* P3100 implicit signed-overflow contract assertions do not reach here: they
+     are lowered entirely in pass_ubsan (see instrument_si_overflow_contract),
+     which runs before inlining so the semantic is resolved once with the
+     correct enclosing-function context.  This RTL path is sanitizer-only.  */
   if (flag_sanitize_trap & SANITIZE_SI_OVERFLOW)
     return build_call_expr_loc (loc, builtin_decl_explicit (BUILT_IN_TRAP), 0);
 
@@ -1654,13 +1926,131 @@ ubsan_build_overflow_builtin (tree_code code, location_t loc, tree lhstype,
 			      : NULL_TREE);
 }
 
-/* Perform the signed integer instrumentation.  GSI is the iterator
-   pointing at statement we are trying to instrument.  */
+/* P3100: lower an implicit signed-overflow contract assertion at the statement
+   *GSI points to.  REACTION is the language-neutral reaction already resolved
+   (once, here in pass_ubsan, with the correct enclosing-function context, so
+   inlining can never change it).  STMT is a signed PLUS/MINUS/MULT/NEGATE assign
+   that may overflow.  We rewrite it into a .{ADD,SUB,MUL}_OVERFLOW internal call
+   whose real part is the defined 2's-complement wrapped result (used
+   unconditionally) and, unless REACTION is IMPLICIT_UB_DEFINED (ignore), a
+   very-unlikely branch on the overflow flag to the reaction: a trap for
+   quick_enforce, or the nothrow contract handler for noexcept_enforce/observe
+   (enforce is noreturn; observe returns and continues with the wrapped result).
+   Using an internal function for the operation also stops the optimizer
+   assuming it cannot overflow, so loops built on it are no longer treated as
+   provably finite -- exactly the codegen change ignore/observe must make.  On
+   return *GSI points at the (new) statement defining LHS, in the original block,
+   so the caller's per-bb loop resumes cleanly.  */
 
 static void
-instrument_si_overflow (gimple_stmt_iterator gsi)
+instrument_si_overflow_contract (gimple_stmt_iterator *gsi, int reaction)
 {
-  gimple *stmt = gsi_stmt (gsi);
+  gimple *stmt = gsi_stmt (*gsi);
+  tree_code code = gimple_assign_rhs_code (stmt);
+  tree lhs = gimple_assign_lhs (stmt);
+  tree type = TREE_TYPE (lhs);
+  location_t loc = gimple_location (stmt);
+  internal_fn ifn;
+  tree a, b;
+
+  switch (code)
+    {
+    case PLUS_EXPR:
+      ifn = IFN_ADD_OVERFLOW;
+      a = gimple_assign_rhs1 (stmt); b = gimple_assign_rhs2 (stmt);
+      break;
+    case MINUS_EXPR:
+      ifn = IFN_SUB_OVERFLOW;
+      a = gimple_assign_rhs1 (stmt); b = gimple_assign_rhs2 (stmt);
+      break;
+    case MULT_EXPR:
+      ifn = IFN_MUL_OVERFLOW;
+      a = gimple_assign_rhs1 (stmt); b = gimple_assign_rhs2 (stmt);
+      break;
+    case NEGATE_EXPR:
+      /* -u is 0 - u; .SUB_OVERFLOW (0, u) overflows exactly for u == INT_MIN.  */
+      ifn = IFN_SUB_OVERFLOW;
+      a = build_zero_cst (type); b = gimple_assign_rhs1 (stmt);
+      break;
+    default:
+      gcc_unreachable ();
+    }
+
+  /* res = .{ADD,SUB,MUL}_OVERFLOW (a, b);  complex: real = wrapped result,
+     imag = nonzero iff the operation overflowed.  */
+  tree ctype = build_complex_type (type);
+  gcall *gc = gimple_build_call_internal (ifn, 2, a, b);
+  tree res = make_ssa_name (ctype);
+  gimple_call_set_lhs (gc, res);
+  gimple_set_location (gc, loc);
+  gsi_insert_before (gsi, gc, GSI_SAME_STMT);
+
+  /* lhs = REALPART_EXPR <res>;  the defined wrapped result, used regardless of
+     whether the operation overflowed.  Replaces the original assignment.  */
+  gassign *gr = gimple_build_assign (lhs, REALPART_EXPR,
+				     build1 (REALPART_EXPR, type, res));
+  gimple_set_location (gr, loc);
+  gsi_replace (gsi, gr, true);
+
+  if (reaction == IMPLICIT_UB_DEFINED)
+    /* ignore: the wrapped result, no reaction and no branch.  */
+    return;
+
+  /* ovf = IMAGPART_EXPR <res>;  */
+  tree ovf = make_ssa_name (type);
+  gassign *gi = gimple_build_assign (ovf, IMAGPART_EXPR,
+				     build1 (IMAGPART_EXPR, type, res));
+  gimple_set_location (gi, loc);
+  gsi_insert_after (gsi, gi, GSI_NEW_STMT);
+
+  /* if (ovf != 0) <reaction>;  */
+  basic_block then_bb, fallthru_bb;
+  gimple_stmt_iterator cond_gsi
+    = create_cond_insert_point (gsi, /*before_p=*/false,
+				/*then_more_likely_p=*/false,
+				/*create_then_fallthru_edge=*/true,
+				&then_bb, &fallthru_bb);
+  gcond *cond = gimple_build_cond (NE_EXPR, ovf, build_zero_cst (type),
+				   NULL_TREE, NULL_TREE);
+  gimple_set_location (cond, loc);
+  gsi_insert_after (&cond_gsi, cond, GSI_NEW_STMT);
+
+  gimple *g;
+  if (reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE
+      || reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE)
+    {
+      tree entry = NULL_TREE, data_addr = NULL_TREE;
+      if (lang_hooks.build_implicit_ub_handler (cfun->decl, loc,
+						"ub:expr.expr.eval.signed.integer",
+						reaction, &entry, &data_addr))
+	/* noexcept_enforce (the decl encodes noreturn) / noexcept_observe
+	   (returns and falls through to the wrapped result).  Throwing
+	   enforce/observe are excluded from this check's allowed set on the
+	   front-end side and clamped away, so they never reach here.  */
+	g = gimple_build_call (entry, 1, data_addr);
+      else
+	g = gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
+    }
+  else
+    /* IMPLICIT_UB_TRAP (quick_enforce).  */
+    g = gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
+  gimple_stmt_iterator then_gsi = gsi_after_labels (then_bb);
+  gimple_set_location (g, loc);
+  gsi_insert_before (&then_gsi, g, GSI_SAME_STMT);
+
+  /* Resume the caller's per-bb walk at LHS's definition, which stays in the
+     original (now condition) block; the new then/fallthru blocks are visited
+     in turn by the pass's FOR_EACH_BB loop.  */
+  *gsi = gsi_for_stmt (gr);
+}
+
+/* Perform the signed integer instrumentation.  *GSI is the iterator pointing at
+   the statement we are trying to instrument.  */
+
+static void
+instrument_si_overflow (gimple_stmt_iterator *gsi)
+{
+  gimple *stmt = gsi_stmt (*gsi);
   tree_code code = gimple_assign_rhs_code (stmt);
   tree lhs = gimple_assign_lhs (stmt);
   tree lhstype = TREE_TYPE (lhs);
@@ -1676,6 +2066,28 @@ instrument_si_overflow (gimple_stmt_iterator gsi)
 	  && maybe_ne (GET_MODE_BITSIZE (TYPE_MODE (lhsinner)),
 		       TYPE_PRECISION (lhsinner))))
     return;
+
+  /* When the sanitizer is off, only instrument for a P3100 implicit
+     signed-overflow contract assertion.  A vector operation has no scalar
+     overflow site to check, and ABS is not handled by the contract lowering, so
+     both fall through to assume.  The site is resolved once here (pre-inline);
+     assume leaves the raw operation (optimized, byte-identical), any other
+     semantic is lowered by instrument_si_overflow_contract.  */
+  if (!sanitize_flags_p (SANITIZE_SI_OVERFLOW))
+    {
+      if (!flag_contracts_p3100
+	  || VECTOR_TYPE_P (lhstype)
+	  || BITINT_TYPE_P (lhsinner))
+	return;
+      if (code != PLUS_EXPR && code != MINUS_EXPR && code != MULT_EXPR
+	  && code != NEGATE_EXPR)
+	return;
+      int reaction = implicit_overflow_reaction (gimple_location (stmt));
+      if (reaction == IMPLICIT_UB_NONE)
+	return;
+      instrument_si_overflow_contract (gsi, reaction);
+      return;
+    }
 
   switch (code)
     {
@@ -1694,7 +2106,7 @@ instrument_si_overflow (gimple_stmt_iterator gsi)
 				      ? IFN_UBSAN_CHECK_SUB
 				      : IFN_UBSAN_CHECK_MUL, 2, a, b);
       gimple_call_set_lhs (g, lhs);
-      gsi_replace (&gsi, g, true);
+      gsi_replace (gsi, g, true);
       break;
     case NEGATE_EXPR:
       /* Represent i = -u;
@@ -1704,7 +2116,7 @@ instrument_si_overflow (gimple_stmt_iterator gsi)
       b = gimple_assign_rhs1 (stmt);
       g = gimple_build_call_internal (IFN_UBSAN_CHECK_SUB, 2, a, b);
       gimple_call_set_lhs (g, lhs);
-      gsi_replace (&gsi, g, true);
+      gsi_replace (gsi, g, true);
       break;
     case ABS_EXPR:
       /* Transform i = ABS_EXPR<u>;
@@ -1717,13 +2129,203 @@ instrument_si_overflow (gimple_stmt_iterator gsi)
       a = make_ssa_name (lhstype);
       gimple_call_set_lhs (g, a);
       gimple_set_location (g, gimple_location (stmt));
-      gsi_insert_before (&gsi, g, GSI_SAME_STMT);
+      gsi_insert_before (gsi, g, GSI_SAME_STMT);
       gimple_assign_set_rhs1 (stmt, a);
       update_stmt (stmt);
       break;
     default:
       break;
     }
+}
+
+/* P3100: lower an implicit invalid-value-load contract assertion at the
+   (non-bitfield) bool/enum load STMT points to.  REACTION is the reaction
+   already resolved once, here in pass_ubsan, with the correct enclosing-function
+   context.  Reuses the sanitizer's raw-bits load + range test
+   (instrument_bool_enum_load), but instead of "report then continue with the
+   raw value" it *substitutes a defined valid value* (0 -- false for bool, an
+   in-range value for enum) whenever the stored value is out of range.  The
+   substitution is unconditional -- LHS = (out_of_range ? 0 : raw) -- so the
+   defined value is produced without a PHI (like instrument_si_overflow_contract
+   for overflow); for a checking reaction an extra very-unlikely branch runs the
+   trap / nothrow handler for its side effect only.  ignore
+   (IMPLICIT_UB_DEFINED) is just the substitution, no branch.  On return *GSI
+   points at the (new) statement defining LHS, in the original block.  */
+
+static void
+instrument_bool_enum_load_contract (gimple_stmt_iterator *gsi, int reaction)
+{
+  gimple *stmt = gsi_stmt (*gsi);
+  tree rhs = gimple_assign_rhs1 (stmt);
+  tree type = TREE_TYPE (rhs);
+  tree lhs = gimple_assign_lhs (stmt);
+  tree minv = NULL_TREE, maxv = NULL_TREE;
+
+  if (TREE_CODE (type) == BOOLEAN_TYPE)
+    {
+      minv = boolean_false_node;
+      maxv = boolean_true_node;
+    }
+  else if (TREE_CODE (type) == ENUMERAL_TYPE
+	   && TREE_TYPE (type) != NULL_TREE
+	   && TREE_CODE (TREE_TYPE (type)) == INTEGER_TYPE
+	   && (TYPE_PRECISION (TREE_TYPE (type))
+	       < GET_MODE_PRECISION (SCALAR_INT_TYPE_MODE (type))))
+    {
+      minv = TYPE_MIN_VALUE (TREE_TYPE (type));
+      maxv = TYPE_MAX_VALUE (TREE_TYPE (type));
+    }
+  else
+    return;
+
+  int modebitsize = GET_MODE_BITSIZE (SCALAR_INT_TYPE_MODE (type));
+  poly_int64 bitsize, bitpos;
+  tree offset;
+  machine_mode mode;
+  int volatilep = 0, reversep, unsignedp = 0;
+  tree base = get_inner_reference (rhs, &bitsize, &bitpos, &offset, &mode,
+				   &unsignedp, &reversep, &volatilep);
+  tree utype = build_nonstandard_integer_type (modebitsize, 1);
+
+  /* Same eligibility as the sanitizer.  */
+  if ((VAR_P (base) && DECL_HARD_REGISTER (base))
+      || !multiple_p (bitpos, modebitsize)
+      || maybe_ne (bitsize, modebitsize)
+      || GET_MODE_BITSIZE (SCALAR_INT_TYPE_MODE (utype)) != modebitsize
+      || TREE_CODE (lhs) != SSA_NAME)
+    return;
+
+  /* A load that ends its block -- it can throw, which under
+     -fnon-call-exceptions is the case for any load in an EH region, and an
+     EH region is created by something as ordinary as a local with a
+     destructor.  We can neither insert after it nor replace it, so
+     retarget the load itself to produce the raw bits and build the check
+     and the value substitution on the fallthrough edge, exactly as the
+     stock instrument_bool_enum_load does.  Bailing here instead would
+     leave the raw load in place -- that is, behave as assume -- whatever
+     semantic was actually configured, including the value substitution
+     that ignore requires.  */
+  bool ends_bb = stmt_ends_bb_p (stmt);
+
+  addr_space_t as = TYPE_ADDR_SPACE (TREE_TYPE (rhs));
+  if (as != TYPE_ADDR_SPACE (utype))
+    utype = build_qualified_type (utype, TYPE_QUALS (utype)
+					 | ENCODE_QUAL_ADDR_SPACE (as));
+  location_t loc = gimple_location (stmt);
+
+  /* Load the raw storage bits as an unsigned integer, so an out-of-range value
+     is visible (a plain bool/enum load would already be assumed in range).  */
+  tree ptype = build_pointer_type (TREE_TYPE (rhs));
+  tree atype = reference_alias_ptr_type (rhs);
+  gimple *g = gimple_build_assign (make_ssa_name (ptype),
+				   build_fold_addr_expr (rhs));
+  gimple_set_location (g, loc);
+  gsi_insert_before (gsi, g, GSI_SAME_STMT);
+  tree mem = build2 (MEM_REF, utype, gimple_assign_lhs (g),
+		     build_int_cst (atype, 0));
+  tree urhs = make_ssa_name (utype);
+
+  /* INS is where the check and the substitution get built.  RAWVAL is the
+     raw value reinterpreted as the bool/enum type, used only on the
+     in-range path; it doubles as the anchor statement on the fallthrough
+     edge in the ends_bb case.  */
+  gimple_stmt_iterator ins;
+  tree rawval = make_ssa_name (type);
+  if (ends_bb)
+    {
+      gimple_assign_set_lhs (stmt, urhs);
+      gimple_assign_set_rhs_from_tree (gsi, mem);
+      update_stmt (stmt);
+      edge e = find_fallthru_edge (gimple_bb (stmt)->succs);
+      gcc_assert (e != NULL);
+      g = gimple_build_assign (rawval, NOP_EXPR, urhs);
+      gimple_set_location (g, loc);
+      gsi_insert_on_edge_immediate (e, g);
+      ins = gsi_for_stmt (g);
+    }
+  else
+    {
+      g = gimple_build_assign (urhs, mem);
+      gimple_set_location (g, loc);
+      gsi_insert_before (gsi, g, GSI_SAME_STMT);
+      ins = gsi_for_stmt (g);
+      g = gimple_build_assign (rawval, NOP_EXPR, urhs);
+      gimple_set_location (g, loc);
+      gsi_insert_after (&ins, g, GSI_NEW_STMT);
+    }
+
+  /* Normalize to [0, maxv-minv] and form the out-of-range test, exactly as the
+     sanitizer does.  */
+  tree umin = fold_convert (utype, minv);
+  tree umax = fold_convert (utype, maxv);
+  tree norm = urhs;
+  if (!integer_zerop (umin))
+    {
+      norm = make_ssa_name (utype);
+      g = gimple_build_assign (norm, MINUS_EXPR, urhs, umin);
+      gimple_set_location (g, loc);
+      gsi_insert_after (&ins, g, GSI_NEW_STMT);
+    }
+  tree bound = int_const_binop (MINUS_EXPR, umax, umin);
+
+  /* out_of_range = norm > bound.  A GIMPLE COND_EXPR select requires a bare
+     boolean condition (not a comparison), so materialize it into an SSA name;
+     it is reused for the reaction branch below.  */
+  tree ovf = make_ssa_name (boolean_type_node);
+  g = gimple_build_assign (ovf, GT_EXPR, norm, bound);
+  gimple_set_location (g, loc);
+  gsi_insert_after (&ins, g, GSI_NEW_STMT);
+
+  /* LHS = out_of_range ? 0 : rawval -- the defined valid value, produced
+     unconditionally.  It replaces the original load, or on the ends_bb path
+     defines LHS on the fallthrough edge, the load itself having been
+     retargeted to produce the raw bits.  */
+  gassign *sel = gimple_build_assign (lhs, COND_EXPR, ovf,
+				      build_zero_cst (type), rawval);
+  gimple_set_location (sel, loc);
+  if (ends_bb)
+    gsi_insert_after (&ins, sel, GSI_NEW_STMT);
+  else
+    gsi_replace (gsi, sel, true);
+
+  if (reaction == IMPLICIT_UB_DEFINED)
+    /* ignore: just the substitution, no handler and no branch.  */
+    return;
+
+  /* Checking semantic: add a very-unlikely branch on the out-of-range test to
+     run the reaction; LHS is already 0 on that path.  */
+  basic_block then_bb, fallthru_bb;
+  gimple_stmt_iterator sel_gsi = gsi_for_stmt (sel);
+  gimple_stmt_iterator cond_gsi
+    = create_cond_insert_point (&sel_gsi, /*before_p=*/false,
+				/*then_more_likely_p=*/false,
+				/*create_then_fallthru_edge=*/true,
+				&then_bb, &fallthru_bb);
+  gcond *cond = gimple_build_cond (NE_EXPR, ovf, boolean_false_node,
+				   NULL_TREE, NULL_TREE);
+  gimple_set_location (cond, loc);
+  gsi_insert_after (&cond_gsi, cond, GSI_NEW_STMT);
+
+  gimple *r;
+  if (reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE
+      || reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE)
+    {
+      tree entry = NULL_TREE, data_addr = NULL_TREE;
+      if (lang_hooks.build_implicit_ub_handler
+	    (cfun->decl, loc, "ub:conv.lval.valid.representation.bool.enum",
+	     reaction, &entry, &data_addr))
+	r = gimple_build_call (entry, 1, data_addr);
+      else
+	r = gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
+    }
+  else
+    /* IMPLICIT_UB_TRAP (quick_enforce).  */
+    r = gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
+  gimple_stmt_iterator then_gsi = gsi_after_labels (then_bb);
+  gimple_set_location (r, loc);
+  gsi_insert_before (&then_gsi, r, GSI_SAME_STMT);
+
+  *gsi = gsi_for_stmt (sel);
 }
 
 /* Instrument loads from (non-bitfield) bool and C++ enum values
@@ -1884,19 +2486,21 @@ ubsan_use_new_style_p (location_t loc)
   return true;
 }
 
-/* Instrument float point-to-integer conversion.  TYPE is an integer type of
-   destination, EXPR is floating-point expression.  */
+/* Build and return the boolean predicate that is true when converting the
+   floating-point value EXPR to the integer TYPE would be out of range -- i.e.
+   the truncated-toward-zero value is not representable in TYPE (core-language
+   UB, [conv.fpint]).  Returns NULL_TREE if the conversion can never be out of
+   range, or the floating mode is unsupported.  Shared by the UBSan float-cast
+   instrumentation and the P3100 implicit-contract-assertion guard.  */
 
 tree
-ubsan_instrument_float_cast (location_t loc, tree type, tree expr)
+ubsan_float_cast_overflow_predicate (tree type, tree expr)
 {
   tree expr_type = TREE_TYPE (expr);
-  tree t, tt, fn, min, max;
+  tree t, tt, min, max;
   machine_mode mode = TYPE_MODE (expr_type);
   int prec = TYPE_PRECISION (type);
   bool uns_p = TYPE_UNSIGNED (type);
-  if (loc == UNKNOWN_LOCATION)
-    loc = input_location;
 
   /* Float to integer conversion first truncates toward zero, so
      even signed char c = 127.875f; is not problematic.
@@ -1994,6 +2598,22 @@ ubsan_instrument_float_cast (location_t loc, tree type, tree expr)
   t = fold_build2 (TRUTH_OR_EXPR, boolean_type_node, t, tt);
   if (integer_zerop (t))
     return NULL_TREE;
+  return t;
+}
+
+/* Instrument float point-to-integer conversion.  TYPE is an integer type of
+   destination, EXPR is floating-point expression.  */
+
+tree
+ubsan_instrument_float_cast (location_t loc, tree type, tree expr)
+{
+  tree expr_type = TREE_TYPE (expr);
+  tree fn;
+  tree t = ubsan_float_cast_overflow_predicate (type, expr);
+  if (t == NULL_TREE)
+    return NULL_TREE;
+  if (loc == UNKNOWN_LOCATION)
+    loc = input_location;
 
   if (flag_sanitize_trap & SANITIZE_FLOAT_CAST)
     fn = build_call_expr_loc (loc, builtin_decl_explicit (BUILT_IN_TRAP), 0);
@@ -2460,7 +3080,12 @@ public:
   /* opt_pass methods: */
   bool gate (function *) final override
     {
-      return sanitize_flags_p ((SANITIZE_NULL | SANITIZE_SI_OVERFLOW
+      /* P3100 implicit contract assertions reuse the null instrumentation
+	 machinery even without any sanitizer enabled; run the pass so the
+	 per-site null checks can be inserted (a no-op when nothing resolves
+	 to a checked semantic).  */
+      return flag_contracts_p3100
+	     || sanitize_flags_p ((SANITIZE_NULL | SANITIZE_SI_OVERFLOW
 				| SANITIZE_BOOL | SANITIZE_ENUM
 				| SANITIZE_ALIGNMENT
 				| SANITIZE_NONNULL_ATTRIBUTE
@@ -2494,17 +3119,31 @@ pass_ubsan::execute (function *fun)
 	      continue;
 	    }
 
-	  if ((sanitize_flags_p (SANITIZE_SI_OVERFLOW, fun->decl))
+	  if ((sanitize_flags_p (SANITIZE_SI_OVERFLOW, fun->decl)
+	       || flag_contracts_p3100)
 	      && is_gimple_assign (stmt))
-	    instrument_si_overflow (gsi);
-
-	  if (sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT, fun->decl))
 	    {
+	      instrument_si_overflow (&gsi);
+	      /* The P3100 lowering can rewrite STMT (and split the block); keep
+		 STMT and BB in step with the iterator for the checks below.  */
+	      stmt = gsi_stmt (gsi);
+	      bb = gimple_bb (stmt);
+	    }
+
+	  bool null_align_sanitize
+	    = sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT, fun->decl);
+	  if (null_align_sanitize || flag_contracts_p3100)
+	    {
+	      /* Loads and stores through a pointer are genuine dereferences,
+		 checkable both by the sanitizer and by a P3100
+		 ub:expr.unary.dereference.nullptr implicit assertion.  */
 	      if (gimple_store_p (stmt))
 		instrument_null (gsi, gimple_get_lhs (stmt), true);
 	      if (gimple_assign_single_p (stmt))
 		instrument_null (gsi, gimple_assign_rhs1 (stmt), false);
-	      if (is_gimple_call (stmt))
+	      /* Call arguments are a nonnull-attribute concern, not a
+		 dereference; only the sanitizer instruments them.  */
+	      if (null_align_sanitize && is_gimple_call (stmt))
 		{
 		  unsigned args_num = gimple_call_num_args (stmt);
 		  for (unsigned i = 0; i < args_num; ++i)
@@ -2522,6 +3161,25 @@ pass_ubsan::execute (function *fun)
 	    {
 	      instrument_bool_enum_load (&gsi);
 	      bb = gimple_bb (stmt);
+	    }
+	  else if (flag_contracts_p3100
+		   && gimple_assign_load_p (stmt)
+		   && (TREE_CODE (TREE_TYPE (gimple_assign_rhs1 (stmt)))
+			 == BOOLEAN_TYPE
+		       || TREE_CODE (TREE_TYPE (gimple_assign_rhs1 (stmt)))
+			 == ENUMERAL_TYPE))
+	    {
+	      /* P3100 implicit invalid-value-load assertion; resolve the site
+		 once here (pre-inline) and lower it if it is a checking or
+		 defining semantic.  */
+	      int reaction
+		= implicit_invalid_value_reaction (gimple_location (stmt));
+	      if (reaction != IMPLICIT_UB_NONE)
+		{
+		  instrument_bool_enum_load_contract (&gsi, reaction);
+		  stmt = gsi_stmt (gsi);
+		  bb = gimple_bb (stmt);
+		}
 	    }
 
 	  if (sanitize_flags_p (SANITIZE_NONNULL_ATTRIBUTE, fun->decl)

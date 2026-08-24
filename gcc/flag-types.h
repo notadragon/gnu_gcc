@@ -358,6 +358,11 @@ enum sanitize_code {
 /* Sanitizer flag type.  */
 typedef uint64_t sanitize_code_type;
 
+/* Number of bits in sanitize_code_type; used to size per-check state
+   tables indexed by sanitizer bit position, e.g. flag_sanitize_semantic
+   (see explicit_sanitizer_semantic in opts.h).  */
+#define SANITIZE_CODE_TYPE_BITS 64
+
 /* Different settings for zeroing subset of registers.  */
 namespace zero_regs_flags {
   const unsigned int UNSET = 0;

@@ -2433,6 +2433,42 @@ ftms = {
 };
 
 ftms = {
+  name = contracts_message;
+  values = {
+    v = 202606;
+    cxxmin = 26;
+    extra_cond = "defined(__cpp_contracts_message)";
+  };
+};
+
+ftms = {
+  name = contracts_api;
+  values = {
+    v = 202606;
+    cxxmin = 26;
+    extra_cond = "defined(__gcc_contracts_p3290)";
+  };
+};
+
+ftms = {
+  name = assert_can_use_contracts;
+  values = {
+    v = 202606;
+    cxxmin = 26;
+    extra_cond = "defined(__gcc_contracts_p3290)";
+  };
+};
+
+ftms = {
+  name = contracts_labels;
+  values = {
+    v = 202606;
+    cxxmin = 26;
+    extra_cond = "defined(__cpp_contracts_labels)";
+  };
+};
+
+ftms = {
   name = replaceable_contract_violation_handler;
   values = {
     v = 202603;
@@ -2444,6 +2480,15 @@ ftms = {
     v = 0;
     cxxmin = 26;
     extra_cond = "__cpp_contracts >= 202502L";
+  };
+};
+
+ftms = {
+  name = contracts_report;
+  values = {
+    v = 202607;
+    cxxmin = 26;
+    extra_cond = "defined(__cpp_contracts_report)";
   };
 };
 

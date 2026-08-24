@@ -146,6 +146,19 @@ proc g++_link_flags { paths } {
 	  append flags " -L${gccpath}/libstdc++-v3/src/experimental/.libs "
 	  append ld_library_path ":${gccpath}/libstdc++-v3/src/experimental/.libs"
       }
+      # The contracts ABI core (libcontracts) is auto-linked by the driver
+      # for -fcontracts / -std=c++26 (via libstdc++exp) and for
+      # -fcontracts-p4299 (C), so the testsuite must find it.
+      # Check both the archive and the shared library: a --disable-static
+      # build has only the latter, and testing just the archive left the C++
+      # contracts tests without -L/rpath while the C ones (which check both,
+      # in contracts-dg.exp) had them.  Stock libstdc++ above checks both for
+      # the same reason.
+      if { [file exists "${gccpath}/libcontracts/.libs/libcontracts.a"]
+	   || [file exists "${gccpath}/libcontracts/.libs/libcontracts.${shlib_ext}"] } {
+	  append flags " -L${gccpath}/libcontracts/.libs "
+	  append ld_library_path ":${gccpath}/libcontracts/.libs"
+      }
 
       if [file exists "${gccpath}/libiberty/libiberty.a"] {
           append flags "-L${gccpath}/libiberty "

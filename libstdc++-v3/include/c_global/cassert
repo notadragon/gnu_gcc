@@ -43,4 +43,16 @@
 #endif
 
 #include <bits/c++config.h>
-#include <assert.h>
+
+// Get the platform's <assert.h> (not a libstdc++ <assert.h> wrapper that may be
+// earlier in the include search path), so `assert` reflects the current NDEBUG.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic" // include_next
+#define _GLIBCXX_INCLUDE_NEXT_C_HEADERS
+#include_next <assert.h>
+#undef _GLIBCXX_INCLUDE_NEXT_C_HEADERS
+#pragma GCC diagnostic pop
+
+// P3290 assert integration and its feature-test macro, shared with <assert.h>.
+// This expands to nothing unless -fcontracts-p3290 is active.
+#include <bits/assert_contract.h>

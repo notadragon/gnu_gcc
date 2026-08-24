@@ -33,12 +33,18 @@
 #pragma GCC system_header
 
 #define __glibcxx_want_contracts
+#define __glibcxx_want_contracts_message
+#define __glibcxx_want_contracts_api
+#define __glibcxx_want_contracts_labels
 #define __glibcxx_want_replaceable_contract_violation_handler
+#define __glibcxx_want_contracts_report
 #include <bits/version.h>
 
 #ifdef __cpp_lib_contracts
 #include <source_location>
+#include <initializer_list>
 #include <bits/exception_ptr.h>
+#include <bits/contracts_abi.h>
 
 namespace std _GLIBCXX_VISIBILITY(default)
 {
@@ -49,62 +55,138 @@ namespace contracts
   // From P2900R14
 
   enum class assertion_kind : __UINT16_TYPE__ {
+    unspecified = 0,
     pre = 1,
     post = 2,
     assert = 3,
+    manual = 4,
+    cassert = 5,
+    post_capture = 6,
+    implicit = 7, // P3100 implicit contract assertion guarding language UB
 
     /* Implementation-defined values should have a minimum value of 1000. */
   };
 
   enum class evaluation_semantic : __UINT16_TYPE__ {
+    unspecified = 0,
     ignore = 1,
     observe = 2,
     enforce = 3,
     quick_enforce = 4,
+    assume = 5, // P3100 "assume" evaluation semantic
+    noexcept_observe = 6, // D4298
+    noexcept_enforce = 7, // D4298
 
     /* Implementation-defined values should have a minimum value of 1000.  */
   };
 
   enum class detection_mode : __UINT16_TYPE__ {
+    unspecified = 0,
     predicate_false = 1,
     evaluation_exception = 2,
 
     /* Implementation-defined values should have a minimum value of 1000. */
   };
 
-  using __vendor_ext = void;
+  class evaluation_semantic_set {
+    unsigned _M_bits = 0;
+  public:
+    constexpr evaluation_semantic_set() = default;
+    constexpr evaluation_semantic_set(const evaluation_semantic_set&) = default;
+    constexpr evaluation_semantic_set(evaluation_semantic __s)
+    : _M_bits(1u << (static_cast<unsigned>(__s) - 1)) { }
+    constexpr
+    evaluation_semantic_set(std::initializer_list<evaluation_semantic> __il)
+    : _M_bits(0)
+    { for (auto __s : __il)
+	_M_bits |= (1u << (static_cast<unsigned>(__s) - 1)); }
+
+    constexpr bool contains(evaluation_semantic __s) const
+    { return _M_bits & (1u << (static_cast<unsigned>(__s) - 1)); }
+
+    constexpr bool empty() const { return _M_bits == 0; }
+
+    static constexpr evaluation_semantic_set all()
+    { return {evaluation_semantic::ignore, evaluation_semantic::observe,
+	      evaluation_semantic::enforce, evaluation_semantic::quick_enforce}; }
+
+    static constexpr evaluation_semantic_set none() { return {}; }
+
+    friend constexpr evaluation_semantic_set
+    operator&(evaluation_semantic_set __a, evaluation_semantic_set __b)
+    {
+      evaluation_semantic_set __r;
+      __r._M_bits = __a._M_bits & __b._M_bits;
+      return __r;
+    }
+
+    friend constexpr evaluation_semantic_set
+    operator|(evaluation_semantic_set __a, evaluation_semantic_set __b)
+    {
+      evaluation_semantic_set __r;
+      __r._M_bits = __a._M_bits | __b._M_bits;
+      return __r;
+    }
+
+    friend constexpr bool
+    operator==(evaluation_semantic_set __a, evaluation_semantic_set __b)
+    { return __a._M_bits == __b._M_bits; }
+  };
+
+  enum class violation_handled : int { not_handled = 0, handled = 1 };
 
   class contract_violation {
-    __UINT16_TYPE__ _M_version;
-    assertion_kind _M_assertion_kind;
-    evaluation_semantic _M_evaluation_semantic;
-    detection_mode _M_detection_mode;
-    const char* _M_comment;
-    const void* _M_src_loc_ptr;
-    __vendor_ext* _M_ext;
+    const __cxxabiv1::__cxa_contract_data_block* _M_chain;
 
   public:
-    // cannot be copied or moved or assigned to
+    // Only the ABI runtime and library internals should construct these.
+    explicit
+    contract_violation(
+	const __cxxabiv1::__cxa_contract_data_block* __chain) noexcept
+    : _M_chain(__chain) {}
+
     contract_violation(const contract_violation&) = delete;
     contract_violation& operator=(const contract_violation&) = delete;
 
-    assertion_kind kind() const noexcept { return _M_assertion_kind; }
-    evaluation_semantic semantic() const noexcept { return _M_evaluation_semantic; }
-    detection_mode mode() const noexcept { return _M_detection_mode; }
-    const char* comment() const noexcept { return _M_comment; }
-    std::source_location location() const noexcept {
-      std::source_location __loc;
-      __loc._M_impl
-	   = static_cast<const source_location::__impl*>(_M_src_loc_ptr);
-      return __loc;
-    }
-    bool is_terminating () const noexcept {
-      return _M_evaluation_semantic == std::contracts::evaluation_semantic::enforce
-	    || _M_evaluation_semantic == std::contracts::evaluation_semantic::quick_enforce;
-    }
+    assertion_kind kind() const noexcept;
+    evaluation_semantic semantic() const noexcept;
+    contracts::detection_mode detection_mode() const noexcept;
+    const char* comment() const noexcept;
+    const char* message() const noexcept;
+#if defined(__cpp_lib_contracts_report)
+    // D4301: report() renders the ASan/UBSan diagnostic on demand.  It is
+    // noexcept -- the definition guards the (potentially allocating,
+    // potentially throwing) populator call and returns a fixed diagnostic
+    // string if it throws.
+    const char* report() const noexcept;
+#endif
+    std::source_location location() const noexcept;
+    bool is_terminating() const noexcept;
+    void* query_control_object(const void* __key,
+			       std::size_t __index = 0) const;
   };
 
-  void invoke_default_contract_violation_handler(const contract_violation&) noexcept;
+  // P3400: classifies the evaluation semantics that never propagate an
+  // exception out of contract-violation handling.  This is a free function
+  // (not a contract_violation member, unlike is_terminating above) because
+  // it classifies a bare evaluation_semantic value rather than a violation
+  // that has already occurred.  Gated the same way as is_terminating: it is
+  // unconditionally available whenever the base contracts API
+  // (__cpp_lib_contracts) is enabled, not behind __cpp_lib_contracts_labels
+  // -- the classification is a static property of the enumerators, usable
+  // regardless of whether P3400 labels are themselves in use.
+  constexpr bool
+  is_nonthrowing(evaluation_semantic __s) noexcept
+  {
+    return __s == evaluation_semantic::ignore
+	|| __s == evaluation_semantic::quick_enforce
+	|| __s == evaluation_semantic::assume
+	|| __s == evaluation_semantic::noexcept_enforce
+	|| __s == evaluation_semantic::noexcept_observe;
+  }
+
+  void
+  invoke_default_contract_violation_handler(const contract_violation&) noexcept;
 
 } // namespace contracts
 
@@ -112,4 +194,429 @@ _GLIBCXX_END_NAMESPACE_VERSION
 } // namespace std
 
 #endif // __cpp_lib_contracts
+
+#ifdef __cpp_lib_contracts_api
+#include <new>  // for std::nothrow_t
+
+namespace std _GLIBCXX_VISIBILITY(default)
+{
+_GLIBCXX_BEGIN_NAMESPACE_VERSION
+
+namespace contracts
+{
+  [[noreturn]] void handle_enforced_contract_violation(
+      const char* __comment,
+      const std::source_location& __location
+          = std::source_location::current());
+
+  void handle_observed_contract_violation(
+      const char* __comment,
+      const std::source_location& __location
+          = std::source_location::current());
+
+  [[noreturn]] void handle_quick_enforced_contract_violation(
+      const char* __comment,
+      const std::source_location& __location
+          = std::source_location::current()) noexcept;
+
+  // D4298: the nothrow_t overloads report the *noexcept* evaluation
+  // semantics only when the calling translation unit was compiled with
+  // -fcontracts-p4298 (which predefines __cpp_contracts_nonthrowing_semantics).
+  // To keep this a per-caller-TU decision without an ODR violation, the P4298
+  // variants live in the inline namespace std::contracts::__p4298: a caller
+  // with the flag binds std::contracts::handle_*_contract_violation to the
+  // distinct __p4298 symbol (reporting noexcept_enforce/noexcept_observe),
+  // while a caller without the flag binds the plain std::contracts symbol
+  // (reporting enforce/observe).  The library provides both sets of symbols;
+  // each mangled name has exactly one definition.
+#ifdef __cpp_contracts_nonthrowing_semantics
+  inline namespace __p4298 {
+#endif
+
+  [[noreturn]] void handle_enforced_contract_violation(
+      std::nothrow_t,
+      const char* __comment,
+      const std::source_location& __location
+          = std::source_location::current()) noexcept;
+
+  void handle_observed_contract_violation(
+      std::nothrow_t,
+      const char* __comment,
+      const std::source_location& __location
+          = std::source_location::current()) noexcept;
+
+#ifdef __cpp_contracts_nonthrowing_semantics
+  } // inline namespace __p4298
+#endif
+
+} // namespace contracts
+
+_GLIBCXX_END_NAMESPACE_VERSION
+} // namespace std
+
+#endif // __cpp_lib_contracts_api
+
+#ifdef __cpp_lib_contracts_labels
+
+namespace std _GLIBCXX_VISIBILITY(default)
+{
+_GLIBCXX_BEGIN_NAMESPACE_VERSION
+
+namespace contracts
+{
+namespace labels
+{
+  struct empty_label_t {
+    using assertion_control_object = empty_label_t;
+  };
+  inline constexpr empty_label_t empty_label{};
+
+  template<typename _Tp>
+  concept semantic_computation_label =
+    requires { typename _Tp::assertion_control_object; } &&
+    requires(const _Tp __t, contracts::evaluation_semantic __s) {
+      __t.compute_semantic(__s);
+    };
+
+  template<typename _Tp>
+  concept allowed_semantics_label =
+    requires { typename _Tp::assertion_control_object; } &&
+    requires(const _Tp __t) {
+      contracts::evaluation_semantic_set({__t.allowed_semantics});
+    };
+
+  template<typename _Tp>
+  concept local_violation_label =
+    requires { typename _Tp::assertion_control_object; } &&
+    requires(_Tp __t, const contracts::contract_violation& __v) {
+      __t.handle_contract_violation(__v);
+    };
+
+  template<typename _Tp>
+  concept compute_comment_label =
+    requires { typename _Tp::assertion_control_object; } &&
+    requires(const _Tp __t, const char* __c) {
+      __t.compute_comment(__c);
+    };
+
+  template<typename _Tp>
+  concept compute_message_label =
+    requires { typename _Tp::assertion_control_object; } &&
+    requires(const _Tp __t, const char* __m) {
+      __t.compute_message(__m);
+    };
+
+  template<typename _Tp>
+  concept queryable_label =
+    requires { typename _Tp::assertion_control_object; } &&
+    requires(const _Tp __t, const void* __key, std::size_t __index) {
+      __t.query(__key, __index);
+      requires __is_same(decltype(__t.query(__key, __index)), void*);
+    };
+
+  template<typename _Label>
+  int __local_violation_trampoline(const void* __label_ptr,
+				   const contracts::contract_violation& __v)
+  {
+    auto& __l = *static_cast<const _Label*>(__label_ptr);
+    using _Ret = decltype(__l.handle_contract_violation(__v));
+    if constexpr (__is_same(_Ret, void))
+      {
+	__l.handle_contract_violation(__v);
+	return 0;
+      }
+    else
+      return static_cast<int>(__l.handle_contract_violation(__v));
+  }
+
+  struct review_t {
+    using assertion_control_object = review_t;
+    constexpr contracts::evaluation_semantic
+    compute_semantic(contracts::evaluation_semantic __in) const
+    {
+      if (__in == contracts::evaluation_semantic::enforce
+          || __in == contracts::evaluation_semantic::quick_enforce)
+	return contracts::evaluation_semantic::observe;
+      return __in;
+    }
+  };
+  inline constexpr review_t review{};
+
+  struct fixed_message_label_t {
+    using assertion_control_object = fixed_message_label_t;
+    const char* _M_message;
+    constexpr fixed_message_label_t(const char* __msg)
+    : _M_message(__msg) { }
+    constexpr const char* compute_message(const char*) const
+    { return _M_message; }
+  };
+
+  template<typename _Tp>
+  concept identification_label =
+    requires { typename _Tp::assertion_control_object; } &&
+    requires (const _Tp __t) {
+      __t.group_names;
+    };
+
+  template<unsigned _N>
+  struct assertion_group_label {
+    using assertion_control_object = assertion_group_label<_N>;
+    char group_names[1][_N];
+    constexpr assertion_group_label(const char (&__name)[_N])
+    {
+      for (unsigned __i = 0; __i < _N; ++__i)
+	group_names[0][__i] = __name[__i];
+    }
+  };
+
+  template<assertion_group_label _G>
+  constexpr auto operator""group() { return _G; }
+
+  template<typename _Tp>
+  constexpr unsigned __group_count = 0;
+
+  template<identification_label _Tp>
+  constexpr unsigned __group_count<_Tp> =
+    sizeof(_Tp::group_names) / sizeof(_Tp::group_names[0]);
+
+  template<typename _Tp>
+  constexpr unsigned __group_max_len = 1;
+
+  template<identification_label _Tp>
+  constexpr unsigned __group_max_len<_Tp> =
+    sizeof(_Tp::group_names[0]);
+
+  // --- Combined facet bases (D3400R4 decomposed pattern) ---
+
+  template<typename _Lhs, typename _Rhs>
+  struct __combined_allowed_semantics_label
+  {
+    constexpr __combined_allowed_semantics_label(const _Lhs&, const _Rhs&) {}
+  };
+
+  template<typename _Lhs, typename _Rhs>
+    requires allowed_semantics_label<_Lhs>
+  struct __combined_allowed_semantics_label<_Lhs, _Rhs>
+  {
+    contracts::evaluation_semantic_set allowed_semantics;
+    constexpr __combined_allowed_semantics_label(const _Lhs& __l,
+						 const _Rhs&)
+    : allowed_semantics(__l.allowed_semantics) {}
+  };
+
+  template<typename _Lhs, typename _Rhs>
+    requires allowed_semantics_label<_Rhs>
+  struct __combined_allowed_semantics_label<_Lhs, _Rhs>
+  {
+    contracts::evaluation_semantic_set allowed_semantics;
+    constexpr __combined_allowed_semantics_label(const _Lhs&,
+						 const _Rhs& __r)
+    : allowed_semantics(__r.allowed_semantics) {}
+  };
+
+  template<typename _Lhs, typename _Rhs>
+    requires allowed_semantics_label<_Lhs> && allowed_semantics_label<_Rhs>
+  struct __combined_allowed_semantics_label<_Lhs, _Rhs>
+  {
+    contracts::evaluation_semantic_set allowed_semantics;
+    constexpr __combined_allowed_semantics_label(const _Lhs& __l,
+						 const _Rhs& __r)
+    : allowed_semantics(
+	contracts::evaluation_semantic_set(__l.allowed_semantics)
+	& contracts::evaluation_semantic_set(__r.allowed_semantics)) {}
+  };
+
+  template<typename _Lhs, typename _Rhs>
+  struct __combined_identification_label
+  {
+    constexpr __combined_identification_label(const _Lhs&, const _Rhs&) {}
+  };
+
+  template<typename _Lhs, typename _Rhs>
+    requires identification_label<_Lhs>
+  struct __combined_identification_label<_Lhs, _Rhs>
+  {
+    static constexpr unsigned __lc = __group_count<_Lhs>;
+    static constexpr unsigned __ml = __group_max_len<_Lhs>;
+    char group_names[__lc][__ml];
+    constexpr __combined_identification_label(const _Lhs& __l, const _Rhs&)
+    : group_names{}
+    {
+      for (unsigned __i = 0; __i < __lc; ++__i)
+	for (unsigned __j = 0; __j < __ml; ++__j)
+	  group_names[__i][__j] = __l.group_names[__i][__j];
+    }
+  };
+
+  template<typename _Lhs, typename _Rhs>
+    requires identification_label<_Rhs>
+  struct __combined_identification_label<_Lhs, _Rhs>
+  {
+    static constexpr unsigned __rc = __group_count<_Rhs>;
+    static constexpr unsigned __ml = __group_max_len<_Rhs>;
+    char group_names[__rc][__ml];
+    constexpr __combined_identification_label(const _Lhs&, const _Rhs& __r)
+    : group_names{}
+    {
+      for (unsigned __i = 0; __i < __rc; ++__i)
+	for (unsigned __j = 0; __j < __ml; ++__j)
+	  group_names[__i][__j] = __r.group_names[__i][__j];
+    }
+  };
+
+  template<typename _Lhs, typename _Rhs>
+    requires identification_label<_Lhs> && identification_label<_Rhs>
+  struct __combined_identification_label<_Lhs, _Rhs>
+  {
+    static constexpr unsigned __lc = __group_count<_Lhs>;
+    static constexpr unsigned __rc = __group_count<_Rhs>;
+    static constexpr unsigned __tc = __lc + __rc;
+    static constexpr unsigned __ml =
+      __group_max_len<_Lhs> > __group_max_len<_Rhs>
+	? __group_max_len<_Lhs> : __group_max_len<_Rhs>;
+    char group_names[__tc][__ml];
+    constexpr __combined_identification_label(const _Lhs& __l,
+					      const _Rhs& __r)
+    : group_names{}
+    {
+      unsigned __idx = 0;
+      for (unsigned __i = 0; __i < __lc; ++__i)
+	{
+	  for (unsigned __j = 0; __j < __group_max_len<_Lhs>; ++__j)
+	    group_names[__idx][__j] = __l.group_names[__i][__j];
+	  ++__idx;
+	}
+      for (unsigned __i = 0; __i < __rc; ++__i)
+	{
+	  for (unsigned __j = 0; __j < __group_max_len<_Rhs>; ++__j)
+	    group_names[__idx][__j] = __r.group_names[__i][__j];
+	  ++__idx;
+	}
+    }
+  };
+
+  // --- Combined label ---
+
+  template<typename _Lhs, typename _Rhs>
+    requires requires { typename _Lhs::assertion_control_object;
+			typename _Rhs::assertion_control_object; }
+  struct __combined_label
+    : __combined_allowed_semantics_label<_Lhs, _Rhs>
+    , __combined_identification_label<_Lhs, _Rhs>
+  {
+    using assertion_control_object = __combined_label;
+
+    constexpr __combined_label(const _Lhs& __lhs, const _Rhs& __rhs)
+    : __combined_allowed_semantics_label<_Lhs, _Rhs>(__lhs, __rhs)
+    , __combined_identification_label<_Lhs, _Rhs>(__lhs, __rhs)
+    , _M_lhs(__lhs), _M_rhs(__rhs) { }
+
+    constexpr __combined_label(const __combined_label&) = default;
+
+    constexpr contracts::evaluation_semantic
+    compute_semantic(contracts::evaluation_semantic __s) const
+      requires (semantic_computation_label<_Lhs>
+		|| semantic_computation_label<_Rhs>)
+    {
+      if constexpr (semantic_computation_label<_Lhs>)
+	__s = _M_lhs.compute_semantic(__s);
+      if constexpr (semantic_computation_label<_Rhs>)
+	__s = _M_rhs.compute_semantic(__s);
+      return __s;
+    }
+
+    constexpr const char*
+    compute_comment(const char* __c) const
+      requires (compute_comment_label<_Lhs>
+		|| compute_comment_label<_Rhs>)
+    {
+      if constexpr (compute_comment_label<_Lhs>)
+	__c = _M_lhs.compute_comment(__c);
+      if constexpr (compute_comment_label<_Rhs>)
+	__c = _M_rhs.compute_comment(__c);
+      return __c;
+    }
+
+    constexpr const char*
+    compute_message(const char* __m) const
+      requires (compute_message_label<_Lhs>
+		|| compute_message_label<_Rhs>)
+    {
+      if constexpr (compute_message_label<_Lhs>)
+	__m = _M_lhs.compute_message(__m);
+      if constexpr (compute_message_label<_Rhs>)
+	__m = _M_rhs.compute_message(__m);
+      return __m;
+    }
+
+    contracts::violation_handled
+    handle_contract_violation(const contracts::contract_violation& __v)
+      requires (local_violation_label<_Lhs> || local_violation_label<_Rhs>)
+    {
+      if constexpr (local_violation_label<_Lhs>)
+	{
+	  auto __r = _M_lhs.handle_contract_violation(__v);
+	  if constexpr (!__is_same(decltype(__r), void))
+	    if (static_cast<contracts::violation_handled>(__r)
+		== contracts::violation_handled::handled)
+	      return contracts::violation_handled::handled;
+	}
+      if constexpr (local_violation_label<_Rhs>)
+	{
+	  auto __r = _M_rhs.handle_contract_violation(__v);
+	  if constexpr (!__is_same(decltype(__r), void))
+	    if (static_cast<contracts::violation_handled>(__r)
+		== contracts::violation_handled::handled)
+	      return contracts::violation_handled::handled;
+	}
+      return contracts::violation_handled::not_handled;
+    }
+
+    void* query(const void* __key, std::size_t __index = 0) const
+      requires (queryable_label<_Lhs> || queryable_label<_Rhs>)
+    {
+      if constexpr (queryable_label<_Lhs> && queryable_label<_Rhs>)
+        {
+          void* __r = _M_lhs.query(__key, __index);
+          if (__r) return __r;
+          std::size_t __lhs_count = 0;
+          if (_M_lhs.query(__key, 0))
+            {
+              std::size_t __lo = 0, __hi = __index;
+              while (__lo + 1 < __hi)
+                {
+                  std::size_t __mid = __lo + ((__hi - __lo) >> 1);
+                  if (_M_lhs.query(__key, __mid)) __lo = __mid;
+                  else __hi = __mid;
+                }
+              __lhs_count = __lo + 1;
+            }
+          return _M_rhs.query(__key, __index - __lhs_count);
+        }
+      else if constexpr (queryable_label<_Lhs>)
+        return _M_lhs.query(__key, __index);
+      else
+        return _M_rhs.query(__key, __index);
+    }
+
+    _Lhs _M_lhs;
+    _Rhs _M_rhs;
+  };
+
+  template<typename _Lhs, typename _Rhs>
+    requires requires { typename _Lhs::assertion_control_object;
+			typename _Rhs::assertion_control_object; }
+  constexpr auto
+  operator|(const _Lhs& __lhs, const _Rhs& __rhs)
+  { return __combined_label<_Lhs, _Rhs>(__lhs, __rhs); }
+
+} // namespace labels
+} // namespace contracts
+
+_GLIBCXX_END_NAMESPACE_VERSION
+} // namespace std
+
+using contract_control namespace std::contracts::labels;
+
+#endif // __cpp_lib_contracts_labels
 #endif // _GLIBCXX_CONTRACTS

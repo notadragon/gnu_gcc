@@ -14,18 +14,26 @@
 
 struct MyException{};
 
+// The two things the note above actually promises, both of which this test
+// used to run past without checking: the throwing handler's exception must
+// propagate FROM THE ASSERTION STATEMENT -- so the statement after it does
+// not execute -- and it must be catchable at the enclosing try.
+static int handler_calls = 0;
+static int reached_after = 0;
+static int caught = 0;
 
 void handle_contract_violation(const std::contracts::contract_violation& violation)
 {
+  ++handler_calls;
   throw MyException{};
 }
 
 void free_f(const int x) {
   try {
 	  contract_assert(x>1);
-	  int i = 1;
+	  ++reached_after;
   }
-  catch(...){}
+  catch(const MyException&){ ++caught; }
 }
 
 struct X
@@ -33,17 +41,17 @@ struct X
     void f(const int x) {
       try {
 	  contract_assert(x>1);
-	  int i = 1;
+	  ++reached_after;
       }
-      catch(...){}
+      catch(const MyException&){ ++caught; }
     }
 
     virtual void virt_f(const int x) {
       try {
 	  contract_assert(x>1);
-	  int i = 1;
+	  ++reached_after;
       }
-      catch(...){}
+      catch(const MyException&){ ++caught; }
     }
 
 };
@@ -56,4 +64,11 @@ int main()
   x.f(-42);
   x.virt_f(-42);
 
+  if (handler_calls != 3)
+    __builtin_abort();
+  // The exception left the assertion statement, so nothing after it ran.
+  if (reached_after != 0)
+    __builtin_abort();
+  if (caught != 3)
+    __builtin_abort();
 }

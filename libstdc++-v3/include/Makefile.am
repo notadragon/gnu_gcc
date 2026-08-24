@@ -202,6 +202,7 @@ else GLIBCXX_HOSTED
 bits_headers = \
 	${bits_freestanding} \
 	${bits_srcdir}/allocated_ptr.h \
+	${bits_srcdir}/assert_contract.h \
 	${bits_srcdir}/atomic_futex.h \
 	${bits_srcdir}/atomic_timed_wait.h \
 	${bits_srcdir}/atomic_wait.h \
@@ -213,6 +214,7 @@ bits_headers = \
 	${bits_srcdir}/chrono.h \
 	${bits_srcdir}/chrono_io.h \
 	${bits_srcdir}/codecvt.h \
+	${bits_srcdir}/contracts_abi.h \
 	${bits_srcdir}/cow_string.h \
 	${bits_srcdir}/cpyfunc_impl.h \
 	${bits_srcdir}/deque.tcc \
@@ -946,6 +948,7 @@ endif
 
 if GLIBCXX_C_HEADERS_C_GLOBAL
 c_compatibility_headers = \
+	${c_compatibility_srcdir}/assert.h \
 	${c_compatibility_srcdir}/complex.h \
 	${c_compatibility_srcdir}/fenv.h \
 	${c_compatibility_srcdir}/tgmath.h \

@@ -7,7 +7,9 @@
 // This tests modifications to the constified things if checks are outlined
 // { dg-do run { target c++26 } }
 // { dg-additional-options "-fcontracts -fcontract-checks-outlined" }
-// { dg-xfail-run-if "PRXXXXXX" { *-*-* } }
+// Constification of an outer variable is not preserved when the check is
+// outlined, so the assertion in main still fires at run time.
+// { dg-xfail-run-if "outlined checks lose constification" { *-*-* } }
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 
 struct S{

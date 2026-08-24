@@ -40,6 +40,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "attribs.h"
 #include "asan.h"
 #include "gimplify.h"
+#include "contracts.h"
 
 static tree cp_build_addr_expr_strict (tree, tsubst_flags_t);
 static tree cp_build_function_call (tree, tree, tsubst_flags_t);
@@ -4640,7 +4641,11 @@ cp_comp_parm_types (tree wanted_type, tree actual_type)
 
 /* Build a function call using a vector of arguments.
    If FUNCTION is the result of resolving an overloaded target built-in,
-   ORIG_FNDECL is the original function decl, otherwise it is null.
+   ORIG_FNDECL is the original function decl, otherwise it is null.  (It
+   is also used to carry the callee of a virtual dispatch through to
+   build_cxx_call for P3097; see the note there.  No in-tree caller passes
+   it in either sense -- the parameter is defaulted and every call site
+   omits it.)
    PARAMS may be NULL if there are no parameters.  This changes the
    contents of PARAMS.  */
 
@@ -6967,6 +6972,58 @@ cp_build_binary_op (const op_location_t &location,
   if (build_type == NULL_TREE)
     build_type = result_type;
 
+  /* P3100: resolve the divide-by-zero / shift-out-of-range evaluation semantic
+     up front so that when it is the status-quo "assume" we leave OP0/OP1 (and
+     thus codegen) untouched.  Integer division/remainder by zero
+     ({expr.mul.div.by.zero}) and shifting by a negative or too-large amount
+     ({expr.shift.neg.and.width}) are core-language UB.  */
+  contract_evaluation_semantic p3100_div_sem = CES_ASSUME;
+  contract_evaluation_semantic p3100_divovf_sem = CES_ASSUME;
+  contract_evaluation_semantic p3100_shift_sem = CES_ASSUME;
+  bool p3100_div_guard = false;
+  bool p3100_divovf_guard = false;
+  bool p3100_shift_guard = false;
+  if (flag_contracts_p3100
+      && current_function_decl != NULL_TREE
+      && !processing_template_decl
+      && !cp_unevaluated_operand
+      && INTEGRAL_TYPE_P (build_type))
+    {
+      /* No implicit UB check is emitted in an unevaluated operand
+	 (noexcept/sizeof/decltype/requires): there is no code generated for
+	 it, so the runtime guard would be pointless, and -- crucially -- a
+	 P3100 implicit assertion must not change the result of the noexcept
+	 operator regardless of the evaluation semantic selected for it.  A
+	 nested constant expression that is genuinely evaluated (e.g. a
+	 template argument) is still constant-evaluated by the usual
+	 machinery, which enforces any contracts it contains.  */
+      if (doing_div_or_mod)
+	{
+	  p3100_div_sem
+	    = resolve_implicit_contract_semantic (current_function_decl,
+						  location,
+						  "ub:expr.mul.div.by.zero.int");
+	  p3100_div_guard = (p3100_div_sem != CES_ASSUME);
+	  /* INT_MIN / -1 overflow only applies to signed operands.  */
+	  if (!TYPE_UNSIGNED (build_type))
+	    {
+	      p3100_divovf_sem
+		= resolve_implicit_contract_semantic (current_function_decl,
+						      location,
+						      "ub:expr.mul.representable.type.result");
+	      p3100_divovf_guard = (p3100_divovf_sem != CES_ASSUME);
+	    }
+	}
+      else if (doing_shift)
+	{
+	  p3100_shift_sem
+	    = resolve_implicit_contract_semantic (current_function_decl,
+						  location,
+						  "ub:expr.shift.neg.and.width");
+	  p3100_shift_guard = (p3100_shift_sem != CES_ASSUME);
+	}
+    }
+
   if (doing_shift
       && flag_strong_eval_order == 2
       && TREE_SIDE_EFFECTS (op1)
@@ -6978,10 +7035,11 @@ cp_build_binary_op (const op_location_t &location,
       instrument_expr = op0;
     }
 
-  if (sanitize_flags_p ((SANITIZE_SHIFT
-			 | SANITIZE_DIVIDE
-			 | SANITIZE_FLOAT_DIVIDE
-			 | SANITIZE_SI_OVERFLOW))
+  if ((sanitize_flags_p ((SANITIZE_SHIFT
+			  | SANITIZE_DIVIDE
+			  | SANITIZE_FLOAT_DIVIDE
+			  | SANITIZE_SI_OVERFLOW))
+       || p3100_div_guard || p3100_divovf_guard || p3100_shift_guard)
       && current_function_decl != NULL_TREE
       && !processing_template_decl
       && (doing_div_or_mod || doing_shift))
@@ -7018,6 +7076,23 @@ cp_build_binary_op (const op_location_t &location,
     }
 
   result = build2_loc (location, resultcode, build_type, op0, op1);
+
+  /* P3100: guard an integer division/remainder whose divisor may be zero or
+     whose signed quotient may be unrepresentable (INT_MIN / -1), or a shift
+     whose amount may be negative or too large.  For division, the overflow
+     guard is applied first (inner) and the divide-by-zero guard second (outer),
+     so the divide-by-zero condition is tested first at run time.  */
+  if (p3100_divovf_guard)
+    result = build_implicit_divide_overflow_check (current_function_decl,
+						   location, p3100_divovf_sem,
+						   op0, op1, result);
+  if (p3100_div_guard)
+    result = build_implicit_divide_check (current_function_decl, location,
+					  p3100_div_sem, op0, op1, result);
+  else if (p3100_shift_guard)
+    result = build_implicit_shift_check (current_function_decl, location,
+					 p3100_shift_sem, op0, op1, result);
+
   if (final_type != 0)
     result = cp_convert (final_type, result, complain);
 

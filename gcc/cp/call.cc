@@ -11058,8 +11058,15 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
       && DECL_BUILT_IN_CLASS (fn) == BUILT_IN_NORMAL)
     maybe_warn_class_memaccess (input_location, fn, args);
 
+  tree orig_fn = NULL_TREE;
+
   if (DECL_VINDEX (fn) && (flags & LOOKUP_NONVIRTUAL) == 0)
     {
+      /* Save the original FUNCTION_DECL before transforming to vtable
+	 dispatch.  This is needed for P3097 virtual function contract
+	 wrappers -- build_cxx_call uses it to identify the callee.  */
+      orig_fn = fn;
+
       tree t;
       tree binfo = lookup_base (TREE_TYPE (TREE_TYPE (argarray[0])),
 				DECL_CONTEXT (fn),
@@ -11091,7 +11098,8 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
       ADDR_EXPR_DENOTES_CALL_P (fn) = true;
     }
 
-  tree call = build_cxx_call (fn, nargs, argarray, complain|decltype_flag);
+  tree call = build_cxx_call (fn, nargs, argarray, complain|decltype_flag,
+			      orig_fn);
   if (call == error_mark_node)
     return call;
   if (cand->flags & LOOKUP_LIST_INIT_CTOR)
@@ -11547,10 +11555,19 @@ maybe_warn_class_memaccess (location_t loc, tree fndecl,
 }
 
 /* Build and return a call to FN, using NARGS arguments in ARGARRAY.
-   If FN is the result of resolving an overloaded target built-in,
-   ORIG_FNDECL is the original function decl, otherwise it is null.
    This function performs no overload resolution, conversion, or other
-   high-level operations.  */
+   high-level operations.
+
+   ORIG_FNDECL carries two unrelated meanings, distinguished by caller:
+   for a call to an overloaded target built-in it is the original function
+   decl; for the P3097 contract-wrapper support it is the callee of a
+   virtual dispatch, whose vtable call get_callee_fndecl cannot recover.
+   The two cannot collide -- a virtual member function is never a built-in,
+   and the built-in consumer below is guarded on fndecl_built_in_p, while
+   maybe_contract_wrap_call requires DECL_IOBJ_MEMBER_FUNCTION_P and
+   DECL_VIRTUAL_P.  Target multiversioning of a virtual function, which is
+   the only shape that could in principle mean both at once, is rejected
+   outright with sorry () on every FMV-capable target.  */
 
 tree
 build_cxx_call (tree fn, int nargs, tree *argarray,
@@ -11563,8 +11580,16 @@ build_cxx_call (tree fn, int nargs, tree *argarray,
   fn = build_call_a (fn, nargs, argarray);
   SET_EXPR_LOCATION (fn, loc);
 
+  /* Only the P3097 caller passes ORIG_FNDECL for a virtual dispatch; see
+     the note on the two meanings above.  */
+  bool is_virtual_dispatch = (orig_fndecl != NULL_TREE);
   fndecl = get_callee_fndecl (fn);
-  if (!orig_fndecl)
+  /* A virtual dispatch has no callee decl to recover from the vtable call,
+     so use the one the caller saved -- without it maybe_contract_wrap_call
+     bails immediately on !fndecl and the wrapper never fires.  */
+  if (!fndecl && orig_fndecl)
+    fndecl = orig_fndecl;
+  else if (!orig_fndecl)
     orig_fndecl = fndecl;
 
   /* Check that arguments to builtin functions match the expectations.  */
@@ -11607,7 +11632,7 @@ build_cxx_call (tree fn, int nargs, tree *argarray,
     }
 
   if (VOID_TYPE_P (TREE_TYPE (fn)))
-    return maybe_contract_wrap_call (fndecl, fn);
+    return maybe_contract_wrap_call (fndecl, fn, is_virtual_dispatch);
 
   /* 5.2.2/11: If a function call is a prvalue of object type: if the
      function call is either the operand of a decltype-specifier or the
@@ -11619,7 +11644,7 @@ build_cxx_call (tree fn, int nargs, tree *argarray,
       fn = require_complete_type (fn, complain);
       if (fn == error_mark_node)
 	return error_mark_node;
-      fn = maybe_contract_wrap_call (fndecl, fn);
+      fn = maybe_contract_wrap_call (fndecl, fn, is_virtual_dispatch);
 
       if (MAYBE_CLASS_TYPE_P (TREE_TYPE (fn)))
 	{
@@ -11628,7 +11653,7 @@ build_cxx_call (tree fn, int nargs, tree *argarray,
 	}
     }
   else
-    fn = maybe_contract_wrap_call (fndecl, fn);
+    fn = maybe_contract_wrap_call (fndecl, fn, is_virtual_dispatch);
   return convert_from_reference (fn);
 }
 

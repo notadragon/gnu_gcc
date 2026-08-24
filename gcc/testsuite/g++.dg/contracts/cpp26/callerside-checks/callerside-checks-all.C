@@ -1,5 +1,5 @@
 // { dg-do run { target c++20 } }
-// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe -fcontracts-client-check=all" }
+// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe -fcontracts-client-check=all -fcontract-configuration-file=${srcdir}/g++.dg/contracts/cpp26/callerside-checks/callerside-observe-caller.json" }
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 
 

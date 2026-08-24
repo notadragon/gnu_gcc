@@ -485,6 +485,7 @@ extern GTY(()) tree cp_global_trees[CPTI_MAX];
       LAMBDA_EXPR_CONST_QUAL_P (in LAMBDA_EXPR)
       SPLICE_EXPR_MEMBER_ACCESS_P (in SPLICE_EXPR)
       PACK_INDEX_PARENTHESIZED_P (in PACK_INDEX_*)
+      DECLTYPE_FOR_CONST_REF_CAPTURE (in DECLTYPE_TYPE)
    2: IDENTIFIER_KIND_BIT_2 (in IDENTIFIER_NODE)
       ICS_THIS_FLAG (in _CONV)
       DECL_INITIALIZED_BY_CONSTANT_EXPRESSION_P (in VAR_DECL)
@@ -1591,6 +1592,15 @@ enum cp_lambda_default_capture_mode_type {
 #define LAMBDA_EXPR_STATIC_P(NODE) \
   TREE_LANG_FLAG_3 (LAMBDA_EXPR_CHECK (NODE))
 
+/* True if this lambda-expression appears lexically within the predicate of
+   a contract assertion.  Set at parse time (when the introducer is parsed
+   in a contract-condition scope) and propagated to nested lambdas.  Used to
+   const-qualify by-reference captures of entities that are declared outside
+   the predicate, since such entities are const within the predicate
+   (P2900).  */
+#define LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P(NODE) \
+  TREE_LANG_FLAG_4 (LAMBDA_EXPR_CHECK (NODE))
+
 /* True if this TREE_LIST in LAMBDA_EXPR_CAPTURE_LIST is for an explicit
    capture.  */
 #define LAMBDA_CAPTURE_EXPLICIT_P(NODE) \
@@ -2117,7 +2127,7 @@ struct GTY(()) saved_scope {
   int x_processing_specialization;
   int x_processing_constraint;
   int suppress_location_wrappers;
-  bool x_processing_postcondition : 1;
+  bool x_processing_postcondition_predicate : 1;
   bool x_processing_explicit_instantiation : 1;
   bool need_pop_function_context : 1;
   bool x_processing_omp_trait_property_expr : 1;
@@ -2204,7 +2214,7 @@ extern GTY(()) struct saved_scope *scope_chain;
 #define processing_contract_condition \
   (scope_chain->bindings->kind == sk_contract)
 
-#define processing_postcondition scope_chain->x_processing_postcondition
+#define processing_postcondition_predicate scope_chain->x_processing_postcondition_predicate
 
 #define in_discarded_stmt scope_chain->discarded_stmt
 #define in_consteval_if_p scope_chain->consteval_if_p
@@ -5340,6 +5350,13 @@ get_vec_init_expr (tree t)
   TREE_LANG_FLAG_2 (DECLTYPE_TYPE_CHECK (NODE))
 #define DECLTYPE_FOR_REF_CAPTURE(NODE) \
   TREE_LANG_FLAG_3 (DECLTYPE_TYPE_CHECK (NODE))
+/* Nonzero for a DECLTYPE_FOR_REF_CAPTURE lambda-capture DECLTYPE that
+   captures, from within a contract predicate, an entity that is const there
+   (P2900); the referent must be const-qualified when the type is resolved at
+   template instantiation.  Only used for dependent (implicit [&]) captures;
+   non-dependent captures are const-qualified eagerly in add_capture.  */
+#define DECLTYPE_FOR_CONST_REF_CAPTURE(NODE) \
+  TREE_LANG_FLAG_1 (DECLTYPE_TYPE_CHECK (NODE))
 
 /* Nonzero for VAR_DECL and FUNCTION_DECL node means that `extern' was
    specified in its declaration.  This can also be set for an
@@ -9327,6 +9344,7 @@ extern bool processing_constraint_expression_p	();
 extern tree get_concept_check_template		(tree);
 extern tree evaluate_concept_check              (tree);
 extern bool constraints_satisfied_p		(tree, tree = NULL_TREE);
+extern bool contract_constraint_satisfied_p	(tree);
 extern bool* lookup_subsumption_result          (tree, tree);
 extern bool save_subsumption_result             (tree, tree, bool);
 extern tree find_template_parameters		(tree, tree);

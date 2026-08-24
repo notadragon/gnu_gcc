@@ -2902,6 +2902,28 @@ constraints_satisfied_p (tree t, tree args/*= NULL_TREE */)
   return constraint_satisfaction_value (t, args, quiet) == boolean_true_node;
 }
 
+/* True if the constraint-expression EXPR is satisfied.  EXPR is a P4283
+   requires-clause on a contract assertion, already substituted for the current
+   instantiation.  Unlike constraints_satisfied_p, EXPR may be an arbitrary
+   constraint-logical-or-expression -- a conjunction, disjunction, negation, or
+   a lone atomic constraint, not just a single concept-check -- so it must be
+   normalized before satisfaction rather than handed straight to the
+   satisfaction machinery (which only accepts atomic forms).  Because EXPR is
+   already substituted, its atoms carry concrete arguments and no template
+   parameters remain, so satisfaction runs with empty args.  */
+
+bool
+contract_constraint_satisfied_p (tree expr)
+{
+  if (!flag_concepts || !expr || expr == error_mark_node)
+    return expr != error_mark_node;
+  sat_info quiet (tf_none, NULL_TREE);
+  norm_info ninfo (/*diag=*/false);
+  tree norm = normalize_constraint_expression (expr, ninfo);
+  return (satisfy_normalized_constraints (norm, NULL_TREE, quiet)
+	  == boolean_true_node);
+}
+
 /* Evaluate a concept check of the form C<ARGS>.  This is only used for the
    evaluation of template-ids as id-expressions.  */
 

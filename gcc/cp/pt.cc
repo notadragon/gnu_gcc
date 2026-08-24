@@ -12405,14 +12405,149 @@ tsubst_contract (tree decl, tree t, tree args, tsubst_flags_t complain,
      whose type is undeduced, process the expression as if inside a template to
      avoid spurious type errors.  */
   begin_scope (sk_contract, decl);
-  bool old_pc = processing_postcondition;
-  processing_postcondition = POSTCONDITION_P (t);
+  bool old_pc = processing_postcondition_predicate;
   const bool undeduced_result_type_p = auto_p && newvar;
   if (undeduced_result_type_p)
     ++processing_template_decl;
   if (newvar)
     /* Make the variable available for lookup.  */
     register_local_specialization (newvar, oldvar);
+
+  /* Ensure function parameters are in local_specializations so that
+     capture initializers (especially pack expansions) can resolve them.
+     Map original function's PARM_DECLs to the instantiated function's.  */
+  if (decl && in_decl && decl != in_decl)
+    for (tree op = DECL_ARGUMENTS (in_decl), np = DECL_ARGUMENTS (decl);
+	 op && np; op = DECL_CHAIN (op), np = DECL_CHAIN (np))
+      if (op != np)
+	register_local_specialization (np, op);
+
+  /* Substitute the P3400 assertion-control label, if present.  grok_contract
+     only validates a label and computes its derived facets (structural
+     check, local-violation/query trampolines, allowed-semantics mask) when
+     the label is not type-dependent -- for a templated contract the label
+     is dependent at first parse, so none of that ever ran.  Once
+     substitution makes it concrete, re-run the same resolution here.  */
+  if (CONTRACT_LABEL (r) && CONTRACT_LABEL (r) != error_mark_node)
+    {
+      /* Substitute the label with processing_template_decl back down.  It
+	 is raised just above only on account of a deduced return type, to
+	 keep the *condition* from tripping over the not-yet-known type;
+	 the label has nothing to do with the return type.  Leaving it
+	 raised makes tsubst_expr hand back the syntactic form of a prvalue
+	 label -- a CONSTRUCTOR still flagged COMPOUND_LITERAL_P -- instead
+	 of a digested value, which then trips store_init_value when the
+	 label is materialized into a static constant below.  */
+      auto ptd_override = make_temp_override (processing_template_decl,
+					      undeduced_result_type_p
+					      ? 0
+					      : processing_template_decl);
+      tree label = tsubst_expr (CONTRACT_LABEL (r), args, complain, in_decl);
+      CONTRACT_LABEL (r) = label;
+      if (label != error_mark_node)
+	{
+	  resolve_contract_label (r, label, EXPR_LOCATION (t));
+	  /* copy_node above brought the pattern's lazily-cached
+	     label-derived state along, computed while the label was still
+	     dependent; and the string facets never ran at parse time for
+	     the same reason.  Redo both now that it is concrete.  */
+	  reresolve_contract_label_facets (r, label, EXPR_LOCATION (t));
+	}
+    }
+
+  /* P4283: check the requires-clause BEFORE instantiating the captures or the
+     predicate.  If the constraint is not satisfied the whole contract is
+     discarded and its predicate is never instantiated -- so a predicate that is
+     valid only when the constraint holds does not cause errors for arguments
+     that do not satisfy it.  */
+  if (CONTRACT_REQUIRES_CLAUSE (r)
+      && CONTRACT_REQUIRES_CLAUSE (r) != error_mark_node)
+    {
+      tree req = tsubst_expr (CONTRACT_REQUIRES_CLAUSE (r), args,
+			      complain, in_decl);
+      CONTRACT_REQUIRES_CLAUSE (r) = req;
+      if (req != error_mark_node
+	  && !contract_constraint_satisfied_p (req))
+	{
+	  if (undeduced_result_type_p)
+	    --processing_template_decl;
+	  processing_postcondition_predicate = old_pc;
+	  pop_bindings_and_leave_scope ();
+	  return NULL_TREE;
+	}
+    }
+
+  /* Instantiate postcondition captures (P3098) BEFORE enabling
+     processing_postcondition_predicate -- capture initializers must be
+     able to reference non-const value parameters.  */
+  if (POSTCONDITION_P (t) && POSTCONDITION_CAPTURES (t))
+    {
+      tree old_caps = POSTCONDITION_CAPTURES (t);
+      tree new_caps = NULL_TREE;
+      for (tree cap = old_caps; cap; cap = TREE_CHAIN (cap))
+	{
+	  tree old_cap = TREE_VALUE (cap);
+
+	  if (DECL_PACK_P (old_cap))
+	    {
+	      /* Pack capture -- expand via tsubst_pack_expansion.  */
+	      tree expanded = tsubst_pack_expansion (DECL_INITIAL (old_cap),
+						     args, complain, in_decl);
+	      if (expanded == error_mark_node)
+		continue;
+	      int len = TREE_VEC_LENGTH (expanded);
+	      tree pack_vec = make_tree_vec (len);
+	      for (int i = 0; i < len; i++)
+		{
+		  tree ename = make_ith_pack_parameter_name (
+				 DECL_NAME (old_cap), i);
+		  tree einit = TREE_VEC_ELT (expanded, i);
+		  tree etype = unlowered_expr_type (einit);
+		  /* P3098 4.4.1: captures are not const-ified.  */
+		  etype = cp_build_qualified_type (etype,
+						   cp_type_quals (etype)
+						   & ~TYPE_QUAL_CONST);
+		  tree new_cap = build_lang_decl (VAR_DECL, ename, etype);
+		  DECL_ARTIFICIAL (new_cap) = 1;
+		  DECL_CONTEXT (new_cap) = decl;
+		  DECL_INITIAL (new_cap) = einit;
+		  new_caps = tree_cons (NULL_TREE, new_cap, new_caps);
+		  TREE_VEC_ELT (pack_vec, i) = new_cap;
+		}
+	      /* Register as argument pack so predicate pack expansion
+		 (e.g., old...) finds the individual captures.  */
+	      tree arg_pack = make_node (NONTYPE_ARGUMENT_PACK);
+	      ARGUMENT_PACK_ARGS (arg_pack) = pack_vec;
+	      register_local_specialization (arg_pack, old_cap);
+	    }
+	  else
+	    {
+	      /* Scalar capture -- existing handling.  */
+	      tree new_cap = copy_node (old_cap);
+	      tree cap_type = tsubst (TREE_TYPE (old_cap), args,
+				      complain, in_decl);
+	      /* P3098 4.4.1: captures are not const-ified.  For a capture whose
+		 type was deferred as a dependent decltype at parse time (a
+		 type-dependent initializer), the strip happens here; it is
+		 idempotent for a type already stripped at parse.  */
+	      cap_type = cp_build_qualified_type (cap_type,
+						  cp_type_quals (cap_type)
+						  & ~TYPE_QUAL_CONST);
+	      TREE_TYPE (new_cap) = cap_type;
+	      DECL_CONTEXT (new_cap) = decl;
+	      if (DECL_INITIAL (old_cap))
+		DECL_INITIAL (new_cap)
+		  = tsubst_expr (DECL_INITIAL (old_cap), args,
+				 complain, in_decl);
+	      register_local_specialization (new_cap, old_cap);
+	      new_caps = tree_cons (NULL_TREE, new_cap, new_caps);
+	    }
+	}
+      POSTCONDITION_CAPTURES (r) = nreverse (new_caps);
+    }
+
+  /* NOW enable postcondition predicate processing for the condition.  */
+  processing_postcondition_predicate = POSTCONDITION_P (t);
 
   /* Contract conditions have a wider application of location wrappers than
      other trees (which will not work with the generic handling in tsubst_expr),
@@ -12436,7 +12571,7 @@ tsubst_contract (tree decl, tree t, tree args, tsubst_flags_t complain,
 
   if (undeduced_result_type_p)
     --processing_template_decl;
-  processing_postcondition = old_pc;
+  processing_postcondition_predicate = old_pc;
   gcc_checking_assert (scope_chain && scope_chain->bindings
 		       && scope_chain->bindings->kind == sk_contract);
   pop_bindings_and_leave_scope ();
@@ -12481,6 +12616,9 @@ tsubst_contract_specifier (tree decl, tree contract, tree args,
   current_class_ptr = save_ccp;
   current_class_ref = save_ccr;
 
+  /* P4283: tsubst_contract returns NULL_TREE when the contract was
+     discarded because its requires-clause was not satisfied; the caller
+     drops the specifier from the substituted vector.  */
   return contract;
 }
 
@@ -12501,13 +12639,25 @@ tsubst_contract_specifiers (tree specifiers, tree decl, tree args,
 
   /* SPECIFIERS may be shared with the pattern (see the copy in
      tsubst_function_decl), so build a fresh vector rather than substituting
-     in place.  tsubst_contract () copies each statement it substitutes.  */
+     in place.  tsubst_contract () copies each statement it substitutes.
+
+     P4283: a contract whose requires-clause is not satisfied substitutes to
+     NULL_TREE and is dropped, so the substituted vector may be shorter than
+     SPECIFIERS -- collect first, then size the vector to what survived.  */
   int len = TREE_VEC_LENGTH (specifiers);
-  tree subst_contracts = make_tree_vec (len);
+  auto_vec<tree> substituted (len);
   for (int ix = 0; ix < len; ix++)
-    TREE_VEC_ELT (subst_contracts, ix)
-      = tsubst_contract_specifier (decl, TREE_VEC_ELT (specifiers, ix), args,
-				   complain, in_decl);
+    if (tree c = tsubst_contract_specifier (decl, TREE_VEC_ELT (specifiers, ix),
+					    args, complain, in_decl))
+      substituted.quick_push (c);
+
+  tree subst_contracts = NULL_TREE;
+  if (!substituted.is_empty ())
+    {
+      subst_contracts = make_tree_vec (substituted.length ());
+      for (unsigned ix = 0; ix < substituted.length (); ix++)
+	TREE_VEC_ELT (subst_contracts, ix) = substituted[ix];
+    }
 
   if (flag_contracts)
     set_fn_contract_specifiers (decl, subst_contracts);
@@ -14395,6 +14545,14 @@ tsubst_pack_expansion (tree t, tree args, tsubst_flags_t complain,
       else if (TREE_CODE (parm_pack) == FIELD_DECL)
 	/* For reconstruct_lambda_capture_pack.  */
 	arg_pack = retrieve_local_specialization (parm_pack);
+      else if (VAR_P (parm_pack) && DECL_ARTIFICIAL (parm_pack)
+	       && DECL_PACK_P (parm_pack))
+	{
+	  /* P3098: postcondition capture pack VAR_DECL.  */
+	  arg_pack = retrieve_local_specialization (parm_pack);
+	  if (arg_pack && DECL_PACK_P (arg_pack))
+	    arg_pack = NULL_TREE;
+	}
       else if (DECL_DECOMPOSITION_P (parm_pack))
 	{
 	  orig_arg = retrieve_local_specialization (parm_pack);
@@ -14672,16 +14830,25 @@ static tree
 tsubst_pack_index (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 {
   tree pack = PACK_INDEX_PACK (t);
-  if (PACK_EXPANSION_P (pack))
-    pack = tsubst_pack_expansion (pack, args, complain, in_decl);
-  else
-    {
-      /* PACK can be {*args#0} whose args#0's value-expr refers to
-	 a partially instantiated closure.  Let tsubst find the
-	 fully-instantiated one.  */
-      gcc_assert (TREE_CODE (pack) == TREE_VEC);
-      pack = tsubst_tree_vec (pack, args, complain, in_decl);
-    }
+  {
+    /* Expanding the pack substitutes the pattern for every element, but a
+       pack-index-expression odr-uses only the selected one.  Defer the
+       postcondition const check on parameters (it is re-run below on the
+       selected element via check_selected_pack_index_params).  */
+    bool save = defer_postcondition_pack_index_check;
+    defer_postcondition_pack_index_check = true;
+    if (PACK_EXPANSION_P (pack))
+      pack = tsubst_pack_expansion (pack, args, complain, in_decl);
+    else
+      {
+	/* PACK can be {*args#0} whose args#0's value-expr refers to
+	   a partially instantiated closure.  Let tsubst find the
+	   fully-instantiated one.  */
+	gcc_assert (TREE_CODE (pack) == TREE_VEC);
+	pack = tsubst_tree_vec (pack, args, complain, in_decl);
+      }
+    defer_postcondition_pack_index_check = save;
+  }
   if (TREE_CODE (pack) == TREE_VEC && TREE_VEC_LENGTH (pack) == 0)
     {
       if (complain & tf_error)
@@ -14697,7 +14864,13 @@ tsubst_pack_index (tree t, tree args, tsubst_flags_t complain, tree in_decl)
   if (error_operand_p (index))
     return error_mark_node;
   if (!value_dependent_expression_p (index) && TREE_CODE (pack) == TREE_VEC)
-    r = pack_index_element (index, pack, parenthesized_p, complain);
+    {
+      r = pack_index_element (index, pack, parenthesized_p, complain);
+      /* Now that an element is selected, apply the deferred postcondition
+	 const check to the parameters it actually odr-uses.  */
+      if (flag_contracts && TREE_CODE (t) == PACK_INDEX_EXPR)
+	check_selected_pack_index_params (r, cp_expr_loc_or_input_loc (t));
+    }
   else
     r = make_pack_index (pack, index);
   if (TREE_CODE (t) == PACK_INDEX_TYPE)
@@ -18103,9 +18276,25 @@ tsubst (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 	--c_inhibit_evaluation_warnings;
 
 	if (DECLTYPE_FOR_LAMBDA_CAPTURE (t))
-	  type = lambda_capture_field_type (type,
-					    false /*explicit_init*/,
-					    DECLTYPE_FOR_REF_CAPTURE (t));
+	  {
+	    type = lambda_capture_field_type (type,
+					      false /*explicit_init*/,
+					      DECLTYPE_FOR_REF_CAPTURE (t));
+	    /* P2900: a by-reference capture of an entity that is const within
+	       a contract predicate has a const-qualified referent.  For a
+	       dependent capture this could not be applied at parse time; do it
+	       now that the referent type is known.  */
+	    if (DECLTYPE_FOR_CONST_REF_CAPTURE (t)
+		&& TREE_CODE (type) == REFERENCE_TYPE
+		&& !CP_TYPE_CONST_P (TREE_TYPE (type)))
+	      {
+		tree referent
+		  = cp_build_qualified_type (TREE_TYPE (type),
+					     cp_type_quals (TREE_TYPE (type))
+					     | TYPE_QUAL_CONST);
+		type = build_reference_type (referent);
+	      }
+	  }
 	else if (DECLTYPE_FOR_LAMBDA_PROXY (t))
 	  type = lambda_proxy_type (type);
 	else
@@ -19869,9 +20058,9 @@ tsubst_stmt (tree t, tree args, tsubst_flags_t complain, tree in_decl)
     case ASSERTION_STMT:
       {
 	r = tsubst_contract (NULL_TREE, t, args, complain, in_decl);
-	if (r != error_mark_node)
+	if (r && r != error_mark_node)
 	  add_stmt (r);
-	RETURN (r);
+	RETURN (r ? r : void_node);
       }
       break;
 

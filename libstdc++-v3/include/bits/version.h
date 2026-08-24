@@ -2686,6 +2686,46 @@
 #endif /* !defined(__cpp_lib_contracts) */
 #undef __glibcxx_want_contracts
 
+#if !defined(__cpp_lib_contracts_message)
+# if (__cplusplus >  202302L) && defined(__cpp_contracts_message)
+#  define __glibcxx_contracts_message 202606L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_contracts_message)
+#   define __cpp_lib_contracts_message 202606L
+#  endif
+# endif
+#endif /* !defined(__cpp_lib_contracts_message) */
+#undef __glibcxx_want_contracts_message
+
+#if !defined(__cpp_lib_contracts_api)
+# if (__cplusplus >  202302L) && defined(__gcc_contracts_p3290)
+#  define __glibcxx_contracts_api 202606L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_contracts_api)
+#   define __cpp_lib_contracts_api 202606L
+#  endif
+# endif
+#endif /* !defined(__cpp_lib_contracts_api) */
+#undef __glibcxx_want_contracts_api
+
+#if !defined(__cpp_lib_assert_can_use_contracts)
+# if (__cplusplus >  202302L) && defined(__gcc_contracts_p3290)
+#  define __glibcxx_assert_can_use_contracts 202606L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_assert_can_use_contracts)
+#   define __cpp_lib_assert_can_use_contracts 202606L
+#  endif
+# endif
+#endif /* !defined(__cpp_lib_assert_can_use_contracts) */
+#undef __glibcxx_want_assert_can_use_contracts
+
+#if !defined(__cpp_lib_contracts_labels)
+# if (__cplusplus >  202302L) && defined(__cpp_contracts_labels)
+#  define __glibcxx_contracts_labels 202606L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_contracts_labels)
+#   define __cpp_lib_contracts_labels 202606L
+#  endif
+# endif
+#endif /* !defined(__cpp_lib_contracts_labels) */
+#undef __glibcxx_want_contracts_labels
+
 #if !defined(__cpp_lib_replaceable_contract_violation_handler)
 # if (__cplusplus >  202302L) && (__cpp_contracts >= 202502L && __ELF__)
 #  define __glibcxx_replaceable_contract_violation_handler 202603L
@@ -2700,6 +2740,16 @@
 # endif
 #endif /* !defined(__cpp_lib_replaceable_contract_violation_handler) */
 #undef __glibcxx_want_replaceable_contract_violation_handler
+
+#if !defined(__cpp_lib_contracts_report)
+# if (__cplusplus >  202302L) && defined(__cpp_contracts_report)
+#  define __glibcxx_contracts_report 202607L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_contracts_report)
+#   define __cpp_lib_contracts_report 202607L
+#  endif
+# endif
+#endif /* !defined(__cpp_lib_contracts_report) */
+#undef __glibcxx_want_contracts_report
 
 #if !defined(__cpp_lib_simd)
 # if (__cplusplus >  202302L) && _GLIBCXX_HOSTED && (__cpp_structured_bindings >= 202411L && __cpp_expansion_statements >= 202411L && __SSE2__)

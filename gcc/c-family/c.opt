@@ -603,6 +603,14 @@ Wconstant-logical-operand
 C ObjC C++ ObjC++ Var(warn_constant_logical_operand) Warning LangEnabledBy(C ObjC C++ ObjC++,Wall)
 Warn for constant operands of logical operators other than 0 or 1.
 
+Wcontract-configuration
+C ObjC C++ ObjC++ Var(warn_contract_configuration) Init(1) Warning
+Warn about problems in the contract configuration (P3595).
+
+Wcontract-constexpr-side-effect
+C ObjC C++ ObjC++ Var(warn_contract_constexpr_side_effect) Init(1) Warning
+Warn when a contract predicate evaluated during constant evaluation modifies the enclosing evaluation.
+
 Wconversion
 C ObjC C++ ObjC++ Var(warn_conversion) Warning
 Warn for implicit type conversions that may change a value.
@@ -1909,7 +1917,7 @@ C++ ObjC++ Joined RejectNegative Host_Wide_Int Var(constexpr_ops_limit) Init(335
 -fconstexpr-ops-limit=<number>	Specify maximum number of constexpr operations during a single constexpr evaluation.
 
 fcontracts
-C++ ObjC++ Var(flag_contracts) Init(0)
+C++ ObjC++ Var(flag_contracts) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3097 || fcontracts-p3098 || fcontracts-p3099 || fcontracts-p3100 || fcontracts-p3290 || fcontracts-p3400 || fcontracts-p3850 || fcontracts-p4283 || fcontracts-p4298 || fcontracts-p4301)
 Enable features proposed for C++26 Contracts.
 
 ; Keep these in step with the values in cp/contracts.h
@@ -1929,9 +1937,18 @@ Enum(contract_semantic) String(enforce) Value(3)
 EnumValue
 Enum(contract_semantic) String(quick_enforce) Value(4)
 
+EnumValue
+Enum(contract_semantic) String(assume) Value(5)
+
+EnumValue
+Enum(contract_semantic) String(noexcept_observe) Value(6)
+
+EnumValue
+Enum(contract_semantic) String(noexcept_enforce) Value(7)
+
 fcontract-evaluation-semantic=
-C++ ObjC++ Joined RejectNegative Enum(contract_semantic) Var(flag_contract_evaluation_semantic) Init(3)
--fcontract-evaluation-semantic=[ignore|observe|enforce|quick_enforce]	Select the contract evaluation semantic (defaults to enforce).
+C C++ ObjC ObjC++ Joined RejectNegative Enum(contract_semantic) Var(flag_contract_evaluation_semantic) Init(3)
+-fcontract-evaluation-semantic=[ignore|observe|enforce|quick_enforce|assume|noexcept_enforce|noexcept_observe]	Select the contract evaluation semantic (defaults to enforce).
 
 fcontracts-conservative-ipa
 C++ ObjC++ Var(flag_contracts_conservative_ipa) Init(1)
@@ -1959,7 +1976,7 @@ EnumValue
 Enum(client_contract_check) String(all) Value(2)
 
 fcontracts-client-check=
-C++ ObjC++ Joined RejectNegative Enum(client_contract_check) Var(flag_contract_client_check) Init (0)
+C C++ ObjC ObjC++ Joined RejectNegative Enum(client_contract_check) Var(flag_contract_client_check) Init (0)
 -fcontracts-client-check=[none|pre|all] Select which contracts will be checked on the client side for non virtual functions.
 
 Enum
@@ -1972,8 +1989,68 @@ EnumValue
 Enum(on_off) String(on) Value(1)
 
 fcontracts-definition-check=
-C++ ObjC++ Joined RejectNegative Enum(on_off) Var(flag_contracts_definition_check) Init(1)
+C C++ ObjC ObjC++ Joined RejectNegative Enum(on_off) Var(flag_contracts_definition_check) Init(1)
 -fcontracts-definition-check=[on|off]	Enable or disable contract checks on the definition side for all functions (default on).
+
+fcontract-group-evaluation-semantic=
+C C++ ObjC ObjC++ Joined RejectNegative
+-fcontract-group-evaluation-semantic=<group>:<semantic>	Set the evaluation semantic for contracts in a specific group.
+
+fcontract-configuration=
+C C++ ObjC ObjC++ Joined RejectNegative
+-fcontract-configuration=<json>	Provide inline JSON contract configuration.
+
+fcontract-configuration-file=
+C C++ ObjC ObjC++ Joined RejectNegative
+-fcontract-configuration-file=<path>	Load contract configuration from a JSON file.
+
+fcontracts-p3850
+C++ ObjC++ Var(flag_contracts_p3850) Init(0)
+Enable all P3850 contract extensions for C++29.
+
+fcontracts-p3099
+C++ ObjC++ Var(flag_contracts_p3099) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3099 user-defined diagnostic messages for contract assertions.
+
+fcontracts-p3290
+C++ ObjC++ Var(flag_contracts_p3290) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3290 contract violation trigger API and assert integration.
+
+fcontracts-p3098
+C++ ObjC++ Var(flag_contracts_p3098) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3098 postcondition captures on contract assertions.
+
+fcontracts-p3400
+C++ ObjC++ Var(flag_contracts_p3400) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3400 assertion-control labels on contract assertions.
+
+fcontracts-p3097
+C++ ObjC++ Var(flag_contracts_p3097) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3097 contract assertions on virtual functions.
+
+fcontracts-p4283
+C++ ObjC++ Var(flag_contracts_p4283) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P4283 requires clauses on contract assertions.
+
+fcontracts-p4299
+C ObjC Var(flag_contracts_p4299) Init(0)
+Enable C contracts support (D4299).
+
+fcontracts-p3100
+C++ ObjC++ Var(flag_contracts_p3100) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3100 implicit contract assertions and the assume evaluation semantic.
+
+fcontracts-p4298
+C++ ObjC++ Var(flag_contracts_p4298) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P4298 noexcept_enforce and noexcept_observe evaluation semantics.
+
+fcontracts-p4301
+C++ ObjC++ Var(flag_contracts_p4301) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable D4301 contract_violation::report() ASan/UBSan diagnostic accessor.
+
+fcontracts-allow-assume
+C C++ ObjC ObjC++ Var(flag_contracts_allow_assume) Init(0)
+Allow the assume contract evaluation semantic to be used; a resolved assume is otherwise treated as ignore.
 
 fcoroutines
 C++ ObjC++ LTO Var(flag_coroutines)

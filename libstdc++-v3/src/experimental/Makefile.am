@@ -38,16 +38,17 @@ endif
 
 headers =
 
-sources = \
-	contract26.cc
+sources =
+
+# libstdc++exp has no direct sources -- it only aggregates the convenience
+# libraries below -- but it must be linked with the C++ linker.  Name a dummy
+# C++ source (never compiled or distributed) so automake selects CXXLINK
+# rather than the C linker.
+nodist_EXTRA_libstdc__exp_la_SOURCES = force-cxx-link.cc
 
 # vpath % $(top_srcdir)/src/experimental
 
 
-contract26.lo: contract26.cc
-	$(LTCXXCOMPILE) -std=gnu++26 -fcontracts -c $<
-contract26.o: contract26.cc
-	$(CXXCOMPILE) -std=gnu++26 -fcontracts -c $<
 
 libstdc__exp_la_SOURCES = $(sources)
 
@@ -56,11 +57,13 @@ libstdc__exp_la_SOURCES = $(sources)
 libstdc__exp_la_LIBADD = \
 	$(top_builddir)/src/c++23/libc++23convenience.la \
 	$(top_builddir)/src/c++26/libc++26convenience.la \
+	$(top_builddir)/src/c++26/libc++26contractsconvenience.la \
 	$(filesystem_lib) $(backtrace_lib)
 
 libstdc__exp_la_DEPENDENCIES = \
 	$(top_builddir)/src/c++23/libc++23convenience.la \
 	$(top_builddir)/src/c++26/libc++26convenience.la \
+	$(top_builddir)/src/c++26/libc++26contractsconvenience.la \
 	$(filesystem_lib) $(backtrace_lib)
 
 # AM_CXXFLAGS needs to be in each subdirectory so that it can be

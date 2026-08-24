@@ -359,10 +359,19 @@ maybe_get_dominating_check (auto_vec<gimple *> &v)
 static bool
 maybe_optimize_ubsan_null_ifn (class sanopt_ctx *ctx, gimple *stmt)
 {
-  gcc_assert (gimple_call_num_args (stmt) == 3);
-  tree ptr = gimple_call_arg (stmt, 0);
-  tree cur_align = gimple_call_arg (stmt, 2);
+  gcc_assert (gimple_call_num_args (stmt) == UBSAN_NULL_NUM_OPS);
+  tree ptr = gimple_call_arg (stmt, UBSAN_NULL_PTR);
+  tree cur_align = gimple_call_arg (stmt, UBSAN_NULL_ALIGN);
   gcc_assert (TREE_CODE (cur_align) == INTEGER_CST);
+  /* Operand 3 is the P3100 implicit-UB null reaction and operand 6 the
+     alignment reaction (IMPLICIT_UB_NONE == 0 for the pure -fsanitize= path).
+     Two checks on the same pointer may only be merged when both reactions
+     match; otherwise a site could inherit the wrong reaction and report/
+     terminate incorrectly.  */
+  tree cur_reaction = gimple_call_arg (stmt, UBSAN_NULL_REACTION);
+  tree cur_align_reaction = gimple_call_arg (stmt, UBSAN_NULL_ALIGN_REACTION);
+  gcc_assert (TREE_CODE (cur_reaction) == INTEGER_CST);
+  gcc_assert (TREE_CODE (cur_align_reaction) == INTEGER_CST);
   bool remove = false;
 
   auto_vec<gimple *> &v = ctx->null_check_map.get_or_insert (ptr);
@@ -379,27 +388,37 @@ maybe_optimize_ubsan_null_ifn (class sanopt_ctx *ctx, gimple *stmt)
      can drop this one.  But only if this check doesn't specify stricter
      alignment.  */
 
-  tree align = gimple_call_arg (g, 2);
-  int kind = tree_to_shwi (gimple_call_arg (g, 1));
+  tree align = gimple_call_arg (g, UBSAN_NULL_ALIGN);
+  int kind = tree_to_shwi (gimple_call_arg (g, UBSAN_NULL_CKIND));
+  /* Only consider the dominating check equivalent when it carries the same
+     P3100 reactions (both null and alignment); a check with a different
+     reaction must keep its own.  */
+  bool same_reaction
+    = tree_int_cst_equal (cur_reaction,
+			  gimple_call_arg (g, UBSAN_NULL_REACTION))
+      && tree_int_cst_equal (cur_align_reaction,
+			     gimple_call_arg (g, UBSAN_NULL_ALIGN_REACTION));
   /* If this is a NULL pointer check where we had segv anyway, we can
      remove it.  */
-  if (integer_zerop (align)
+  if (same_reaction
+      && integer_zerop (align)
       && (kind == UBSAN_LOAD_OF
 	  || kind == UBSAN_STORE_OF
 	  || kind == UBSAN_MEMBER_ACCESS))
     remove = true;
   /* Otherwise remove the check in non-recovering mode, or if the
      stmts have same location.  */
-  else if (integer_zerop (align))
+  else if (same_reaction && integer_zerop (align))
     remove = (flag_sanitize_recover & SANITIZE_NULL) == 0
 	      || (flag_sanitize_trap & SANITIZE_NULL) != 0
 	      || gimple_location (g) == gimple_location (stmt);
-  else if (tree_int_cst_le (cur_align, align))
+  else if (same_reaction && tree_int_cst_le (cur_align, align))
     remove = (flag_sanitize_recover & SANITIZE_ALIGNMENT) == 0
 	      || (flag_sanitize_trap & SANITIZE_ALIGNMENT) != 0
 	      || gimple_location (g) == gimple_location (stmt);
 
   if (!remove && gimple_bb (g) == gimple_bb (stmt)
+      && same_reaction
       && tree_int_cst_compare (cur_align, align) == 0)
     v.pop ();
 
@@ -973,7 +992,9 @@ public:
     unsigned int mask = SANITIZE_RETURN;
     if (flag_sanitize_trap & SANITIZE_UNREACHABLE)
       mask |= SANITIZE_UNREACHABLE;
-    return flag_sanitize & ~mask;
+    /* P3100 implicit contract assertions insert IFN_UBSAN_NULL that this pass
+       must expand, even when no sanitizer is enabled.  */
+    return (flag_sanitize & ~mask) || flag_contracts_p3100;
   }
   unsigned int execute (function *) final override;
 

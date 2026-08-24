@@ -36,6 +36,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "c-family/c-spellcheck.h"
 #include "bitmap.h"
 
+bool in_assertion_control_expression_p = false;
+
 static cxx_binding *cxx_binding_make (tree value, tree type);
 static cp_binding_level *innermost_nonclass_level (void);
 static void set_identifier_type_value_with_scope (tree id, tree decl,
@@ -1105,6 +1107,9 @@ name_lookup::queue_namespace (using_queue& queue, int depth, tree scope)
 
   /* Queue its using targets.  */
   queue_usings (queue, depth, NAMESPACE_LEVEL (scope)->using_directives);
+  if (in_assertion_control_expression_p)
+    queue_usings (queue, depth,
+		  NAMESPACE_LEVEL (scope)->contract_control_usings);
 }
 
 /* Add the namespaces in USINGS to the unqualified search queue.  */
@@ -1131,7 +1136,12 @@ name_lookup::search_unqualified (tree scope, cp_binding_level *level)
 
   /* Queue local using-directives.  */
   for (; level->kind != sk_namespace; level = level->level_chain)
-    queue_usings (queue, SCOPE_DEPTH (scope), level->using_directives);
+    {
+      queue_usings (queue, SCOPE_DEPTH (scope), level->using_directives);
+      if (in_assertion_control_expression_p)
+	queue_usings (queue, SCOPE_DEPTH (scope),
+		      level->contract_control_usings);
+    }
 
   for (; !found; scope = CP_DECL_CONTEXT (scope))
     {
@@ -9289,6 +9299,18 @@ add_imported_using_namespace (tree ns, tree target)
 		       /*imported=*/true);
 }
 
+/* As above, for a P3400 contract-control using-directive, which lives in a
+   separate vector because the names it introduces are visible only inside
+   assertion-control expressions.  */
+
+void
+add_imported_contract_control_using_namespace (tree ns, tree target)
+{
+  add_using_namespace (NAMESPACE_LEVEL (ns)->contract_control_usings,
+		       ORIGINAL_NAMESPACE (target),
+		       /*imported=*/true);
+}
+
 /* Tell the debug system of a using directive.  */
 
 static void
@@ -9358,6 +9380,19 @@ finish_using_directive (tree target, tree attribs)
 	else if (!attribute_ignored_p (a))
 	  warning (OPT_Wattributes, "%qD attribute directive ignored", name);
       }
+}
+
+/* Record a contract-control using directive (P3400).  Names from TARGET
+   will be visible only within assertion-control expressions.  */
+
+void
+finish_contract_control_using_directive (tree target)
+{
+  if (target == error_mark_node)
+    return;
+
+  add_using_namespace (current_binding_level->contract_control_usings,
+		       ORIGINAL_NAMESPACE (target));
 }
 
 /* Pushes X into the global namespace.  */
