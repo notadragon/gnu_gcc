@@ -12590,6 +12590,25 @@ tsubst_contract (tree decl, tree t, tree args, tsubst_flags_t complain,
   return r;
 }
 
+/* The declaration whose parameters a not-yet-substituted contract on IN_DECL
+   is written in terms of.  For non-specializations that is the most general
+   template's, because we defer the instantiation of contracts as long as
+   possible and they are still written in terms of the parameters (and return
+   type) of that one.
+
+   Whoever substitutes a contract must take the contract itself from this
+   declaration too, not from some earlier copy of it: the two have to agree,
+   or the condition names parameters that were never registered.  */
+
+static tree
+contract_parameter_pattern (tree in_decl)
+{
+  tree tmpl = DECL_TI_TEMPLATE (in_decl);
+  if (!DECL_TEMPLATE_SPECIALIZATION (tmpl))
+    return DECL_TEMPLATE_RESULT (most_general_template (in_decl));
+  return in_decl;
+}
+
 /* Instantiate the contract specifier CONTRACT, returning the substituted
    contract statement.  */
 
@@ -12597,13 +12616,7 @@ static tree
 tsubst_contract_specifier (tree decl, tree contract, tree args,
 			   tsubst_flags_t complain, tree in_decl)
 {
-  /* For non-specializations, adjust the current declaration to the most general
-     version of in_decl. Because we defer the instantiation of contracts as long
-     as possible, they are still written in terms of the parameters (and return
-     type) of the most general template.  */
-  tree tmpl = DECL_TI_TEMPLATE (in_decl);
-  if (!DECL_TEMPLATE_SPECIALIZATION (tmpl))
-    in_decl = DECL_TEMPLATE_RESULT (most_general_template (in_decl));
+  in_decl = contract_parameter_pattern (in_decl);
   local_specialization_stack specs (lss_copy);
   register_parameter_specializations (in_decl, decl);
 
@@ -28778,9 +28791,21 @@ regenerate_decl_from_template (tree decl, tree tmpl, tree args)
 
       /* The contracts on DECL may predate a later redeclaration of the
 	 template, or have been copied from a more general template.  We should
-	 use the contracts from the current pattern.  */
+	 use the contracts from the current pattern.
+
+	 DECL's own specifiers are a copy taken by tsubst_function_decl when
+	 DECL was created, which for a member of a class template is when the
+	 class was instantiated.  That copy goes stale if the pattern is merged
+	 with a later declaration -- an out-of-line definition, whose parameters
+	 replace the ones the contract was written against (see
+	 update_contract_arguments) -- because the condition still names the
+	 parameters of the declaration it was written on.  Substitution
+	 registers the parameters of the declaration contract_parameter_pattern
+	 picks, so take the specifiers from that same declaration and the two
+	 cannot disagree.  */
       tree decl_contracts = get_fn_contract_specifiers (decl);
-      tree pattern_contracts = get_fn_contract_specifiers (code_pattern);
+      tree pattern_contracts
+	= get_fn_contract_specifiers (contract_parameter_pattern (code_pattern));
       /* There are four cases:
 	 neither has contracts, so there is nothing to do;
 	 only the pattern has contracts, so add them to DECL;
