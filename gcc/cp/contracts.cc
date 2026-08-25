@@ -2943,6 +2943,19 @@ maybe_apply_function_contracts (tree fndecl)
 
   /* Now add the pre and post conditions to the existing function body.
      This copies the approach used for function try blocks.  */
+
+  /* We are called from finish_function with the sk_function_parms level
+     current, so do_poplevel will see that same level again when it finishes
+     the artificial block below -- exactly the test maybe_splice_retval_cleanup
+     uses to recognise the function body.  The body's own scope has already
+     declared current_retval_sentinel and spliced in its cleanup; doing either
+     a second time declares the same VAR_DECL twice (which the gimplifier
+     rejects) and would destroy the return value twice on throw.  A contract
+     check runs either before the return object exists or after the body's
+     cleanup has dealt with it, so this block wants neither.  */
+  auto retval_sentinel_ovr = make_temp_override (current_retval_sentinel,
+						 NULL_TREE);
+
   tree compound_stmt = begin_compound_stmt (0);
   current_binding_level->artificial = true;
 
