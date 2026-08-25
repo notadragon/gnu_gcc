@@ -2460,6 +2460,15 @@ ftms = {
 };
 
 ftms = {
+  name = contracts_implicit;
+  values = {
+    v = 202608;
+    cxxmin = 26;
+    extra_cond = "defined(__gcc_contracts_p3100)";
+  };
+};
+
+ftms = {
   name = contracts_labels;
   values = {
     v = 202606;

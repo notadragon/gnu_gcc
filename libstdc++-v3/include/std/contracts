@@ -35,6 +35,7 @@
 #define __glibcxx_want_contracts
 #define __glibcxx_want_contracts_message
 #define __glibcxx_want_contracts_api
+#define __glibcxx_want_contracts_implicit
 #define __glibcxx_want_contracts_labels
 #define __glibcxx_want_replaceable_contract_violation_handler
 #define __glibcxx_want_contracts_report

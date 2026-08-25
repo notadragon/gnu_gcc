@@ -1163,6 +1163,8 @@ c_cpp_builtins (cpp_reader *pfile)
 	cpp_define (pfile, "__cpp_contracts_nonthrowing_semantics=202607L");
       if (flag_contracts_p4301)
 	cpp_define (pfile, "__cpp_contracts_report=202607L");
+      if (flag_contracts_allow_assume)
+	cpp_define (pfile, "__gcc_contracts_allow_assume");
       if (flag_modules)
 	/* The std-defined value is 201907L, but I don't think we can
 	   claim victory yet.  201810 is the p1103 date. */

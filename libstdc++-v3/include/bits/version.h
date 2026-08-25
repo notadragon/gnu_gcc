@@ -2716,6 +2716,16 @@
 #endif /* !defined(__cpp_lib_assert_can_use_contracts) */
 #undef __glibcxx_want_assert_can_use_contracts
 
+#if !defined(__cpp_lib_contracts_implicit)
+# if (__cplusplus >  202302L) && defined(__gcc_contracts_p3100)
+#  define __glibcxx_contracts_implicit 202608L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_contracts_implicit)
+#   define __cpp_lib_contracts_implicit 202608L
+#  endif
+# endif
+#endif /* !defined(__cpp_lib_contracts_implicit) */
+#undef __glibcxx_want_contracts_implicit
+
 #if !defined(__cpp_lib_contracts_labels)
 # if (__cplusplus >  202302L) && defined(__cpp_contracts_labels)
 #  define __glibcxx_contracts_labels 202606L
