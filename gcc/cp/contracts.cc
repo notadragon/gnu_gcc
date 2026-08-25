@@ -2887,6 +2887,59 @@ apply_postconditions (tree fndecl)
     }
 }
 
+/* Wrap STMTS -- the postcondition checks of FNDECL -- in a cleanup that
+   destroys the returned object if evaluating them exits via an exception,
+   which a violation handler that throws will do.
+
+   By the time the checks run the returned object has been initialized:
+   [stmt.return]/5 sequences postcondition evaluation after the copy-
+   initialization of the result and after the destruction of local variables.
+   Unwinding past it without running its destructor leaks an object the
+   program can no longer reach.
+
+   No sentinel guard, unlike maybe_splice_retval_cleanup: this region is
+   reached only on the normal-completion path of the body, where the returned
+   object necessarily exists.  That is also what keeps the two from
+   overlapping -- the body's cleanup covers the body and stops there, this one
+   covers only the checks -- so the object is destroyed exactly once however
+   the function unwinds.
+
+   NOTE this is deliberately more than the standard currently requires.
+   [except.ctor]/2 destroys the returned object only for an exception thrown
+   "during the destruction of temporaries or local variables for a return
+   statement", and does not mention contract assertions; [basic.contract.eval]
+   says a throwing handler behaves "as if the function body exits via that
+   same exception", which describes a state where the result object was never
+   initialized -- not the state we are actually in.  So nothing obliges us to
+   run the destructor here.  Leaking is not a defensible answer; a core issue
+   is owed, and this should not be "corrected" back to a leak on the strength
+   of the wording alone.  */
+
+static tree
+wrap_postconditions_in_retval_cleanup (tree fndecl, tree stmts)
+{
+  if (!flag_exceptions || !stmts)
+    return stmts;
+
+  tree retval = DECL_RESULT (fndecl);
+  if (!retval
+      || VOID_TYPE_P (TREE_TYPE (retval))
+      || !TYPE_HAS_NONTRIVIAL_DESTRUCTOR (TREE_TYPE (retval)))
+    return stmts;
+
+  tree dtor = build_cleanup (retval);
+  if (!dtor || dtor == error_mark_node)
+    return stmts;
+
+  tree cleanup = build_stmt (UNKNOWN_LOCATION, CLEANUP_STMT,
+			     stmts, dtor, retval);
+  CLEANUP_EH_ONLY (cleanup) = true;
+
+  tree list = NULL_TREE;
+  append_to_statement_list_force (cleanup, &list);
+  return list;
+}
+
 /* Add contract handling to the function in FNDECL.
 
    When we have only pre-conditions, this simply prepends a call (or a direct
@@ -3002,9 +3055,15 @@ maybe_apply_function_contracts (tree fndecl)
     {
       tree eh_else = build_stmt (loc, EH_ELSE_EXPR, NULL_TREE, NULL_TREE);
       add_stmt (eh_else);
-      /* Non-exceptional path: check postconditions, then destroy captures.  */
-      TREE_OPERAND (eh_else, 0) = push_stmt_list ();
+      /* Non-exceptional path: check postconditions, then destroy captures.
+	 The checks may exit via an exception (a throwing violation handler),
+	 and the returned object exists by now, so they carry a cleanup that
+	 destroys it.  */
+      tree post_stmts = push_stmt_list ();
       apply_postconditions (fndecl);
+      post_stmts = pop_stmt_list (post_stmts);
+      TREE_OPERAND (eh_else, 0) = push_stmt_list ();
+      add_stmt (wrap_postconditions_in_retval_cleanup (fndecl, post_stmts));
       if (outlined_caps)
 	emit_outlined_capture_struct_dtors (fndecl);
       else
@@ -3020,7 +3079,10 @@ maybe_apply_function_contracts (tree fndecl)
     }
   else
     {
+      tree post_stmts = push_stmt_list ();
       apply_postconditions (fndecl);
+      post_stmts = pop_stmt_list (post_stmts);
+      add_stmt (wrap_postconditions_in_retval_cleanup (fndecl, post_stmts));
       if (outlined_caps)
 	emit_outlined_capture_struct_dtors (fndecl);
       else
