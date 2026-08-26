@@ -77,7 +77,62 @@ struct returns_handled_t {
 constexpr returns_handled_t returns_handled{};
 int f5 (int i) pre<returns_handled> (boom ()) { return i; }
 
+// 6. Delegation: the walk follows the call, so a helper whose body is just
+//    a rethrow counts the same as writing the rethrow here.
+inline void rethrow_helper () { throw; }
+
+struct delegates_t {
+  using assertion_control_object = delegates_t;
+  void handle_contract_violation (const contract_violation& v) const {
+    if (v.detection_mode () == detection_mode::evaluation_exception)
+      rethrow_helper ();
+  }
+};
+constexpr delegates_t delegates{};
+int f6 (int i) pre<delegates> (boom ()) { return i; }
+
+// 7. The helper can be the one that inspects the violation: the accessors
+//    keep folding across the call because the parameter carries through.
+inline void rethrow_if_exception (const contract_violation& v) {
+  if (v.detection_mode () == detection_mode::evaluation_exception)
+    throw;
+}
+
+struct delegates_with_arg_t {
+  using assertion_control_object = delegates_with_arg_t;
+  void handle_contract_violation (const contract_violation& v) const {
+    rethrow_if_exception (v);
+  }
+};
+constexpr delegates_with_arg_t delegates_with_arg{};
+int f7 (int i) pre<delegates_with_arg> (boom ()) { return i; }
+
+// 8. A combined label reaches its component handler through
+//    __combined_label::handle_contract_violation, which is just more
+//    delegation -- no special case in the analysis.
+struct comment_t {
+  using assertion_control_object = comment_t;
+  constexpr const char* compute_comment (const char* c) const { return c; }
+};
+constexpr comment_t comment{};
+int f8 (int i) pre<plain | comment> (boom ()) { return i; }
+
+// 9. Same, with the rethrowing component on the right: it only works because
+//    the component before it provably does nothing under this detection mode
+//    and returns a value the walk can fold.
+struct only_predicate_false_t {
+  using assertion_control_object = only_predicate_false_t;
+  violation_handled
+  handle_contract_violation (const contract_violation& v) const {
+    if (v.detection_mode () == detection_mode::predicate_false)
+      throw;
+    return violation_handled::not_handled;
+  }
+};
+constexpr only_predicate_false_t only_predicate_false{};
+int f9 (int i) pre<only_predicate_false | returns_handled> (boom ()) { return i; }
+
 // Every check is still emitted ...
-// { dg-final { scan-tree-dump-times "__cxa_contract_violation_pre_enforce_pf" 5 "original" } }
+// { dg-final { scan-tree-dump-times "__cxa_contract_violation_pre_enforce_pf" 9 "original" } }
 // ... and not one of them catches the predicate's exception.
 // { dg-final { scan-tree-dump-not "__cxa_contract_violation_pre_enforce_ex" "original" } }
