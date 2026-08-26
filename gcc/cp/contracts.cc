@@ -6925,6 +6925,27 @@ rethrow_analysis::walk_stmt (tree t)
     case EXPR_STMT:
       return walk_stmt (TREE_OPERAND (t, 0));
 
+    case MUST_NOT_THROW_EXPR:
+      /* A region an exception may not leave -- a noexcept function's body,
+	 among others.  A rethrow inside it terminates rather than
+	 propagating, so it must not count as reaching the caller; but code
+	 that merely runs and returns is unremarkable and the walk carries
+	 on.  Bailing outright instead would lose the optimization for a
+	 handler that calls any nothrow function, however trivial, before
+	 rethrowing.  */
+      {
+	rethrow_outcome o = walk_stmt (TREE_OPERAND (t, 0));
+	return o == RO_RETHROWN ? RO_FAIL : o;
+      }
+
+    case DEBUG_BEGIN_STMT:
+      /* A statement-frontier marker, emitted throughout every statement list
+	 under -g.  It carries no code.  Falling into the default below
+	 instead silently switched the whole analysis off in any debug build
+	 -- which is most real builds, and every Compiler Explorer session,
+	 since CE always passes -g.  */
+      return RO_FALLTHROUGH;
+
     CASE_CONVERT:
     case NON_LVALUE_EXPR:
       /* A discarded-value conversion.  With no side effects there is nothing
