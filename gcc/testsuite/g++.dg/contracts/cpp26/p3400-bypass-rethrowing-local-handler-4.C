@@ -1,4 +1,4 @@
-// P3400: the rethrow shortcut is conservative.  None of these handlers is
+// P3400: the bypass is conservative.  None of these handlers is
 // provably a bare rethrow of the in-flight exception, so every one of these
 // checks keeps its try/catch and still calls the _ex entry point.
 // { dg-do compile { target c++26 } }

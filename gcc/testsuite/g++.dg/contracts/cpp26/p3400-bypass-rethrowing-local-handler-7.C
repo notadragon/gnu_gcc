@@ -1,9 +1,9 @@
-// P3400: -fcontract-disable-rethrow-shortcut turns the optimization off, so a
+// P3400: -fno-contract-bypass-rethrowing-local-handler turns the optimization off, so a
 // handler that would otherwise qualify gets its try/catch back.  Same source
-// as p3400-rethrow-shortcut-3.C case 1, opposite expectation.
+// as p3400-bypass-rethrowing-local-handler-3.C case 1, opposite expectation.
 // { dg-do compile { target c++26 } }
 // { dg-additional-options "-fcontracts -fcontracts-p3400 -fdump-tree-original" }
-// { dg-additional-options "-fcontract-disable-rethrow-shortcut" }
+// { dg-additional-options "-fno-contract-bypass-rethrowing-local-handler" }
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 
 #include <contracts>

@@ -1,4 +1,4 @@
-// P3400: the rethrow shortcut applies under enforce as well as observe.  With
+// P3400: the bypass applies under enforce as well as observe.  With
 // a rethrowing local handler the exception escapes rather than terminating,
 // which is what the caught-and-rethrown code did too -- eliding the catch must
 // not change that.

@@ -1,4 +1,4 @@
-// P3400: the rethrow shortcut is only sound if the rethrow actually escapes
+// P3400: the bypass is only sound if the rethrow actually escapes
 // to the caller.  A rethrow that unwinds out of a nothrow function calls
 // std::terminate instead, which is not what skipping the EH region would do,
 // so any nothrow frame between the rethrow and the check disqualifies it.

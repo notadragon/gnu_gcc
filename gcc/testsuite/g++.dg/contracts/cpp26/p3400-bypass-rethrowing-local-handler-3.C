@@ -1,4 +1,4 @@
-// P3400: codegen for the rethrow shortcut.  Each of these handlers provably
+// P3400: codegen for the bypass.  Each of these handlers provably
 // rethrows an evaluation_exception, so no check wraps its predicate in a
 // try/catch -- the _ex entry point, which is only ever called from that catch,
 // is absent.  The predicate-false path is untouched.

@@ -1,4 +1,4 @@
-// P3400: the rethrow shortcut is restricted to enforce and observe.  The
+// P3400: the bypass is restricted to enforce and observe.  The
 // noexcept semantics (D4298) exist to guarantee nothing propagates out of a
 // check, so their try/catch must survive even for a rethrowing handler.
 // { dg-do compile { target c++26 } }

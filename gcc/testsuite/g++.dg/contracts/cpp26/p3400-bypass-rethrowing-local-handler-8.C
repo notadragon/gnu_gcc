@@ -1,7 +1,7 @@
 // P3400: a rethrowing local handler reached through delegation -- a helper
 // function, and a combined label -- still propagates the predicate's
 // exception, whether or not the front end elided the try/catch.  This is the
-// behavioural half of p3400-rethrow-shortcut-3.C cases 6-9.
+// behavioural half of p3400-bypass-rethrowing-local-handler-3.C cases 6-9.
 // { dg-do run { target c++26 } }
 // { dg-additional-options "-fcontracts -fcontracts-p3400 -fcontract-evaluation-semantic=observe" }
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }

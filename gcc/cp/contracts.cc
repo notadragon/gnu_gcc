@@ -6450,7 +6450,8 @@ declare_cxa_entry_point (contract_assertion_kind kind,
 }
 
 /* ------------------------------------------------------------------------
-   Rethrow shortcut analysis (quality of implementation).
+   Bypassing a rethrowing local violation handler (quality of
+   implementation, -fcontract-bypass-rethrowing-local-handler).
 
    A P3400 local violation handler that responds to an evaluation_exception
    detection by rethrowing the in-flight exception makes the try/catch we wrap
@@ -7215,7 +7216,7 @@ emit_check_for_semantic (tree contract, contract_evaluation_semantic semantic,
      rethrowing, catching the predicate's exception only to hand it to that
      handler is pure overhead -- let it propagate instead.  */
   if (check_might_throw
-      && !flag_contract_disable_rethrow_shortcut
+      && flag_contract_bypass_rethrowing_local_handler
       && contract_local_handler_always_rethrows_p (contract, semantic, kind))
     check_might_throw = false;
 

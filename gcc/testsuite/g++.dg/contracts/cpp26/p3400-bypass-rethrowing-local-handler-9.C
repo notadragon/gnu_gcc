@@ -1,11 +1,11 @@
-// P3400: the rethrow shortcut must survive -g.
+// P3400: the bypass must survive -g.
 //
 // Regression: under -g every statement list carries DEBUG_BEGIN_STMT
 // frontier markers, and the walk treated an unrecognized statement as
 // unanalysable -- so the optimization silently stopped firing in any debug
 // build.  Nothing caught it because every other test here compiles without
 // -g; it surfaced only when a Compiler Explorer session, which always passes
-// -g, showed identical code with and without the shortcut.
+// -g, showed identical code with and without the bypass.
 //
 // The shapes below put markers where they matter: before the sole statement
 // of a handler body, between the statements of a multi-statement body, and
