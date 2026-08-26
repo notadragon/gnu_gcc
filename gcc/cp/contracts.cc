@@ -1520,6 +1520,13 @@ static GTY(()) hash_map<tree, tree> *decl_post_fn;
    Generated at parse time, looked up during gimplification.  */
 static GTY(()) hash_map<tree, tree> *local_violation_trampoline_map;
 
+/* Map from label type -> the user's handle_contract_violation FUNCTION_DECL
+   that the corresponding trampoline calls.  Recorded so that the rethrow
+   analysis (contract_local_handler_always_rethrows_p) examines exactly the
+   function the trampoline will call, rather than repeating the member lookup
+   and risking a different overload resolution.  */
+static GTY(()) hash_map<tree, tree> *local_violation_handler_fn_map;
+
 /* Map from label type -> query trampoline FUNCTION_DECL.
    Generated at parse time, looked up during gimplification.  */
 static GTY(()) hash_map<tree, tree> *query_trampoline_map;
@@ -4188,7 +4195,7 @@ build_comment (cp_expr condition)
 /* Build a contract statement.  */
 
 static tree lookup_std_contracts_type (tree);
-static tree build_local_violation_trampoline (tree, tree);
+static tree build_local_violation_trampoline (tree, tree, tree *);
 static tree build_query_trampoline (tree);
 static tree contracts_tu_local_named_var (location_t, const char *, tree);
 
@@ -4375,12 +4382,23 @@ resolve_contract_label (tree contract, tree label, location_t loc)
 	    }
 	  if (hcv_fn && hcv_fn != error_mark_node)
 	    {
+	      tree resolved_fn = NULL_TREE;
 	      tree trampoline
 		= build_local_violation_trampoline (label_type,
-						   hcv_fn);
+						   hcv_fn, &resolved_fn);
 	      if (trampoline)
-		local_violation_trampoline_map->put (label_type,
-						    trampoline);
+		{
+		  local_violation_trampoline_map->put (label_type,
+						      trampoline);
+		  if (resolved_fn)
+		    {
+		      if (!local_violation_handler_fn_map)
+			local_violation_handler_fn_map
+			  = hash_map<tree, tree>::create_ggc ();
+		      local_violation_handler_fn_map->put (label_type,
+							  resolved_fn);
+		    }
+		}
 	    }
 	}
 
@@ -5429,11 +5447,20 @@ private:
      int __trampoline(const void* label_ptr, const void* violation_ptr)
    It casts label_ptr to LABEL_TYPE, casts violation_ptr to
    const contract_violation&, calls handle_contract_violation on the label,
-   and returns 0 (not_handled) if void, or the int value of the result.  */
+   and returns 0 (not_handled) if void, or the int value of the result.
+
+   HCV_FN is the result of the member lookup, which may still be an overload
+   set; *RESOLVED_FN_OUT is set to the FUNCTION_DECL overload resolution
+   actually picked, or NULL_TREE if that cannot be determined (a virtual
+   handler, for instance).  The rethrow analysis needs the resolved callee, not
+   the overload set.  */
 
 static tree
-build_local_violation_trampoline (tree label_type, tree hcv_fn)
+build_local_violation_trampoline (tree label_type, tree hcv_fn,
+				  tree *resolved_fn_out)
 {
+  *resolved_fn_out = NULL_TREE;
+
   /* Generate a unique internal name for the trampoline.  */
   static int trampoline_counter = 0;
   char name[64];
@@ -5510,6 +5537,10 @@ build_local_violation_trampoline (tree label_type, tree hcv_fn)
       finish_function (false);
       return NULL_TREE;
     }
+
+  /* Record which overload was picked; NULL for a virtual handler, which the
+     rethrow analysis then declines to reason about.  */
+  *resolved_fn_out = cp_get_callee_fndecl_nofold (call);
 
   tree ret_type = TREE_TYPE (call);
   if (VOID_TYPE_P (ret_type))
@@ -6418,6 +6449,462 @@ declare_cxa_entry_point (contract_assertion_kind kind,
   return fndecl;
 }
 
+/* ------------------------------------------------------------------------
+   Rethrow shortcut analysis (quality of implementation).
+
+   A P3400 local violation handler that responds to an evaluation_exception
+   detection by rethrowing the in-flight exception makes the try/catch we wrap
+   around a possibly-throwing predicate pure overhead: the exception is caught
+   only to be handed to a handler that throws it straight back out.  This
+   analysis recognizes that shape so the caller can skip emitting the
+   try/catch and let the predicate's exception propagate on its own.
+
+   Equivalence rests on the local handler running before the global one and
+   short-circuiting it (libcontracts/dispatch.c): if the local handler
+   rethrows, nothing else observable happens between the catch and the
+   rethrow, and no violation is ever reported.  It holds only for the enforce
+   and observe semantics -- quick_enforce calls no handler, and the D4298
+   noexcept_* semantics exist precisely to guarantee nothing propagates.
+
+   Everything here is conservative: any construct the walk does not model
+   makes it answer "no", leaving the try/catch in place.  Keeping the whole
+   analysis behind one predicate lets it grow more capable without spreading
+   through the emitter.
+   ------------------------------------------------------------------------ */
+
+namespace {
+
+/* An abstract value tracked while walking a handler body.  */
+
+enum aval_kind
+{
+  AV_UNKNOWN,		/* Nothing known.  */
+  AV_CONST,		/* A known integer, enumeration or boolean value.  */
+  AV_CURRENT_EXCEPTION	/* The result of std::current_exception ().  */
+};
+
+struct aval
+{
+  aval_kind kind;
+  HOST_WIDE_INT val;
+};
+
+static inline aval
+av_unknown ()
+{
+  aval a = { AV_UNKNOWN, 0 };
+  return a;
+}
+
+static inline aval
+av_const (HOST_WIDE_INT v)
+{
+  aval a = { AV_CONST, v };
+  return a;
+}
+
+static inline aval
+av_current_exception ()
+{
+  aval a = { AV_CURRENT_EXCEPTION, 0 };
+  return a;
+}
+
+/* How control left a statement, under the analysis assumption.  */
+
+enum rethrow_outcome
+{
+  RO_FALLTHROUGH,	/* Control continues with the next statement.  */
+  RO_RETHROWN,		/* Control left by rethrowing the in-flight exception.  */
+  RO_FAIL		/* Returned normally, or could not be analysed.  */
+};
+
+/* Strip the conversions and address/indirection operators that stand between
+   a use of a declaration and the declaration itself.  */
+
+static tree
+strip_to_decl (tree t)
+{
+  while (t
+	 && (CONVERT_EXPR_P (t)
+	     || TREE_CODE (t) == NON_LVALUE_EXPR
+	     || TREE_CODE (t) == ADDR_EXPR
+	     || TREE_CODE (t) == INDIRECT_REF))
+    t = TREE_OPERAND (t, 0);
+  return t;
+}
+
+/* True if CALL (a CALL_EXPR or AGGR_INIT_EXPR) calls a namespace-scope
+   function in namespace std named NAME.  */
+
+static bool
+calls_std_fn_p (tree call, const char *name)
+{
+  tree fn = cp_get_callee_fndecl_nofold (call);
+  if (!fn || TREE_CODE (fn) != FUNCTION_DECL || !DECL_NAME (fn))
+    return false;
+  if (!id_equal (DECL_NAME (fn), name))
+    return false;
+  return decl_in_std_namespace_p (fn);
+}
+
+/* One analysis of one handler body, under one (semantic, kind) pair.  The
+   walk assumes the violation was detected as CDM_EVAL_EXCEPTION.  */
+
+class rethrow_analysis
+{
+public:
+  rethrow_analysis (tree violation_parm, tree violation_type,
+		    contract_evaluation_semantic semantic,
+		    contract_assertion_kind kind)
+    : m_violation_parm (violation_parm), m_violation_type (violation_type),
+      m_semantic (semantic), m_kind (kind)
+  {}
+
+  rethrow_outcome walk_stmt (tree t);
+
+private:
+  aval eval (tree t);
+  bool accessor_value (tree call, aval *out);
+
+  tree m_violation_parm;
+  tree m_violation_type;
+  contract_evaluation_semantic m_semantic;
+  contract_assertion_kind m_kind;
+
+  /* Local scalar VAR_DECL -> abstract value.  */
+  hash_map<tree, aval> m_env;
+};
+
+/* If CALL invokes one of the contract_violation accessors whose result is
+   known at the point the check is emitted, store that value in *OUT and
+   return true.  The call must be on the handler's own violation parameter:
+   a different contract_violation object tells us nothing.  */
+
+bool
+rethrow_analysis::accessor_value (tree call, aval *out)
+{
+  tree fn = cp_get_callee_fndecl_nofold (call);
+  if (!fn || TREE_CODE (fn) != FUNCTION_DECL || !DECL_NAME (fn))
+    return false;
+
+  tree ctx = DECL_CONTEXT (fn);
+  if (!ctx || !TYPE_P (ctx) || TYPE_MAIN_VARIANT (ctx) != m_violation_type)
+    return false;
+
+  if (TREE_CODE (call) != CALL_EXPR || call_expr_nargs (call) < 1)
+    return false;
+  if (strip_to_decl (CALL_EXPR_ARG (call, 0)) != m_violation_parm)
+    return false;
+
+  tree name = DECL_NAME (fn);
+  if (id_equal (name, "detection_mode"))
+    *out = av_const (CDM_EVAL_EXCEPTION);
+  else if (id_equal (name, "semantic"))
+    *out = av_const (m_semantic);
+  else if (id_equal (name, "kind"))
+    *out = av_const (m_kind);
+  else if (id_equal (name, "is_terminating"))
+    /* Of the two semantics this analysis runs for, only enforce
+       terminates.  */
+    *out = av_const (m_semantic == CES_ENFORCE);
+  else
+    return false;
+
+  return true;
+}
+
+/* Evaluate T as far as the abstract domain allows.  */
+
+aval
+rethrow_analysis::eval (tree t)
+{
+  if (!t || t == error_mark_node)
+    return av_unknown ();
+
+  switch (TREE_CODE (t))
+    {
+    case INTEGER_CST:
+      if (tree_fits_shwi_p (t))
+	return av_const (tree_to_shwi (t));
+      return av_unknown ();
+
+    case VAR_DECL:
+    case PARM_DECL:
+      if (aval *v = m_env.get (t))
+	return *v;
+      return av_unknown ();
+
+    CASE_CONVERT:
+    case NON_LVALUE_EXPR:
+      /* An integral conversion preserves a tracked value.  Conversions of
+	 anything else are transparent only to the extent that what they
+	 wrap still evaluates -- the exception_ptr temporary below reaches
+	 here.  */
+      return eval (TREE_OPERAND (t, 0));
+
+    case CLEANUP_POINT_EXPR:
+    case EXPR_STMT:
+      return eval (TREE_OPERAND (t, 0));
+
+    case ADDR_EXPR:
+      return eval (TREE_OPERAND (t, 0));
+
+    case TARGET_EXPR:
+      return eval (TARGET_EXPR_INITIAL (t));
+
+    case AGGR_INIT_EXPR:
+    case CALL_EXPR:
+      {
+	aval a;
+	if (TREE_CODE (t) == CALL_EXPR && accessor_value (t, &a))
+	  return a;
+	if (calls_std_fn_p (t, "current_exception"))
+	  return av_current_exception ();
+	return av_unknown ();
+      }
+
+    case EQ_EXPR:
+    case NE_EXPR:
+    case LT_EXPR:
+    case LE_EXPR:
+    case GT_EXPR:
+    case GE_EXPR:
+      {
+	aval l = eval (TREE_OPERAND (t, 0));
+	aval r = eval (TREE_OPERAND (t, 1));
+	if (l.kind != AV_CONST || r.kind != AV_CONST)
+	  return av_unknown ();
+	bool res;
+	switch (TREE_CODE (t))
+	  {
+	  case EQ_EXPR: res = (l.val == r.val); break;
+	  case NE_EXPR: res = (l.val != r.val); break;
+	  case LT_EXPR: res = (l.val < r.val); break;
+	  case LE_EXPR: res = (l.val <= r.val); break;
+	  case GT_EXPR: res = (l.val > r.val); break;
+	  default:	res = (l.val >= r.val); break;
+	  }
+	return av_const (res);
+      }
+
+    case TRUTH_NOT_EXPR:
+      {
+	aval a = eval (TREE_OPERAND (t, 0));
+	if (a.kind != AV_CONST)
+	  return av_unknown ();
+	return av_const (!a.val);
+      }
+
+    case TRUTH_AND_EXPR:
+    case TRUTH_ANDIF_EXPR:
+      {
+	aval l = eval (TREE_OPERAND (t, 0));
+	if (l.kind == AV_CONST && !l.val)
+	  return av_const (0);
+	aval r = eval (TREE_OPERAND (t, 1));
+	if (l.kind != AV_CONST || r.kind != AV_CONST)
+	  return av_unknown ();
+	return av_const (l.val && r.val);
+      }
+
+    case TRUTH_OR_EXPR:
+    case TRUTH_ORIF_EXPR:
+      {
+	aval l = eval (TREE_OPERAND (t, 0));
+	if (l.kind == AV_CONST && l.val)
+	  return av_const (1);
+	aval r = eval (TREE_OPERAND (t, 1));
+	if (l.kind != AV_CONST || r.kind != AV_CONST)
+	  return av_unknown ();
+	return av_const (l.val || r.val);
+      }
+
+    default:
+      return av_unknown ();
+    }
+}
+
+/* Walk statement T under the assumption that the violation was detected as
+   CDM_EVAL_EXCEPTION, reporting how control leaves it.  */
+
+rethrow_outcome
+rethrow_analysis::walk_stmt (tree t)
+{
+  if (!t)
+    return RO_FALLTHROUGH;
+  if (t == error_mark_node)
+    return RO_FAIL;
+
+  switch (TREE_CODE (t))
+    {
+    case STATEMENT_LIST:
+      for (tree_stmt_iterator i = tsi_start (t); !tsi_end_p (i); tsi_next (&i))
+	{
+	  rethrow_outcome o = walk_stmt (tsi_stmt (i));
+	  if (o != RO_FALLTHROUGH)
+	    return o;
+	}
+      return RO_FALLTHROUGH;
+
+    case BIND_EXPR:
+      return walk_stmt (BIND_EXPR_BODY (t));
+
+    case CLEANUP_POINT_EXPR:
+    case EXPR_STMT:
+      return walk_stmt (TREE_OPERAND (t, 0));
+
+    CASE_CONVERT:
+    case NON_LVALUE_EXPR:
+      /* A discarded-value conversion.  With no side effects there is nothing
+	 to model -- an empty else-arm arrives here as a void NOP_EXPR of
+	 integer zero.  */
+      if (!TREE_SIDE_EFFECTS (t))
+	return RO_FALLTHROUGH;
+      return walk_stmt (TREE_OPERAND (t, 0));
+
+    case DECL_EXPR:
+      {
+	tree decl = DECL_EXPR_DECL (t);
+	if (!decl)
+	  return RO_FAIL;
+	if (TREE_CODE (decl) == TYPE_DECL || TREE_CODE (decl) == USING_DECL)
+	  return RO_FALLTHROUGH;
+	if (!VAR_P (decl) || TREE_STATIC (decl) || DECL_EXTERNAL (decl))
+	  return RO_FAIL;
+	/* Only scalars: a class-typed local brings a destructor, and with it
+	   cleanup control flow this walk does not model.  */
+	if (!SCALAR_TYPE_P (TREE_TYPE (decl)))
+	  return RO_FAIL;
+	m_env.put (decl, eval (DECL_INITIAL (decl)));
+	return RO_FALLTHROUGH;
+      }
+
+    case MODIFY_EXPR:
+    case INIT_EXPR:
+      {
+	tree lhs = TREE_OPERAND (t, 0);
+	/* Only assignments to locals we are already tracking; a store
+	   anywhere else is an observable effect.  */
+	if (!VAR_P (lhs) || !m_env.get (lhs))
+	  return RO_FAIL;
+	m_env.put (lhs, eval (TREE_OPERAND (t, 1)));
+	return RO_FALLTHROUGH;
+      }
+
+    case COND_EXPR:
+      {
+	aval c = eval (TREE_OPERAND (t, 0));
+	if (c.kind != AV_CONST)
+	  return RO_FAIL;
+	return walk_stmt (TREE_OPERAND (t, c.val ? 1 : 2));
+      }
+
+    case THROW_EXPR:
+      /* `throw;' is a call to __cxa_rethrow.  `throw X;' raises a different
+	 exception, which is not what eliding the catch would do.  */
+      {
+	tree op = TREE_OPERAND (t, 0);
+	tree fn = op ? cp_get_callee_fndecl_nofold (op) : NULL_TREE;
+	if (fn && DECL_NAME (fn) && id_equal (DECL_NAME (fn), "__cxa_rethrow"))
+	  return RO_RETHROWN;
+	return RO_FAIL;
+      }
+
+    case CALL_EXPR:
+      /* std::rethrow_exception (std::current_exception ()) rethrows the
+	 exception that is in flight, so it reaches the same place.  */
+      if (calls_std_fn_p (t, "rethrow_exception")
+	  && call_expr_nargs (t) == 1
+	  && eval (CALL_EXPR_ARG (t, 0)).kind == AV_CURRENT_EXCEPTION)
+	return RO_RETHROWN;
+      /* A discarded call to one of the folded accessors does nothing.  */
+      {
+	aval a;
+	if (accessor_value (t, &a))
+	  return RO_FALLTHROUGH;
+      }
+      return RO_FAIL;
+
+    case RETURN_EXPR:
+      /* The handler returned without rethrowing.  */
+      return RO_FAIL;
+
+    default:
+      return RO_FAIL;
+    }
+}
+
+} // anon namespace
+
+/* Return true if CONTRACT's label carries a local violation handler that,
+   for a violation detected as CDM_EVAL_EXCEPTION under SEMANTIC and KIND,
+   always exits by rethrowing the in-flight exception without first doing
+   anything else observable.  When it does, the caller may skip wrapping the
+   predicate in a try/catch: the exception reaches the same place either way.
+
+   Conservative -- false whenever this cannot be proven.  */
+
+static bool
+contract_local_handler_always_rethrows_p (tree contract,
+					  contract_evaluation_semantic semantic,
+					  contract_assertion_kind kind)
+{
+  /* Only the two semantics whose handler may legitimately let an exception
+     escape.  */
+  if (semantic != CES_ENFORCE && semantic != CES_OBSERVE)
+    return false;
+
+  /* Mirror the conditions under which build_contract_data_block_ctor actually
+     records a local handler; without one there is nothing to reason about.  */
+  tree label = CONTRACT_LABEL (contract);
+  if (!label || label == error_mark_node || !VAR_P (label))
+    return false;
+  tree label_type = TREE_TYPE (label);
+  if (!label_type || !TYPE_P (label_type))
+    return false;
+  label_type = TYPE_MAIN_VARIANT (label_type);
+
+  if (!local_violation_trampoline_map
+      || !local_violation_trampoline_map->get (label_type)
+      || !local_violation_handler_fn_map)
+    return false;
+
+  tree *fnp = local_violation_handler_fn_map->get (label_type);
+  if (!fnp)
+    return false;
+  tree fn = *fnp;
+
+  /* A noexcept handler cannot rethrow -- it would terminate.  */
+  if (TYPE_NOTHROW_P (TREE_TYPE (fn)))
+    return false;
+
+  /* The body has to be here to be read.  It is absent for a handler defined
+     out of line later in the translation unit, and for a template member
+     whose instantiation the trampoline's use has only queued.  */
+  tree body = DECL_SAVED_TREE (fn);
+  if (!body)
+    return false;
+
+  /* The violation parameter is the last one; for a non-static member
+     function DECL_ARGUMENTS starts with `this'.  */
+  tree parm = DECL_ARGUMENTS (fn);
+  if (!parm)
+    return false;
+  while (DECL_CHAIN (parm))
+    parm = DECL_CHAIN (parm);
+
+  tree violation_type
+    = lookup_std_contracts_type (get_identifier ("contract_violation"));
+  if (!violation_type || violation_type == error_mark_node
+      || !TYPE_P (violation_type))
+    return false;
+
+  rethrow_analysis analysis (parm, TYPE_MAIN_VARIANT (violation_type),
+			     semantic, kind);
+  return analysis.walk_stmt (body) == RO_RETHROWN;
+}
+
 /* Emit the check body for CONTRACT under a single, statically known
    evaluation SEMANTIC.  Returns a BIND_EXPR statement expression, or
    void_node when the semantic emits no check (ignore/assume), or
@@ -6482,6 +6969,14 @@ emit_check_for_semantic (tree contract, contract_evaluation_semantic semantic,
 			    && !expr_noexcept_p (condition, tf_none));
   bool is_noexcept = (semantic == CES_NOEXCEPT_ENFORCE
 		      || semantic == CES_NOEXCEPT_OBSERVE);
+
+  /* If the label's local violation handler answers an evaluation_exception by
+     rethrowing, catching the predicate's exception only to hand it to that
+     handler is pure overhead -- let it propagate instead.  */
+  if (check_might_throw
+      && !flag_contract_disable_rethrow_shortcut
+      && contract_local_handler_always_rethrows_p (contract, semantic, kind))
+    check_might_throw = false;
 
   /* Build a statement expression to hold a contract check, with the check
      potentially wrapped in a try-catch expr.  */
