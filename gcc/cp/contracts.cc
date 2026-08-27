@@ -4783,8 +4783,19 @@ resolve_contract_label (tree contract, tree label, location_t loc)
 				     get_identifier ("allowed_semantics"),
 				     /*protect=*/0, /*want_type=*/false,
 				     tf_none);
+      /* The concept requires `__is_const (decltype (T::allowed_semantics))'.
+	 A `static constexpr' member is const-qualified already, and so is a
+	 plain `const' one; a non-const member is not a facet, and honouring
+	 it anyway made the front end narrow the semantic set for a label the
+	 library says has no allowed_semantics facet at all -- so a bare label
+	 and its combined form disagreed.  */
+      tree as_decl = (as_member && as_member != error_mark_node
+		      && BASELINK_P (as_member)
+		      ? BASELINK_FUNCTIONS (as_member) : as_member);
       if (as_member && as_member != error_mark_node
-	  && label_facet_accessible_p (label_type, as_member))
+	  && label_facet_accessible_p (label_type, as_member)
+	  && as_decl && DECL_P (as_decl)
+	  && CP_TYPE_CONST_P (TREE_TYPE (as_decl)))
 	{
 	  /* label.allowed_semantics is a member OBJECT; call
 	     .contains(sem) on it to test each semantic.  */
