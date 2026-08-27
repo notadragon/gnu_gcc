@@ -14,8 +14,13 @@
 // assertion_control_object is a different matter and stays ill-formed -- such
 // a type is not a control object at all -- which p3400-control-basic.C and
 // friends already cover.
+//
+// The private members here are near misses in the sense of
+// -Wcontract-invalid-label-facet, which is on by default and would fire on
+// most of them.  That warning is the subject of p3400-facet-near-miss.C; it is
+// off here so this test stays about behaviour.
 // { dg-do run { target c++26 } }
-// { dg-additional-options "-fcontracts -fcontracts-p3400 -fcontract-evaluation-semantic=observe" }
+// { dg-additional-options "-fcontracts -fcontracts-p3400 -fcontract-evaluation-semantic=observe -Wno-contract-invalid-label-facet" }
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 
 #include <contracts>

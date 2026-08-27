@@ -231,7 +231,7 @@ in the following sections.
 -fcontract-group-evaluation-semantic=@var{group}:@var{semantic}
 -fcontract-configuration=@var{json}  -fcontract-configuration-file=@var{file}
 -fcontracts-allow-assume  -Wcontract-configuration
--Wcontract-constexpr-side-effect
+-Wcontract-constexpr-side-effect  -Wcontract-invalid-label-facet
 -fcontracts-p3850  -fcontracts-p3097  -fcontracts-p3098  -fcontracts-p3099
 -fcontracts-p3100  -fcontracts-p3290  -fcontracts-p3400  -fcontracts-p4283
 -fcontracts-p4298  -fcontracts-p4299  -fcontracts-p4301
@@ -3483,6 +3483,20 @@ This warning is limited to constant evaluation, which is where the compiler
 evaluates the predicate itself and can observe the modification.  A
 side-effecting predicate that is only ever evaluated at run time is not
 diagnosed.
+
+@opindex Wcontract-invalid-label-facet
+@opindex Wno-contract-invalid-label-facet
+@item -Wcontract-invalid-label-facet
+Warn when an assertion-control object has a member that appears to have been
+intended as a facet but does not provide one, because the member is
+inaccessible or is not @code{const}.  Such a member is not a diagnosable
+error: the facet is simply absent, so the contract assertion compiles and the
+member is never called.  Enabled by default.
+
+A member is reported only when making it accessible, or making the object
+non-@code{const}, would by itself make the call valid.  A member that merely
+shares a facet's name -- an overload taking different arguments, as used for
+tag dispatch -- is not reported.
 
 @opindex fcontracts-allow-assume
 @opindex fno-contracts-allow-assume

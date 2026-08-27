@@ -1561,6 +1561,10 @@ static GTY(()) hash_map<tree, tree> *decl_post_fn;
    Generated at parse time, looked up during gimplification.  */
 static GTY(()) hash_map<tree, tree> *local_violation_trampoline_map;
 
+/* Label types already checked for near-miss facets, so that a label used on a
+   hundred contracts does not warn a hundred times.  */
+static GTY(()) hash_set<tree> *near_miss_checked_types;
+
 /* Map from label type -> the user's handle_contract_violation FUNCTION_DECL
    that the corresponding trampoline calls.  Recorded so that the rethrow
    analysis (contract_local_handler_always_rethrows_p) examines exactly the
@@ -4329,6 +4333,147 @@ reresolve_contract_label_facets (tree contract, tree label, location_t loc)
 				CONTRACT_MESSAGE (contract), loc);
 }
 
+/* Build the argument list a facet named FACET_NAME is probed with, using FN
+   (the member found by lookup) to recover parameter types where they are not
+   fixed by the facet itself.  Returns NULL when the facet takes a shape this
+   does not know how to probe.  */
+
+static vec<tree, va_gc> *
+build_facet_probe_args (const char *facet_name, tree fn)
+{
+  vec<tree, va_gc> *args = NULL;
+
+  if (!strcmp (facet_name, "handle_contract_violation"))
+    {
+      tree cv = lookup_std_contracts_type (get_identifier ("contract_violation"));
+      if (!cv || cv == error_mark_node)
+	return NULL;
+      tree ref = cp_build_indirect_ref
+	(input_location,
+	 build_zero_cst (build_pointer_type
+			 (cp_build_qualified_type (cv, TYPE_QUAL_CONST))),
+	 RO_UNARY_STAR, tf_none);
+      if (!ref || ref == error_mark_node)
+	return NULL;
+      vec_safe_push (args, ref);
+      return args;
+    }
+
+  if (!strcmp (facet_name, "query"))
+    {
+      tree cvp = build_pointer_type
+	(cp_build_qualified_type (void_type_node, TYPE_QUAL_CONST));
+      vec_safe_push (args, build_zero_cst (cvp));
+      vec_safe_push (args, build_zero_cst (size_type_node));
+      return args;
+    }
+
+  if (!strcmp (facet_name, "compute_comment")
+      || !strcmp (facet_name, "compute_message"))
+    {
+      vec_safe_push (args, build_zero_cst (const_string_type_node));
+      return args;
+    }
+
+  if (!strcmp (facet_name, "compute_semantic"))
+    {
+      /* The parameter is the library enumeration; recover its type from the
+	 member itself rather than guessing at it.  */
+      tree decl = BASELINK_P (fn) ? BASELINK_FUNCTIONS (fn) : fn;
+      if (TREE_CODE (decl) == OVERLOAD)
+	decl = OVL_FIRST (decl);
+      if (TREE_CODE (decl) != FUNCTION_DECL)
+	return NULL;
+      tree parm = FUNCTION_FIRST_USER_PARMTYPE (decl);
+      if (!parm)
+	return NULL;
+      vec_safe_push (args, build_int_cst (TREE_VALUE (parm), 2));
+      return args;
+    }
+
+  return NULL;
+}
+
+/* True when calling FACET_NAME on OBJ with ARGS is viable.  ACCESS says
+   whether access control applies.  */
+
+static bool
+facet_call_viable_p (tree obj, tree fn, vec<tree, va_gc> *args,
+		     deferring_kind access)
+{
+  deferring_access_check_sentinel sentry (access);
+  vec<tree, va_gc> *a = make_tree_vector_copy (args);
+  tree call = build_new_method_call (obj, fn, &a, NULL_TREE, LOOKUP_NORMAL,
+				     NULL, tf_none);
+  return call && call != error_mark_node;
+}
+
+/* Warn when LABEL_TYPE has a member named FACET_NAME that almost provides a
+   facet but does not.
+
+   Only two near misses are reported, and each is recognized by relaxing
+   exactly one thing and seeing whether that alone makes the call viable: an
+   inaccessible member, and one that is not const.  Anything else stays
+   silent.  That matters: D3400R5 points out that users legitimately give a
+   label private helpers sharing a facet's name -- tag-dispatch overloads,
+   say -- and warning on a name match alone would fire on every one of them.
+   Relaxing a single dimension will not make such a helper's signature fit, so
+   it never reaches a warning.  */
+
+static void
+warn_near_miss_facet (location_t loc, tree label, tree label_type,
+		      const char *facet_name)
+{
+  if (!warn_contract_invalid_label_facet)
+    return;
+
+  tree fn = lookup_member (label_type, get_identifier (facet_name),
+			   /*protect=*/0, /*want_type=*/false, tf_none);
+  if (!fn || fn == error_mark_node)
+    return;
+
+  vec<tree, va_gc> *args = build_facet_probe_args (facet_name, fn);
+  if (!args)
+    return;
+
+  /* The question detection asked: a const object, access enforced.  If that
+     is viable the facet is present and there is nothing to report.  */
+  if (facet_call_viable_p (label, fn, args, dk_no_deferred))
+    return;
+
+  tree decl = BASELINK_P (fn) ? BASELINK_FUNCTIONS (fn) : fn;
+  if (TREE_CODE (decl) == OVERLOAD)
+    decl = OVL_FIRST (decl);
+
+  /* Relax access only.  */
+  if (!label_facet_accessible_p (label_type, fn)
+      && facet_call_viable_p (label, fn, args, dk_no_check))
+    {
+      if (warning_at (loc, OPT_Wcontract_invalid_label_facet,
+		      "%qT does not provide the %qs facet because that member "
+		      "is inaccessible", label_type, facet_name)
+	  && DECL_P (decl))
+	inform (DECL_SOURCE_LOCATION (decl), "declared here");
+      return;
+    }
+
+  /* Relax const only.  A facet is always invoked on a constexpr, therefore
+     const, control object, so a non-const member is not a facet.  */
+  tree nonconst_obj = cp_build_indirect_ref
+    (loc, build_zero_cst (build_pointer_type (label_type)), RO_UNARY_STAR,
+     tf_none);
+  if (nonconst_obj && nonconst_obj != error_mark_node
+      && facet_call_viable_p (nonconst_obj, fn, args, dk_no_deferred))
+    {
+      if (warning_at (loc, OPT_Wcontract_invalid_label_facet,
+		      "%qT does not provide the %qs facet because that member "
+		      "is not %<const%>; a facet member must be %<const%> or "
+		      "%<static%>", label_type, facet_name)
+	  && DECL_P (decl))
+	inform (DECL_SOURCE_LOCATION (decl), "declared here");
+    }
+}
+
 /* Validate LABEL (P3400 assertion-control label) for CONTRACT and compute
    its derived facets: assertion_control_object structural validity, the
    local-violation/queryable-label trampolines, and the allowed-semantics
@@ -4398,6 +4543,24 @@ resolve_contract_label (tree contract, tree label, location_t loc)
 		    label_type);
 	  CONTRACT_LABEL (contract) = NULL_TREE;
 	  return;
+	}
+    }
+
+  /* Report members that look like they were meant to be facets but are not.
+     Once per label type: the answer depends only on the type, and a label is
+     typically named by many contracts.  */
+  if (warn_contract_invalid_label_facet)
+    {
+      if (!near_miss_checked_types)
+	near_miss_checked_types = hash_set<tree>::create_ggc (13);
+      if (!near_miss_checked_types->add (label_type))
+	{
+	  static const char *const facets[] = {
+	    "compute_semantic", "compute_comment", "compute_message",
+	    "handle_contract_violation", "query"
+	  };
+	  for (unsigned i = 0; i < ARRAY_SIZE (facets); ++i)
+	    warn_near_miss_facet (loc, label, label_type, facets[i]);
 	}
     }
 

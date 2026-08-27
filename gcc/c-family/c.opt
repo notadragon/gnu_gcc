@@ -611,6 +611,10 @@ Wcontract-constexpr-side-effect
 C ObjC C++ ObjC++ Var(warn_contract_constexpr_side_effect) Init(1) Warning
 Warn when a contract predicate evaluated during constant evaluation modifies the enclosing evaluation.
 
+Wcontract-invalid-label-facet
+C ObjC C++ ObjC++ Var(warn_contract_invalid_label_facet) Init(1) Warning
+Warn when an assertion-control object has a member that almost provides a facet but does not, because it is inaccessible or not const (P3400).
+
 Wconversion
 C ObjC C++ ObjC++ Var(warn_conversion) Warning
 Warn for implicit type conversions that may change a value.
