@@ -605,6 +605,38 @@ get_contract_assertion_kind (tree contract)
   gcc_unreachable ();
 }
 
+/* True when MEMBER, looked up in LABEL_TYPE, is accessible from here.
+
+   Facet detection uses lookup_member with protect=0, which finds a member
+   regardless of access.  An inaccessible member must not make the type
+   participate in the facet: the library concept is a requires-expression, and
+   that is false for a member the caller cannot name.  Detection therefore has
+   to answer "absent" -- and specifically must not diagnose, which is what
+   happened before, when the deferred access check from the viability probe
+   escaped as an error.  D3400R5 is explicit that an inaccessible member is not
+   ill-formed, precisely because a label may carry private helpers sharing a
+   facet's name -- tag-dispatch overloads, say -- that were never meant to be
+   the facet at all.  */
+
+static bool
+label_facet_accessible_p (tree label_type, tree member)
+{
+  if (!member || member == error_mark_node
+      || !label_type || !CLASS_TYPE_P (label_type) || !TYPE_BINFO (label_type))
+    return false;
+
+  tree decl = member;
+  if (BASELINK_P (decl))
+    decl = BASELINK_FUNCTIONS (decl);
+  if (TREE_CODE (decl) == OVERLOAD)
+    decl = OVL_FIRST (decl);
+  if (TREE_CODE (decl) == TEMPLATE_DECL)
+    decl = DECL_TEMPLATE_RESULT (decl);
+
+  return accessible_p (TYPE_BINFO (label_type), decl,
+		       /*consider_local_p=*/true);
+}
+
 /* Call LABEL.METHOD_ID(SEM_VAL) and constant-evaluate the result.
    Returns NULL_TREE if the method does not exist or evaluation fails.
    Used by ensure_evaluation_semantic (compute_semantic facet) and
@@ -620,7 +652,8 @@ call_label_method (tree label, tree method_id, uint16_t sem_val)
   tree label_type = TREE_TYPE (label);
   tree fn = lookup_member (label_type, method_id,
 			   /*protect=*/0, /*want_type=*/false, tf_none);
-  if (!fn || fn == error_mark_node)
+  if (!fn || fn == error_mark_node
+      || !label_facet_accessible_p (label_type, fn))
     return NULL_TREE;
   tree fn_decl = (TREE_CODE (fn) == BASELINK
 		  ? BASELINK_FUNCTIONS (fn) : fn);
@@ -899,7 +932,8 @@ ensure_contract_groups (tree contract)
 				  get_identifier ("group_names"),
 				  /*protect=*/0, /*want_type=*/false,
 				  tf_none);
-  if (!gn_member || gn_member == error_mark_node)
+  if (!gn_member || gn_member == error_mark_node
+      || !label_facet_accessible_p (label_type, gn_member))
     {
       CONTRACT_GROUPS (contract) = error_mark_node;
       return;
@@ -4151,7 +4185,8 @@ apply_label_string_facet (tree label, const char *facet_name,
   tree fn_id = get_identifier (facet_name);
   tree fn = lookup_member (label_type, fn_id,
 			   /*protect=*/0, /*want_type=*/false, tf_none);
-  if (!fn || fn == error_mark_node)
+  if (!fn || fn == error_mark_node
+      || !label_facet_accessible_p (label_type, fn))
     return current_val;
 
   tree arg = current_val ? current_val
@@ -4319,6 +4354,15 @@ resolve_contract_label (tree contract, tree label, location_t loc)
       || type_dependent_expression_p (label))
     return;
 
+  /* Check access immediately rather than deferring it, for the duration of
+     facet detection.  Every probe below is a SFINAE-style question -- "does
+     this type participate in this facet?" -- asked with tf_none, and with
+     immediate checking an inaccessible member makes the probe fail quietly,
+     which is the answer the concepts give.  Deferred checking instead queued
+     the failure and reported it later as an error against the contract's
+     predicate, turning "this label has no local handler" into a diagnostic.  */
+  deferring_access_check_sentinel access_sentinel (dk_no_deferred);
+
   /* Use the main variant as the trampoline-map key: substituting a
      dependent label can yield a distinct cv-variant tree per instantiation
      for one and the same type, and keying on that would build a fresh
@@ -4340,11 +4384,17 @@ resolve_contract_label (tree contract, tree label, location_t loc)
 			       get_identifier ("assertion_control_object"),
 			       /*protect=*/0, /*want_type=*/true,
 			       tf_none);
-      if (!aco || aco == error_mark_node)
+      /* An inaccessible nested type is not one the concept can name, so such
+	 a type is not an assertion-control object at all -- which, unlike an
+	 inaccessible facet member, *is* ill-formed: the paper requires the
+	 control object to satisfy this concept.  */
+      if (!aco || aco == error_mark_node
+	  || !label_facet_accessible_p (label_type, aco))
 	{
 	  error_at (loc, "type %qT does not satisfy "
 		    "%<assertion_control_object%> "
-		    "(missing nested type %<assertion_control_object%>)",
+		    "(missing or inaccessible nested type "
+		    "%<assertion_control_object%>)",
 		    label_type);
 	  CONTRACT_LABEL (contract) = NULL_TREE;
 	  return;
@@ -4365,6 +4415,13 @@ resolve_contract_label (tree contract, tree label, location_t loc)
 	  tree hcv_fn = lookup_member (label_type, hcv_id,
 				       /*protect=*/0, /*want_type=*/false,
 				       tf_none);
+	  /* Clear hcv_fn rather than merely skipping the probe: the trampoline
+	     is built by a separate `if' below that re-tests only hcv_fn, so
+	     leaving it set would build a trampoline for a handler the probe
+	     never vetted.  */
+	  if (hcv_fn && hcv_fn != error_mark_node
+	      && !label_facet_accessible_p (label_type, hcv_fn))
+	    hcv_fn = NULL_TREE;
 	  if (hcv_fn && hcv_fn != error_mark_node)
 	    {
 	      /* Test viability using the library's contract_violation
@@ -4428,7 +4485,8 @@ resolve_contract_label (tree contract, tree label, location_t loc)
 	  tree query_fn = lookup_member (label_type, query_id,
 					/*protect=*/0, /*want_type=*/false,
 					tf_none);
-	  if (query_fn && query_fn != error_mark_node)
+	  if (query_fn && query_fn != error_mark_node
+	      && label_facet_accessible_p (label_type, query_fn))
 	    {
 	      /* Test viability: query(const void*, size_t) -> void*.  */
 	      tree const_void_ptr = build_pointer_type (
@@ -4562,7 +4620,8 @@ resolve_contract_label (tree contract, tree label, location_t loc)
 				     get_identifier ("allowed_semantics"),
 				     /*protect=*/0, /*want_type=*/false,
 				     tf_none);
-      if (as_member && as_member != error_mark_node)
+      if (as_member && as_member != error_mark_node
+	  && label_facet_accessible_p (label_type, as_member))
 	{
 	  /* label.allowed_semantics is a member OBJECT; call
 	     .contains(sem) on it to test each semantic.  */
