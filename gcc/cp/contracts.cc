@@ -635,7 +635,14 @@ call_label_method (tree label, tree method_id, uint16_t sem_val)
 				     NULL_TREE, LOOKUP_NORMAL, NULL, tf_none);
   if (!call || call == error_mark_node)
     return NULL_TREE;
-  return cxx_constant_value (call, NULL_TREE, tf_none);
+  /* The facet is present -- the member exists and the call is viable -- so
+     from here a failure is the program's, not a reason to look away.  No
+     concept can require a member be usable in a constant expression, so
+     D3400R5 has such a type participate in the facet and take the hard error
+     when the result is evaluated during translation.  Diagnosing here is that
+     error; evaluating with tf_none instead silently left the facet doing
+     nothing at all.  */
+  return cxx_constant_value (call, NULL_TREE, tf_warning_or_error);
 }
 
 /* Read the cached runtime callee-side semantic.  Valid only after
@@ -4157,7 +4164,10 @@ apply_label_string_facet (tree label, const char *facet_name,
   if (!call || call == error_mark_node)
     return current_val;
 
-  tree result = cxx_constant_value (call, NULL_TREE, tf_none);
+  /* As in call_label_method: the facet is present by this point, so a
+     non-constant-evaluable member is a hard error rather than a silent
+     no-op.  */
+  tree result = cxx_constant_value (call, NULL_TREE, tf_warning_or_error);
   tree str = extract_string_from_const_char_ptr (result);
   if (str)
     {
