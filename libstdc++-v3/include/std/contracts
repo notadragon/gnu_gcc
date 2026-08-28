@@ -296,7 +296,7 @@ namespace labels
   concept allowed_semantics_label =
     assertion_control_object<_Tp> &&
     requires(const _Tp __t) {
-      requires __is_const(decltype(_Tp::allowed_semantics));
+      requires __is_const(decltype(__t.allowed_semantics));
       contracts::evaluation_semantic_set({__t.allowed_semantics});
     };
 
