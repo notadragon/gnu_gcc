@@ -60,7 +60,7 @@ template <class T> constexpr comment_label_t dep_comment_label{};
 struct quiet_label_t
 {
   using assertion_control_object = quiet_label_t;
-  char group_names[1][11];
+  const char group_names[1][11];
   constexpr quiet_label_t () : group_names{"quietgroup"} {}
 };
 template <class T> constexpr quiet_label_t dep_quiet_label{};

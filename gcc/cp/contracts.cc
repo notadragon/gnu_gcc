@@ -932,8 +932,18 @@ ensure_contract_groups (tree contract)
 				  get_identifier ("group_names"),
 				  /*protect=*/0, /*want_type=*/false,
 				  tf_none);
+  /* The concept requires `__is_const (decltype (t.group_names))'.  A
+     `static constexpr' member is const-qualified already, and so is an array
+     of const elements; a non-const member is not a facet.  D3400R5 requires
+     const so that nothing implies a label's group membership could change at
+     run time and have an effect -- nothing reads it after translation.  */
+  tree gn_decl = (gn_member && gn_member != error_mark_node
+		  && BASELINK_P (gn_member)
+		  ? BASELINK_FUNCTIONS (gn_member) : gn_member);
   if (!gn_member || gn_member == error_mark_node
-      || !label_facet_accessible_p (label_type, gn_member))
+      || !label_facet_accessible_p (label_type, gn_member)
+      || !gn_decl || !DECL_P (gn_decl)
+      || !CP_TYPE_CONST_P (TREE_TYPE (gn_decl)))
     {
       CONTRACT_GROUPS (contract) = error_mark_node;
       return;

@@ -61,7 +61,7 @@ void handle_contract_violation (const contract_violation& v) {
 #define SEM_M	  constexpr evaluation_semantic				\
 		  compute_semantic (evaluation_semantic) const		\
 		  { return evaluation_semantic::ignore; }
-#define GROUP_M	  char group_names[1][7] = {"safety"};
+#define GROUP_M	  const char group_names[1][7] = {"safety"};
 #define ALLOW_M	  static constexpr std::contracts::evaluation_semantic_set \
 		  allowed_semantics = {evaluation_semantic::observe};
 
