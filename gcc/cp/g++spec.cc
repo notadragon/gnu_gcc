@@ -178,6 +178,8 @@ lang_specific_driver (struct cl_decoded_option **in_decoded_options,
 	case OPT_fcontracts_p4298:
 	case OPT_std_c__26:
 	case OPT_std_gnu__26:
+	case OPT_std_c__29:
+	case OPT_std_gnu__29:
 	  /* Any use of C++ contracts needs the experimental runtime (libstdc++exp,
 	     which hosts the contracts C++ runtime) and the contracts ABI core
 	     (libcontracts).  This is triggered by the base -fcontracts flag, by any
@@ -187,7 +189,13 @@ lang_specific_driver (struct cl_decoded_option **in_decoded_options,
 	     this driver spec, so we test the whole set here directly.  The C-only
 	     -fcontracts-p4299 is deliberately excluded: it does not use the C++
 	     runtime and links just libcontracts via the LINK spec in gcc.cc.
-	     (-std=c++2c / -std=gnu++2c are aliases decoded to OPT_std_*__26.)  */
+	     (-std=c++2c / -std=gnu++2c are aliases decoded to OPT_std_*__26, and
+	     -std=c++2d / -std=gnu++2d to OPT_std_*__29.)
+
+	     EVERY standard AT OR ABOVE C++26 has to be listed, not just C++26:
+	     the front end enables contracts for those too, so leaving C++29 out
+	     emitted contract calls and then failed to link them.  Add the next
+	     one here when it is introduced.  */
 	  need_experimental = true;
 	  break;
 
