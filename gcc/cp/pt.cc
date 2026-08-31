@@ -12425,12 +12425,27 @@ tsubst_contract (tree decl, tree t, tree args, tsubst_flags_t complain,
 
   /* Ensure function parameters are in local_specializations so that
      capture initializers (especially pack expansions) can resolve them.
-     Map original function's PARM_DECLs to the instantiated function's.  */
+     Map original function's PARM_DECLs to the instantiated function's.
+
+     A parameter pack must map to the whole argument pack, exactly as
+     register_parameter_specializations does: one pattern PARM_DECL stands for
+     every parameter instantiated from it, and tsubst_pack_expansion reads that
+     mapping to expand the pack.  Pairing it off against a single instantiated
+     parameter would make the pack look one element long -- and would clobber
+     the correct entry register_parameter_specializations already made.  */
   if (decl && in_decl && decl != in_decl)
-    for (tree op = DECL_ARGUMENTS (in_decl), np = DECL_ARGUMENTS (decl);
-	 op && np; op = DECL_CHAIN (op), np = DECL_CHAIN (np))
-      if (op != np)
-	register_local_specialization (np, op);
+    {
+      tree np = DECL_ARGUMENTS (decl);
+      for (tree op = DECL_ARGUMENTS (in_decl); op && np; op = DECL_CHAIN (op))
+	if (DECL_PACK_P (op))
+	  register_local_specialization (extract_fnparm_pack (op, &np), op);
+	else
+	  {
+	    if (op != np)
+	      register_local_specialization (np, op);
+	    np = DECL_CHAIN (np);
+	  }
+    }
 
   /* Substitute the P3400 assertion-control label, if present.  grok_contract
      only validates a label and computes its derived facets (structural

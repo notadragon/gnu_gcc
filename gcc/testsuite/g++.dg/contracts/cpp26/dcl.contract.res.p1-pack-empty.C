@@ -65,21 +65,29 @@ int tail_const (A... a, const T y)
    run must still diagnose -- and must name Y, the parameter actually used,
    not whichever pack element shares its position.
 
-   Each of these is diagnosed twice, once by this walk and once as the
-   predicate is substituted and the parameter's type stops being dependent.
-   That redundancy has nothing to do with packs -- any dependent-typed value
-   parameter used in a postcondition gets both messages -- so it is simply
-   matched here rather than worked around.  */
+   Each of these is diagnosed twice, from two different places, and the two
+   messages are deliberately worded and located differently: this walk names
+   the parameter and points at its declaration, while substituting the
+   predicate points at the odr-use inside the postcondition and informs about
+   the declaration.  Neither has anything to do with packs -- any
+   dependent-typed value parameter used in a postcondition gets both -- so
+   both are simply matched here rather than worked around.
+
+   A postcondition whose return type is deduced draws a third copy, the
+   use-site message repeated at the declaration, from rebuild_postconditions
+   re-substituting the predicate.  A written return type gives the result
+   variable a concrete type, so that rebuild is skipped and the third copy
+   does not appear; every function here writes its return type.  */
 template <class... A, class T>
 int tail_nonconst (A... a, T y)			// { dg-error "value parameter 'y' used in a postcondition must be const" }
-  post (r : r > y)				// { dg-error "a value parameter used in a postcondition must be const" "" { target *-*-* } .-1 }
+  post (r : r > y)				// { dg-error "a value parameter used in a postcondition must be const" }
 { return y + 1; }
 
 /* The same, reached with an empty pack: the back-aligned run has to cope
    with the instantiation being the shorter list.  */
 template <class... A, class T>
 int tail_nonconst_empty (A... a, T y)		// { dg-error "value parameter 'y' used in a postcondition must be const" }
-  post (r : r > y)				// { dg-error "a value parameter used in a postcondition must be const" "" { target *-*-* } .-1 }
+  post (r : r > y)				// { dg-error "a value parameter used in a postcondition must be const" }
 { return y + 1; }
 
 /* A parameter before the pack: the front-aligned run keeps working.  */
@@ -90,7 +98,7 @@ int front_const (const T x, A... a)
 
 template <class T, class... A>
 int front_nonconst (T x, A... a)		// { dg-error "value parameter 'x' used in a postcondition must be const" }
-  post (r : r > x)				// { dg-error "a value parameter used in a postcondition must be const" "" { target *-*-* } .-1 }
+  post (r : r > x)				// { dg-error "a value parameter used in a postcondition must be const" }
 { return x + 1; }
 
 /* Parameters on both sides of the pack at once.  */
