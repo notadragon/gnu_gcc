@@ -40,9 +40,9 @@ constexpr non_constexpr_message_t non_constexpr_message{};
 
 // The member satisfies the concept, so the facet is present; the error comes
 // from evaluating it.
-void f1 (int x) pre<non_constexpr_semantic> (x > 0) { }  // { dg-error "non-'constexpr' function" }
-void f2 (int x) pre<non_constexpr_comment> (x > 0) { }   // { dg-error "non-'constexpr' function" }
-void f3 (int x) pre<non_constexpr_message> (x > 0) { }   // { dg-error "non-'constexpr' function" }
+void f1 (int x) pre<non_constexpr_semantic> (x > 0) { }  // { dg-error "'compute_semantic' facet of assertion-control object 'non_constexpr_semantic_t' must be usable in a constant expression" }
+void f2 (int x) pre<non_constexpr_comment> (x > 0) { }   // { dg-error "'compute_comment' facet of assertion-control object 'non_constexpr_comment_t' must be usable in a constant expression" }
+void f3 (int x) pre<non_constexpr_message> (x > 0) { }   // { dg-error "'compute_message' facet of assertion-control object 'non_constexpr_message_t' must be usable in a constant expression" }
 
 // The same shapes with constexpr members are accepted, so the tests above are
 // pinning the constexpr-ness and not some unrelated property of the label.

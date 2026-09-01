@@ -637,6 +637,40 @@ label_facet_accessible_p (tree label_type, tree member)
 		       /*consider_local_p=*/true);
 }
 
+/* Constant-evaluate CALL, an invocation of the facet named FACET_NAME on an
+   assertion-control object of LABEL_TYPE, and diagnose at LOC if it is not
+   a constant expression.
+
+   By the time this is reached the facet is present: the member exists, is
+   accessible, and the call is viable.  No concept can ask whether a member
+   is usable in a constant expression, so per D3400R5 such a type still
+   participates in the facet and the error arrives when the result is
+   consumed during translation.  Say what is actually wrong -- naming the
+   facet and the control object -- rather than letting the evaluator's
+   generic "call to non-'constexpr' function" escape, which never mentions
+   contracts and leaves the reader to work out why 'constexpr' is required
+   here.  The facet and the type between them identify the member, so this
+   is one diagnostic rather than ours followed by the evaluator's; Clang's
+   err_contract_facet_not_constant says the same thing.  */
+
+static tree
+constant_facet_value (tree call, tree label_type, const char *facet_name,
+		      location_t loc)
+{
+  tree result = cxx_constant_value (call, NULL_TREE, tf_none);
+  if (result && result != error_mark_node)
+    return result;
+
+  /* Name the type without its cv-qualification: a label is always a
+     constexpr, therefore const, object, so "const foo_t" here is noise that
+     every one of these messages would carry.  */
+  error_at (loc,
+	    "the %qs facet of assertion-control object %qT must be usable "
+	    "in a constant expression", facet_name,
+	    TYPE_MAIN_VARIANT (label_type));
+  return error_mark_node;
+}
+
 /* Call LABEL.METHOD_ID(SEM_VAL) and constant-evaluate the result.
    Returns NULL_TREE if the method does not exist or evaluation fails.
    Used by ensure_evaluation_semantic (compute_semantic facet) and
@@ -668,14 +702,8 @@ call_label_method (tree label, tree method_id, uint16_t sem_val)
 				     NULL_TREE, LOOKUP_NORMAL, NULL, tf_none);
   if (!call || call == error_mark_node)
     return NULL_TREE;
-  /* The facet is present -- the member exists and the call is viable -- so
-     from here a failure is the program's, not a reason to look away.  No
-     concept can require a member be usable in a constant expression, so
-     D3400R5 has such a type participate in the facet and take the hard error
-     when the result is evaluated during translation.  Diagnosing here is that
-     error; evaluating with tf_none instead silently left the facet doing
-     nothing at all.  */
-  return cxx_constant_value (call, NULL_TREE, tf_warning_or_error);
+  return constant_facet_value (call, label_type,
+			       IDENTIFIER_POINTER (method_id), input_location);
 }
 
 /* Read the cached runtime callee-side semantic.  Valid only after
@@ -2561,7 +2589,8 @@ get_postcondition_capture_struct_type (tree contract)
   gcc_assert (POSTCONDITION_P (contract));
   gcc_assert (POSTCONDITION_CAPTURES (contract));
 
-  tree *cached = hash_map_safe_get (postcondition_capture_struct_types, contract);
+  tree *cached
+    = hash_map_safe_get (postcondition_capture_struct_types, contract);
   if (cached)
     return *cached;
 
@@ -4185,7 +4214,7 @@ extract_string_from_const_char_ptr (tree result)
 
 static tree
 apply_label_string_facet (tree label, const char *facet_name,
-			  tree current_val, location_t /*loc*/)
+			  tree current_val, location_t loc)
 {
   if (!label || label == error_mark_node
       || !TREE_TYPE (label)
@@ -4213,10 +4242,7 @@ apply_label_string_facet (tree label, const char *facet_name,
   if (!call || call == error_mark_node)
     return current_val;
 
-  /* As in call_label_method: the facet is present by this point, so a
-     non-constant-evaluable member is a hard error rather than a silent
-     no-op.  */
-  tree result = cxx_constant_value (call, NULL_TREE, tf_warning_or_error);
+  tree result = constant_facet_value (call, label_type, facet_name, loc);
   tree str = extract_string_from_const_char_ptr (result);
   if (str)
     {
@@ -4355,7 +4381,8 @@ build_facet_probe_args (const char *facet_name, tree fn)
 
   if (!strcmp (facet_name, "handle_contract_violation"))
     {
-      tree cv = lookup_std_contracts_type (get_identifier ("contract_violation"));
+      tree cv
+	= lookup_std_contracts_type (get_identifier ("contract_violation"));
       if (!cv || cv == error_mark_node)
 	return NULL;
       tree ref = cp_build_indirect_ref
@@ -5769,7 +5796,8 @@ build_local_violation_trampoline (tree label_type, tree hcv_fn,
 					  RO_UNARY_STAR, tf_warning_or_error);
 
   /* Cast: const contract_violation& v = *(const contract_violation*) ptr;  */
-  tree cv_type = lookup_std_contracts_type (get_identifier ("contract_violation"));
+  tree cv_type
+    = lookup_std_contracts_type (get_identifier ("contract_violation"));
   tree cv_const = cp_build_qualified_type (cv_type, TYPE_QUAL_CONST);
   tree cv_ptr_type = build_pointer_type (cv_const);
   tree cast_viol = build1 (NOP_EXPR, cv_ptr_type, parm_violation_ptr);
