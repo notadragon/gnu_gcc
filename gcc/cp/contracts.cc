@@ -3128,14 +3128,26 @@ maybe_apply_function_contracts (tree fndecl)
   if (!do_pre && !do_post)
     return;
 
-  /* If the function is noexcept, the user's written body will be wrapped in a
-     MUST_NOT_THROW expression.  In that case we leave the MUST_NOT_THROW in
-     place and do our replacement inside it.  */
+  /* If the function is noexcept, the user's written body will normally be
+     wrapped in a MUST_NOT_THROW expression.  In that case we leave the
+     MUST_NOT_THROW in place and do our replacement inside it.
+
+     "Normally", not "always": the wrapper comes from begin_eh_spec_block,
+     which use_eh_spec_block gates on flag_enforce_eh_specs among other
+     things.  Under -fno-enforce-eh-specs a noexcept function has no wrapper
+     at all, so keying off TYPE_NOEXCEPT_P alone read whatever the body did
+     start with as a MUST_NOT_THROW_EXPR and took its first operand -- a
+     checking-assert in a checking build, and a segfault in a release one
+     (PR c++/127173).  Test the body for the wrapper instead of predicting it
+     from the exception specification; that also covers the other reasons
+     use_eh_spec_block can decline, such as a cloned or implicitly-generated
+     function.  */
   tree fnbody;
-  if (TYPE_NOEXCEPT_P (TREE_TYPE (fndecl)))
+  tree m_n_t_expr = (TYPE_NOEXCEPT_P (TREE_TYPE (fndecl))
+		     ? expr_first (DECL_SAVED_TREE (fndecl)) : NULL_TREE);
+  if (m_n_t_expr && m_n_t_expr != error_mark_node
+      && TREE_CODE (m_n_t_expr) == MUST_NOT_THROW_EXPR)
     {
-      tree m_n_t_expr = expr_first (DECL_SAVED_TREE (fndecl));
-      gcc_checking_assert (TREE_CODE (m_n_t_expr) == MUST_NOT_THROW_EXPR);
       fnbody = TREE_OPERAND (m_n_t_expr, 0);
       TREE_OPERAND (m_n_t_expr, 0) = push_stmt_list ();
     }
