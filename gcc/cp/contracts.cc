@@ -1350,6 +1350,21 @@ finish_contract_condition (cp_expr condition)
   return condition_conversion (condition);
 }
 
+/* True when TYPE is a reference type, or a pack expansion whose pattern is
+   one.  A reference cannot be cv-qualified; cp_build_qualified_type recurses
+   through a pack expansion into its pattern, so both spellings have to be
+   recognized together.  */
+
+static bool
+contract_ref_or_ref_pack_p (tree type)
+{
+  if (!type || type == error_mark_node)
+    return false;
+  if (TREE_CODE (type) == TYPE_PACK_EXPANSION)
+    type = PACK_EXPANSION_PATTERN (type);
+  return type && type != error_mark_node && TYPE_REF_P (type);
+}
+
 /* Wrap the DECL into VIEW_CONVERT_EXPR representing const qualified version
    of the declaration.  */
 
@@ -1357,7 +1372,27 @@ tree
 view_as_const (tree decl)
 {
   if (decl
-      && !CP_TYPE_CONST_P (TREE_TYPE (decl)))
+      && !CP_TYPE_CONST_P (TREE_TYPE (decl))
+      /* A reference type cannot be cv-qualified, and there is nothing here to
+	 constify: a reference is immutable already, and access *through* it is
+	 constified where it is dereferenced, on the REFERENCE_REF below.
+
+	 This is reachable only for a function parameter PACK of reference
+	 type.  A non-pack reference parameter reaches this as an already
+	 dereferenced REFERENCE_REF, whose type is the referent's, so it never
+	 gets here.  A pack element is still a bare PARM_DECL at this point,
+	 because the pack has not been expanded, and its type is a
+	 TYPE_PACK_EXPANSION whose PATTERN is the reference -- which is why
+	 testing the type itself is not enough: cp_build_qualified_type
+	 recurses into the pattern, so the reference check fires in there and
+	 the hard error ("'const' qualifiers cannot be applied to 'Args&'")
+	 rejected a well-formed program.  PR c++/126878, and PR c++/126039 for
+	 the `auto&&...' spelling of the same thing.
+
+	 Leaving the pack alone is correct rather than merely quiet: at
+	 instantiation each expanded element is an ordinary reference
+	 parameter and is constified through the usual path.  */
+      && !contract_ref_or_ref_pack_p (TREE_TYPE (decl)))
     {
       gcc_checking_assert (!contract_const_wrapper_p (decl));
       tree ctype = TREE_TYPE (decl);
