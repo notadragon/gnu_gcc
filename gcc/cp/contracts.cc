@@ -6173,6 +6173,17 @@ remap_dummy_this_1 (tree *tp, int *, void *data)
 {
   if (!is_this_parameter (*tp))
     return NULL_TREE;
+
+  /* is_this_parameter is true for a lambda's captured-'this' proxy as well
+     as for a real 'this' PARM_DECL: the proxy is a VAR_DECL named 'this'
+     whose DECL_VALUE_EXPR is already '__closure->__this'.  Rewriting that to
+     DECL_ARGUMENTS -- which in a lambda's operator() is __closure, not an
+     object of the enclosing class -- made a predicate read the closure as if
+     it were that class.  The proxy needs no remapping; only the dummy 'this'
+     of a contract parsed on a declaration does.  */
+  if (TREE_CODE (*tp) != PARM_DECL)
+    return NULL_TREE;
+
   tree fn = (tree)data;
   *tp = DECL_ARGUMENTS (fn);
   return NULL_TREE;
