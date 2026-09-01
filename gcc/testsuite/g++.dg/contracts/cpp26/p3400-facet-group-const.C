@@ -13,7 +13,13 @@
 // scope -- so de-duplication leaves empty rows at the end, which the front end
 // skips.  That is why "safety | safety" must behave exactly like "safety".
 // { dg-do run { target c++26 } }
-// { dg-additional-options "-fcontracts -fcontracts-p3400 -fcontract-evaluation-semantic=ignore -fcontract-group-evaluation-semantic=safety:observe -Wno-contract-invalid-label-facet" }
+// This deliberately does NOT pass -Wno-contract-invalid-label-facet.  It used
+// to, which suppressed nothing -- the near-miss warning probes the function
+// facets only, never the data-member ones -- while reading as though the
+// non-const group_names below were diagnosed and were being silenced here,
+// the opposite of the truth.  Without it the test also pins that mutable_group_t
+// stays silent.
+// { dg-additional-options "-fcontracts -fcontracts-p3400 -fcontract-evaluation-semantic=ignore -fcontract-group-evaluation-semantic=safety:observe" }
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 
 #include <contracts>
