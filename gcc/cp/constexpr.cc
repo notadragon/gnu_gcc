@@ -1398,11 +1398,20 @@ class modifiable_tracker
 {
   hash_set<tree> set;
   constexpr_global_ctx *global;
+  hash_set<tree> *outer_set;
   bool outer_rejected;
   tree outer_rejected_obj;
 public:
   modifiable_tracker (constexpr_global_ctx *g): global(g)
   {
+    /* Trackers nest: a subexpression evaluated under one may itself contain
+       an [[assume]] or a contract assertion, each of which starts another.
+       Save the enclosing tracker's state rather than assuming there is none,
+       and restore it below.  Clearing MODIFIABLE outright on the way out
+       would leave the rest of the enclosing tracked evaluation untracked --
+       its modifications neither refused nor recorded, and so never rolled
+       back.  */
+    outer_set = global->modifiable;
     global->modifiable = &set;
     outer_rejected = global->modifiable_rejected;
     outer_rejected_obj = global->modifiable_rejected_obj;
@@ -1417,7 +1426,7 @@ public:
   {
     for (tree t: set)
       global->clear_value (t);
-    global->modifiable = nullptr;
+    global->modifiable = outer_set;
     global->modifiable_rejected = outer_rejected;
     global->modifiable_rejected_obj = outer_rejected_obj;
   }
