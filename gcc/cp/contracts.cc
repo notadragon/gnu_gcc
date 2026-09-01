@@ -3254,15 +3254,39 @@ maybe_apply_function_contracts (tree fndecl)
     }
 
   /* If we have a lambda with captures, ensure that those captures are in-
-     scope for pre and post conditions.  */
-  if (LAMBDA_FUNCTION_P (fndecl)
-      && TREE_CODE (fnbody) == BIND_EXPR)
+     scope for pre and post conditions.
+
+     The BIND_EXPR that declares the capture proxies does not always arrive
+     as the body itself: it can be wrapped in a STATEMENT_LIST holding
+     nothing else.  Matching only the bare BIND_EXPR left the proxies out of
+     scope, so the precondition ended up as a *preceding sibling* of the
+     BIND_EXPR declaring them and gimplify_var_or_parm_decl asserted on a
+     proxy it had not seen in any bind (PR c++/126038).  Postconditions were
+     unaffected -- they are emitted after the body, by which point the
+     gimplifier has walked that bind.  Look through the wrapper.  */
+  if (LAMBDA_FUNCTION_P (fndecl))
     {
-      tree extract = BIND_EXPR_BODY (fnbody);
-      BIND_EXPR_BODY (fnbody) = NULL_TREE;
-      add_stmt (fnbody);
-      BIND_EXPR_BODY (fnbody) = push_stmt_list ();
-      fnbody = extract;
+      tree bind = fnbody;
+      if (TREE_CODE (bind) == STATEMENT_LIST)
+	{
+	  tree_stmt_iterator i = tsi_start (bind);
+	  if (!tsi_end_p (i))
+	    {
+	      tree only = tsi_stmt (i);
+	      tsi_next (&i);
+	      if (tsi_end_p (i))
+		bind = only;
+	    }
+	}
+
+      if (TREE_CODE (bind) == BIND_EXPR)
+	{
+	  tree extract = BIND_EXPR_BODY (bind);
+	  BIND_EXPR_BODY (bind) = NULL_TREE;
+	  add_stmt (bind);
+	  BIND_EXPR_BODY (bind) = push_stmt_list ();
+	  fnbody = extract;
+	}
     }
 
   /* Now add the pre and post conditions to the existing function body.
