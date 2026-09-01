@@ -2555,6 +2555,18 @@ static hash_map<tree, tree> *postcondition_capture_flags;
    because the saved initializer trees must survive to wrapper-emission time.  */
 static GTY(()) hash_map<tree, tree> *postcondition_capture_inits;
 
+/* Map from a guarded function -> the local standing in for its returned
+   object in that function's inline postcondition checks.  A function is
+   absent when its checks read DECL_RESULT directly; see
+   postcondition_needs_retval_temp_p for when a temporary is needed.
+
+   Populated by apply_postconditions and read by remap_retval, which does not
+   run until genericization -- emit_contract_statement only queues the
+   contract -- so this cannot be a per-function transient.  GC-managed for
+   the same reason.  */
+
+static GTY(()) hash_map<tree, tree> *postcondition_retval_temps;
+
 /* Emit explicit destruction for postcondition captures (P3098).
    Destroys captures in reverse lexical order, gated by the initialized flag.
    Only destroys if captures were successfully constructed.  */
@@ -2989,6 +3001,70 @@ emit_preconditions_and_capture_inits_interleaved (tree fndecl)
     }
 }
 
+/* True if the inline postcondition checks for FNDECL have to read the
+   returned object through a temporary instead of through DECL_RESULT.
+
+   Aliasing the result binding onto DECL_RESULT is the same manoeuvre as the
+   NRVO, and it needs the same guard the NRVO has: want_nrvo_p (cp/typeck.cc)
+   only aliases when aggregate_value_p says the result genuinely lives in
+   memory.  When it comes back in a register there is nothing to take the
+   address of -- expand_function_start gives DECL_RESULT a pseudo and never
+   consults TREE_ADDRESSABLE -- so a predicate needing that address dies on
+   the MEM_P assertion in expand_expr_addr_expr_1 (PR c++/125574).
+
+   Introducing a temporary here is what [dcl.contract.res] describes: its
+   Example 2 has the check "can fail if the implementation introduces a
+   temporary for the return value" precisely for a register-returned type,
+   and succeed for one returned in memory.  The outlined checking mode has
+   always done this -- __post_fn takes the result as a by-value parameter,
+   which is why -fcontract-checks-outlined never saw the ICE.
+
+   Only an addressable result binding needs it; the ordinary
+   post(r: r > 0) goes on reading DECL_RESULT directly.  */
+
+static bool
+postcondition_needs_retval_temp_p (tree fndecl)
+{
+  tree restype = TREE_TYPE (TREE_TYPE (fndecl));
+  if (VOID_TYPE_P (restype) || !DECL_RESULT (fndecl))
+    return false;
+
+  /* Returned in memory: DECL_RESULT is addressable and, per Example 2, is
+     the object the caller sees -- do not copy it.  */
+  if (aggregate_value_p (restype, fndecl))
+    return false;
+
+  /* A scalar result needs no help: it is a gimple register, so
+     gimplify_addr_expr spills it to a temporary of its own when a predicate
+     takes its address, and it never reaches the failing path.  Copying it
+     here anyway would be worse than pointless -- it would move a direct
+     `const_cast<int&>(r)++' in a postcondition off the returned object,
+     which g++.dg/contracts/cpp26/expr.prim.id.unqual.p7-4.C pins.  Only an
+     aggregate reaches expand with neither a spill nor a home.  */
+  if (!AGGREGATE_TYPE_P (restype))
+    return false;
+
+  /* The copy below is a bare INIT_EXPR, so only take this path for a type
+     it is a correct initialization for.  Under the Itanium ABI anything
+     less is returned in memory and has already been excluded above.  */
+  if (!trivially_copyable_p (restype))
+    return false;
+
+  tree contracts = get_fn_contract_specifiers (fndecl);
+  if (!contracts)
+    return false;
+
+  for (tree contract : tree_vec_range (contracts))
+    if (TREE_CODE (contract) == POSTCONDITION_STMT)
+      {
+	tree result = POSTCONDITION_IDENTIFIER (contract);
+	if (result && DECL_P (result) && TREE_ADDRESSABLE (result))
+	  return true;
+      }
+
+  return false;
+}
+
 /* Add a call or a direct evaluation of the post checks.
    For postconditions with captures, gate the predicate check on the
    initialized flag (set by the interleaved emission path).  */
@@ -3000,6 +3076,26 @@ apply_postconditions (tree fndecl)
     {
       add_post_condition_fn_call (fndecl);
       return;
+    }
+
+  /* Give the checks an addressable stand-in for the returned object when
+     DECL_RESULT cannot supply one; remap_retval picks this up.  */
+  if (postcondition_needs_retval_temp_p (fndecl))
+    {
+      tree restype = TREE_TYPE (TREE_TYPE (fndecl));
+      tree tmp = build_decl (DECL_SOURCE_LOCATION (fndecl), VAR_DECL,
+			     get_identifier ("__contract_retval"), restype);
+      DECL_ARTIFICIAL (tmp) = 1;
+      DECL_IGNORED_P (tmp) = 1;
+      DECL_CONTEXT (tmp) = fndecl;
+      TREE_ADDRESSABLE (tmp) = 1;
+      layout_decl (tmp, 0);
+      pushdecl (tmp);
+      add_decl_expr (tmp);
+      finish_expr_stmt (cp_build_init_expr (tmp, DECL_RESULT (fndecl)));
+      if (!postcondition_retval_temps)
+	postcondition_retval_temps = hash_map<tree, tree>::create_ggc ();
+      postcondition_retval_temps->put (fndecl, tmp);
     }
 
   /* Walk original and copy in lockstep so we can look up capture flags
@@ -6095,7 +6191,11 @@ remap_retval (tree fndecl, tree contract)
   struct replace_tree data;
   data.from = POSTCONDITION_IDENTIFIER (contract);
   gcc_checking_assert (DECL_RESULT (fndecl));
-  data.to = DECL_RESULT (fndecl);
+  /* Read the returned object through the temporary apply_postconditions set
+     up, when it decided one was needed; otherwise straight off DECL_RESULT.  */
+  tree *temp = postcondition_retval_temps
+	       ? postcondition_retval_temps->get (fndecl) : NULL;
+  data.to = temp ? *temp : DECL_RESULT (fndecl);
   walk_tree (&CONTRACT_CONDITION (contract), remap_retval_1, &data, NULL);
 }
 
