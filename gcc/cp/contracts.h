@@ -195,6 +195,7 @@ extern tree finish_contract_message		(tree, tree, tree, location_t);
 extern bool maybe_define_contract_wrapper	(tree);
 extern void update_late_contract		(tree, tree, cp_expr);
 extern void check_redecl_contract		(tree, tree);
+extern void check_contract_on_defaulted_or_deleted (tree, bool);
 extern tree invalidate_contract			(tree);
 extern tree copy_and_remap_contracts		(tree, tree, contract_match_kind = cmk_all);
 extern tree constify_contract_access		(tree);

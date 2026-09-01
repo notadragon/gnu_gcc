@@ -1346,6 +1346,9 @@ grokfield (const cp_declarator *declarator,
 	    {
 	      DECL_DELETED_FN (value) = 1;
 	      DECL_DECLARED_INLINE_P (value) = 1;
+	      /* [dcl.contract.func]/6.  */
+	      check_contract_on_defaulted_or_deleted (value,
+						      /*deleted_p=*/true);
 	      if (TREE_CODE (init) == STRING_CST)
 		DECL_INITIAL (value) = init;
 	    }
@@ -1356,6 +1359,10 @@ grokfield (const cp_declarator *declarator,
 		  DECL_DEFAULTED_FN (value) = 1;
 		  DECL_INITIALIZED_IN_CLASS_P (value) = 1;
 		  DECL_DECLARED_INLINE_P (value) = 1;
+		  /* [dcl.contract.func]/6.  Checked after the flags above,
+		     since DECL_DEFAULTED_IN_CLASS_P reads both.  */
+		  check_contract_on_defaulted_or_deleted (value,
+							  /*deleted_p=*/false);
 		  /* grokfndecl set this to error_mark_node, but we want to
 		     leave it unset until synthesize_method.  */
 		  DECL_INITIAL (value) = NULL_TREE;

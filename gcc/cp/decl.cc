@@ -9798,6 +9798,8 @@ cp_finish_decl (tree decl, tree init, bool init_const_expr_p,
 	    {
 	      DECL_DELETED_FN (decl) = 1;
 	      DECL_DECLARED_INLINE_P (decl) = 1;
+	      /* [dcl.contract.func]/6.  */
+	      check_contract_on_defaulted_or_deleted (decl, /*deleted_p=*/true);
 	      DECL_INITIAL (decl)
 		= TREE_CODE (init) == STRING_CST ? init : error_mark_node;
 	      FOR_EACH_CLONE (clone, decl)
@@ -9812,7 +9814,12 @@ cp_finish_decl (tree decl, tree init, bool init_const_expr_p,
       else if (init == ridpointers[(int)RID_DEFAULT])
 	{
 	  if (defaultable_fn_check (decl))
-	    DECL_DEFAULTED_FN (decl) = 1;
+	    {
+	      DECL_DEFAULTED_FN (decl) = 1;
+	      /* [dcl.contract.func]/6.  */
+	      check_contract_on_defaulted_or_deleted (decl,
+						      /*deleted_p=*/false);
+	    }
 	  else
 	    DECL_INITIAL (decl) = NULL_TREE;
 	}

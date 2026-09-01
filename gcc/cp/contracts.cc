@@ -1535,6 +1535,43 @@ check_selected_pack_index_params (tree expr, location_t loc)
   cp_walk_tree_without_duplicates (&expr, check_pack_index_param_r, &loc);
 }
 
+/* [dcl.contract.func]/6: a deleted function, or one defaulted on its first
+   declaration, shall not have a function-contract-specifier-seq.  DECL has
+   just been marked as one of those; DELETED_P says which.  Diagnose a
+   contract on it and drop the contract, rather than silently ignoring it --
+   such a function has no body the precondition could guard, so the contract
+   was simply doing nothing.
+
+   The paragraph's third case, a *virtual* function, is DELIBERATELY NOT
+   implemented here: P3097 is the proposal that lifts precisely that
+   restriction, and this branch implements P3097.  A defaulted function that
+   is not on its first declaration is unaffected -- the contract lives on the
+   earlier declaration, which is where it belongs.  */
+
+void
+check_contract_on_defaulted_or_deleted (tree decl, bool deleted_p)
+{
+  if (!flag_contracts || !DECL_P (decl) || TREE_CODE (decl) != FUNCTION_DECL)
+    return;
+
+  /* Only a first-declaration default is restricted.  */
+  if (!deleted_p && !DECL_DEFAULTED_IN_CLASS_P (decl))
+    return;
+
+  tree specs = get_fn_contract_specifiers (decl);
+  if (!specs || specs == error_mark_node)
+    return;
+
+  error_at (DECL_SOURCE_LOCATION (decl),
+	    deleted_p
+	    ? G_("deleted function %qD cannot have a "
+		 "function-contract-specifier")
+	    : G_("function %qD defaulted on its first declaration cannot "
+		 "have a function-contract-specifier"),
+	    decl);
+  remove_fn_contract_specifiers (decl);
+}
+
 /* Carry the "odr used in a postcondition" property of the parameter T1 of
    OLDDECL over to the parameter T2 of a redeclaration or instantiation that
    corresponds to it, and check that T2 satisfies the const requirement.  */
