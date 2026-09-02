@@ -3153,15 +3153,24 @@ postcondition_needs_retval_temp_p (tree fndecl)
   if (aggregate_value_p (restype, fndecl))
     return false;
 
-  /* A scalar result needs no help: it is a gimple register, so
-     gimplify_addr_expr spills it to a temporary of its own when a predicate
-     takes its address, and it never reaches the failing path.  Copying it
-     here anyway would be worse than pointless -- it would move a direct
-     `const_cast<int&>(r)++' in a postcondition off the returned object,
-     which g++.dg/contracts/cpp26/expr.prim.id.unqual.p7-4.C pins.  Only an
-     aggregate reaches expand with neither a spill nor a home.  */
-  if (!AGGREGATE_TYPE_P (restype))
-    return false;
+  /* A scalar result needs a home too, and for a sharper reason than an
+     aggregate does.  It is a gimple register, so gimplify_addr_expr spills it
+     to a temporary of its own EVERY TIME a predicate takes its address -- and
+     a predicate may do so more than once:
+
+       int f () post (r : rec (&r) && rec2 (addr_via_ref (r))) ...
+
+     gives two spills and therefore two addresses for one result binding,
+     inside a single evaluation of a single predicate.  [dcl.contract.res]/1
+     binds the result name to one object; nothing permits two, and the
+     predicate's value comes out wrong as a result (PR112794).  Give it one
+     home so every use in the predicate names the same object.
+
+     This does move a direct `const_cast<int&>(r)++' off DECL_RESULT, which
+     g++.dg/contracts/cpp26/expr.prim.id.unqual.p7-4.C pins -- so the caller
+     copies the temporary back once the checks are done, keeping the mutation
+     observable.  An earlier version of this function declined to do any of
+     this precisely because it copied without copying back.  */
 
   /* The copy below is a bare INIT_EXPR, so only take this path for a type
      it is a correct initialization for.  Under the Itanium ABI anything
@@ -3263,6 +3272,14 @@ apply_postconditions (tree fndecl)
       else
 	emit_contract_statement (contract);
     }
+
+  /* If the checks ran against a stand-in for the returned object, copy it
+     back: having evaluated the predicates we owe their effects to the
+     caller, and the stand-in is where those effects landed.  */
+  if (postcondition_retval_temps)
+    if (tree *tmp = postcondition_retval_temps->get (fndecl))
+      finish_expr_stmt (build2 (MODIFY_EXPR, TREE_TYPE (*tmp),
+				DECL_RESULT (fndecl), *tmp));
 }
 
 /* Wrap STMTS -- the postcondition checks of FNDECL -- in a cleanup that
