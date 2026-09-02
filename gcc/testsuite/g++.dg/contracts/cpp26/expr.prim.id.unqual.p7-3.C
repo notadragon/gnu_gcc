@@ -7,9 +7,12 @@
 // This tests modifications to the constified things if checks are outlined
 // { dg-do run { target c++26 } }
 // { dg-additional-options "-fcontracts -fcontract-checks-outlined" }
-// Constification of an outer variable is not preserved when the check is
-// outlined, so the assertion in main still fires at run time.
-// { dg-xfail-run-if "outlined checks lose constification" { *-*-* } }
+// This is the -fcontract-checks-outlined companion to p7-4.C, and must agree
+// with it: a predicate we evaluate is evaluated faithfully, so whether its
+// effects are observable cannot depend on whether the check was outlined.
+// It used to xfail (upstream marked it "PRXXXXXX"), because a by-value
+// parameter and the result were passed to the checking function by value and
+// the predicate mutated copies.
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 
 struct S{

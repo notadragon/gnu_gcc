@@ -1797,46 +1797,88 @@ build_contract_condition_function (tree fndecl, bool pre)
 
   /* A possible later optimization may delete unused args to prevent extra arg
      passing.  */
-  /* Handle the args list.  */
-  tree arg_types = NULL_TREE;
-  tree *last = &arg_types;
-  for (tree arg_type = TYPE_ARG_TYPES (TREE_TYPE (fn));
-      arg_type && arg_type != void_list_node;
-      arg_type = TREE_CHAIN (arg_type))
-    {
-      if (DECL_IOBJ_MEMBER_FUNCTION_P (fndecl)
-	  && TYPE_ARG_TYPES (TREE_TYPE (fn)) == arg_type)
-      continue;
-      *last = build_tree_list (TREE_PURPOSE (arg_type), TREE_VALUE (arg_type));
-      last = &TREE_CHAIN (*last);
-    }
 
-  /* Copy the function parameters, if present.  Disable warnings for them.  */
+  /* Copy the function parameters, if present.  Disable warnings for them.
+
+     A by-value parameter is passed BY REFERENCE to the checking function.
+     The predicate runs in another function here, so a by-value parameter
+     would be evaluated against a copy: a mutation the predicate performs
+     would be invisible to the guarded function's body and to its caller,
+     while a mutation of shared state in the same predicate would still be
+     visible.  That partial application is not something the permission to
+     elide a predicate in [basic.contract.eval] allows -- eliding produces
+     all of a predicate's side effects or none of them, never some.  Having
+     chosen to evaluate the predicate, we owe it the same objects an inline
+     check would see.
+
+     Artificial parameters (`this', __in_chrg, __vtt_parm) are left alone:
+     they are not named by predicates and `this' is already a pointer.  So
+     are types with TREE_ADDRESSABLE set -- a class with a non-trivial copy
+     constructor or destructor is ALREADY passed by invisible reference, so
+     the checking function and the guarded function share the object without
+     any help.  Adding a reference on top of that produces a reference to the
+     reference slot, and the predicate then writes through a pointer to the
+     wrong thing.  (Measured: doing so turns a working case into a silently
+     wrong one.)  */
+  const bool by_ref = flag_contract_checks_outlined;
+  int artificial = num_artificial_parms_for (fndecl);
+
   DECL_ARGUMENTS (fn) = NULL_TREE;
   if (DECL_ARGUMENTS (fndecl))
     {
       tree *last_a = &DECL_ARGUMENTS (fn);
-      for (tree p = DECL_ARGUMENTS (fndecl); p; p = TREE_CHAIN (p))
+      int idx = 0;
+      for (tree p = DECL_ARGUMENTS (fndecl); p; p = TREE_CHAIN (p), ++idx)
 	{
 	  *last_a = copy_decl (p);
+	  if (by_ref
+	      && idx >= artificial
+	      && !TYPE_REF_P (TREE_TYPE (*last_a))
+	      && !TREE_ADDRESSABLE (TREE_TYPE (*last_a))
+	      && TREE_TYPE (*last_a) != error_mark_node)
+	    TREE_TYPE (*last_a)
+	      = cp_build_reference_type (TREE_TYPE (*last_a), /*rval=*/false);
 	  suppress_warning (*last_a);
 	  DECL_CONTEXT (*last_a) = fn;
 	  last_a = &TREE_CHAIN (*last_a);
 	}
     }
 
+  /* Build the argument type list from the parameters just created, so the
+     two cannot drift apart.  For an iobj member function the `this' pointer
+     is re-added by build_method_type_directly below, so drop it here.  */
+  tree arg_types = NULL_TREE;
+  tree *last = &arg_types;
+  {
+    tree p = DECL_ARGUMENTS (fn);
+    if (p && DECL_IOBJ_MEMBER_FUNCTION_P (fndecl))
+      p = TREE_CHAIN (p);
+    for (; p; p = TREE_CHAIN (p))
+      {
+	*last = build_tree_list (NULL_TREE, TREE_TYPE (p));
+	last = &TREE_CHAIN (*last);
+      }
+  }
+
   tree orig_fn_value_type = TREE_TYPE (TREE_TYPE (fn));
   if (!pre && !VOID_TYPE_P (orig_fn_value_type))
     {
       /* For post contracts that deal with a non-void function, append a
-	 parameter to pass the return value.  */
+	 parameter to pass the return value.  By reference, for the same
+	 reason the by-value parameters above are: a postcondition that
+	 mutates the result binding must be mutating the returned object,
+	 not a copy of it, exactly as it does for an inline check.  */
+      tree r_type = orig_fn_value_type;
+      if (by_ref && !TYPE_REF_P (r_type) && !TREE_ADDRESSABLE (r_type)
+	  && r_type != error_mark_node)
+	r_type = cp_build_reference_type (r_type, /*rval=*/false);
       tree name = get_identifier ("__r");
-      tree parm = build_lang_decl (PARM_DECL, name, orig_fn_value_type);
+      tree parm = build_lang_decl (PARM_DECL, name, r_type);
       DECL_CONTEXT (parm) = fn;
       DECL_ARTIFICIAL (parm) = true;
       suppress_warning (parm);
       DECL_ARGUMENTS (fn) = chainon (DECL_ARGUMENTS (fn), parm);
-      *last = build_tree_list (NULL_TREE, orig_fn_value_type);
+      *last = build_tree_list (NULL_TREE, r_type);
       last = &TREE_CHAIN (*last);
     }
 
@@ -2356,6 +2398,31 @@ build_arg_list (tree fndecl)
   return args;
 }
 
+/* Adjust ARGS, built from the guarded function's own parameters, for a call
+   to one of its outlined checking functions FN.  Those take by-value
+   parameters by reference (see build_contract_condition_function), so an
+   argument whose corresponding parameter is a reference the original was not
+   must have its address taken.  Leaves everything else alone, so this is the
+   identity when the checks are not outlined.  */
+
+static void
+adjust_args_for_by_ref_params (tree fn, vec<tree, va_gc> *args)
+{
+  tree parm = DECL_ARGUMENTS (fn);
+  unsigned i;
+  tree arg;
+  FOR_EACH_VEC_SAFE_ELT (args, i, arg)
+    {
+      if (!parm)
+	break;
+      if (TYPE_REF_P (TREE_TYPE (parm))
+	  && !TYPE_REF_P (TREE_TYPE (arg))
+	  && TREE_TYPE (arg) != error_mark_node)
+	(*args)[i] = build_address (arg);
+      parm = DECL_CHAIN (parm);
+    }
+}
+
 /* Build and return a thunk like call to FUNC from CALLER using the supplied
    arguments.  The call is like a thunk call in the fact that we do not
    want to create additional copies of the arguments.  We can not simply reuse
@@ -2394,6 +2461,7 @@ add_pre_condition_fn_call (tree fndecl)
 		       && DECL_PRE_FN (fndecl) != error_mark_node);
 
   releasing_vec args = build_arg_list (fndecl);
+  adjust_args_for_by_ref_params (DECL_PRE_FN (fndecl), args);
   append_capture_struct_args (fndecl, args);
   tree call = build_thunk_like_call (DECL_PRE_FN (fndecl),
 				     args->length (), args->address ());
@@ -2432,12 +2500,63 @@ add_post_condition_fn_call (tree fndecl)
 		       && DECL_POST_FN (fndecl) != error_mark_node);
 
   releasing_vec args = build_arg_list (fndecl);
+
+  /* When the result is passed by reference (outlined checks), a mutation the
+     postcondition performs has to reach the object the caller receives.
+
+     How that is arranged depends on where the result lives, and the two
+     cases line up with the two rows of [dcl.contract.res] Example 2:
+
+     - Returned in memory: DECL_RESULT is addressable and IS the object the
+       caller sees, so hand over its address directly.  Example 2 requires
+       `&r == ptr' to hold for such a type, and a temporary here would break
+       that.
+
+     - Returned in a register: DECL_RESULT is a gimple register, so taking
+       its address spills it to a temporary of the gimplifier's choosing and
+       the write lands in the spill and is lost.  Spill it ourselves instead,
+       pass the address of that, and copy the result back afterwards -- the
+       register is updated after the check runs.  Example 2 leaves the
+       identity of `r' unspecified for this case, so the temporary is
+       permitted; what is not permitted is evaluating the predicate and
+       discarding what it did.  */
+  tree retval_tmp = NULL_TREE;
   if (get_postcondition_result_parameter (fndecl))
-    vec_safe_push (args, DECL_RESULT (fndecl));
+    {
+      tree result = DECL_RESULT (fndecl);
+      tree restype = TREE_TYPE (TREE_TYPE (fndecl));
+
+      if (flag_contract_checks_outlined
+	  && result
+	  && !aggregate_value_p (restype, fndecl))
+	{
+	  retval_tmp = build_decl (DECL_SOURCE_LOCATION (fndecl), VAR_DECL,
+				   get_identifier ("__contract_post_retval"),
+				   restype);
+	  DECL_ARTIFICIAL (retval_tmp) = 1;
+	  DECL_IGNORED_P (retval_tmp) = 1;
+	  DECL_CONTEXT (retval_tmp) = fndecl;
+	  TREE_ADDRESSABLE (retval_tmp) = 1;
+	  layout_decl (retval_tmp, 0);
+	  pushdecl (retval_tmp);
+	  add_decl_expr (retval_tmp);
+	  finish_expr_stmt (cp_build_init_expr (retval_tmp, result));
+	  vec_safe_push (args, retval_tmp);
+	}
+      else
+	vec_safe_push (args, result);
+    }
+
+  adjust_args_for_by_ref_params (DECL_POST_FN (fndecl), args);
   append_capture_struct_args (fndecl, args);
   tree call = build_thunk_like_call (DECL_POST_FN (fndecl),
 				     args->length (), args->address ());
   finish_expr_stmt (call);
+
+  /* Copy back whatever the postcondition did to the spilled result.  */
+  if (retval_tmp)
+    finish_expr_stmt (build2 (MODIFY_EXPR, TREE_TYPE (retval_tmp),
+			      DECL_RESULT (fndecl), retval_tmp));
 }
 
 /* Copy (possibly a sub-set of) contracts from CONTRACTS on FNDECL.  */
@@ -3410,6 +3529,23 @@ maybe_apply_function_contracts (tree fndecl)
    references to postcondition results, which are not replaced during
    merging.  */
 
+/* SP is a parameter (or result placeholder) of the guarded function and DP
+   the corresponding parameter of an outlined checking function.  When the
+   checks are outlined those parameters are passed by reference so that a
+   predicate sees the guarded function's own objects rather than copies (see
+   build_contract_condition_function).  Uses of SP inside the predicate are
+   value uses, so map them to *DP rather than to DP itself.  When DP is not a
+   reference -- every other user of remap_contract, notably the wrapper
+   copies -- this is the identity.  */
+
+static tree
+remap_as_value (tree sp, tree dp)
+{
+  if (TYPE_REF_P (TREE_TYPE (dp)) && !TYPE_REF_P (TREE_TYPE (sp)))
+    return convert_from_reference (dp);
+  return dp;
+}
+
 static void
 remap_contract (tree src, tree dst, tree contract, bool duplicate_p)
 {
@@ -3463,7 +3599,7 @@ remap_contract (tree src, tree dst, tree contract, bool duplicate_p)
 	      if (tree result = POSTCONDITION_IDENTIFIER (contract))
 		{
 		  gcc_assert (DECL_P (result));
-		  insert_decl_map (&id, result, dp);
+		  insert_decl_map (&id, result, remap_as_value (result, dp));
 		  do_remap = true;
 		}
 	    }
@@ -3474,7 +3610,7 @@ remap_contract (tree src, tree dst, tree contract, bool duplicate_p)
       if (sp == dp)
 	continue;
 
-      insert_decl_map (&id, sp, dp);
+      insert_decl_map (&id, sp, remap_as_value (sp, dp));
       do_remap = true;
 
       /* First artificial arg is *this. We want to remap that.  However, we
@@ -5349,7 +5485,12 @@ setup_param_remap (copy_body_data *id, hash_map<tree, tree> *decl_map,
     {
       if (sp != dp)
 	{
-	  insert_decl_map (id, sp, dp);
+	  /* Same by-reference adjustment as remap_contract: when the outlined
+	     function takes a parameter by reference, uses of the guarded
+	     function's parameter are value uses of *DP.  This path handles
+	     the postcondition-capture initialisers, which read the parameters
+	     at function entry.  */
+	  insert_decl_map (id, sp, remap_as_value (sp, dp));
 	  do_remap = true;
 	}
       if (src_num_artificial > 0)
