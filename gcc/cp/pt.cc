@@ -12625,20 +12625,16 @@ contract_parameter_pattern (tree in_decl)
 }
 
 /* Instantiate the contract specifier CONTRACT, returning the substituted
-   contract statement.  */
+   contract statement.  IN_DECL is the declaration whose parameters CONTRACT
+   is written in terms of, and ARGS the arguments to substitute with; the
+   callers below resolve both before getting here.  */
 
 static tree
 tsubst_contract_specifier (tree decl, tree contract, tree args,
 			   tsubst_flags_t complain, tree in_decl)
 {
-  in_decl = contract_parameter_pattern (in_decl);
   local_specialization_stack specs (lss_copy);
   register_parameter_specializations (in_decl, decl);
-
-  /* Use the complete set of template arguments for instantiation. The
-     contract may not have been instantiated and still refer to outer levels
-     of template parameters.  */
-  args = DECL_TI_ARGS (decl);
 
   /* For member functions, make this available for semantic analysis.  */
   tree save_ccp = current_class_ptr;
@@ -12661,21 +12657,23 @@ tsubst_contract_specifier (tree decl, tree contract, tree args,
   return contract;
 }
 
-/* For the unsubstituted contract specifiers SPECIFIERS, instantiate the
- contracts for DECL and set them as the contracts for DECL.  Substitution
- creates a deep copy of the contract.  */
+/* Substitute SPECIFIERS -- contract statements written in terms of IN_DECL's
+   parameters -- with ARGS, and make the result DECL's contract specifiers.
+   Substitution creates a deep copy of each contract.
 
-void
-tsubst_contract_specifiers (tree specifiers, tree decl, tree args,
-			    tsubst_flags_t complain, tree in_decl)
+   This is the shared core of the two entry points below.  They differ only in
+   how IN_DECL and ARGS are found: an ordinary function's contracts are
+   substituted from regenerate_decl_from_template, which has template info to
+   consult, while a lambda's are substituted from tsubst_lambda_expr, which
+   has neither but knows the pattern outright.  Keep the work itself in one
+   place -- two callers disagreeing about which declaration a contract was
+   written against is exactly the defect contract_parameter_pattern exists to
+   prevent.  */
+
+static void
+subst_contract_specifiers (tree specifiers, tree decl, tree args,
+			   tsubst_flags_t complain, tree in_decl)
 {
-  if (!specifiers)
-    {
-      if (flag_contracts)
-	set_fn_contract_specifiers (decl, NULL_TREE);
-      return;
-    }
-
   /* SPECIFIERS may be shared with the pattern (see the copy in
      tsubst_function_decl), so build a fresh vector rather than substituting
      in place.  tsubst_contract () copies each statement it substitutes.
@@ -12700,6 +12698,61 @@ tsubst_contract_specifiers (tree specifiers, tree decl, tree args,
 
   if (flag_contracts)
     set_fn_contract_specifiers (decl, subst_contracts);
+}
+
+/* For the unsubstituted contract specifiers SPECIFIERS, instantiate the
+ contracts for DECL and set them as the contracts for DECL.  Substitution
+ creates a deep copy of the contract.  */
+
+void
+tsubst_contract_specifiers (tree specifiers, tree decl, tree args,
+			    tsubst_flags_t complain, tree in_decl)
+{
+  if (!specifiers)
+    {
+      if (flag_contracts)
+	set_fn_contract_specifiers (decl, NULL_TREE);
+      return;
+    }
+
+  /* Use the complete set of template arguments for instantiation.  The
+     contract may not have been instantiated and still refer to outer levels
+     of template parameters.  */
+  subst_contract_specifiers (specifiers, decl, DECL_TI_ARGS (decl), complain,
+			     contract_parameter_pattern (in_decl));
+}
+
+/* Substitute the contracts of a lambda's operator() FN, instantiated from
+   OLDFN with ARGS by tsubst_lambda_expr.
+
+   tsubst_function_decl copies a function's contract specifiers onto the
+   instantiation without substituting them, leaving that to
+   regenerate_decl_from_template.  A lambda's operator() never goes through
+   regenerate_decl_from_template -- tsubst_lambda_expr builds it and
+   substitutes its body directly -- so without this its contracts stay the
+   pattern's, and the predicate goes on naming the pattern's parameters and
+   the pattern's result binding.  Nothing later notices: the shared trees
+   simply travel into the instantiation's body, where they variously reach
+   expand with no RTL, fail to be found as a local specialization, or get the
+   pattern's result variable reparented onto whichever instantiation came
+   first.
+
+   OLDFN is both the declaration whose parameters the contracts were written
+   on and the one whose body is being substituted, so unlike the ordinary
+   path there is no second declaration for the two to disagree about.
+
+   A predicate that names a CAPTURE rather than a parameter is a separate,
+   pre-existing defect and is not fixed here: the pattern's capture proxy has
+   no local specialization either, so substitution still falls through to the
+   "parameter used in a late-specified return type" recovery.  That shape
+   crashes before this change too, so it is not a regression from it.  */
+
+static void
+tsubst_lambda_contract_specifiers (tree fn, tree oldfn, tree args,
+				   tsubst_flags_t complain)
+{
+  if (tree specifiers = get_fn_contract_specifiers (fn))
+    subst_contract_specifiers (specifiers, fn, args, complain, oldfn);
 }
 
 /* Instantiate a single dependent attribute T (a TREE_LIST), and return either
@@ -21681,6 +21734,13 @@ tsubst_lambda_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl)
       release_tree_vector (field_packs);
 
       register_parameter_specializations (oldfn, fn);
+
+      /* Substitute the contracts before the body: a postcondition is
+	 rebuilt from apply_deduced_return_type as the body's return
+	 statement is substituted, and finish_lambda_function emits the
+	 checks.  Both need the instantiation's own contracts, not the
+	 pattern's.  */
+      tsubst_lambda_contract_specifiers (fn, oldfn, args, complain);
 
       if (oldtmpl)
 	{
