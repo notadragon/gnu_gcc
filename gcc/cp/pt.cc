@@ -21496,6 +21496,23 @@ tsubst_lambda_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl)
   tree oldfn = lambda_function (t);
   in_decl = oldfn;
 
+  /* A lambda whose operator() carries no template info was parsed with
+     processing_template_decl cleared -- see the PR99546 carve-out in
+     cp_parser_lambda_expression -- so it is already complete and concrete and
+     there is nothing here to substitute.  Hand it back rather than rebuilding
+     it: tsubst_function_decl's first act is to assert that it is not being
+     asked to do this ("nobody should be tsubst'ing into non-template
+     functions").
+
+     The carve-out was written for a requires-expression, whose operand is
+     never substituted afterwards, so this never came up.  A contract
+     postcondition raises processing_template_decl the same way -- its result
+     variable is typed auto until the return type is known -- but its
+     predicate IS substituted afterwards, by rebuild_postconditions, and that
+     walks straight into the assert.  */
+  if (oldfn && !DECL_TEMPLATE_INFO (oldfn) && !DECL_LOCAL_DECL_P (oldfn))
+    return t;
+
   args = add_extra_args (LAMBDA_EXPR_EXTRA_ARGS (t), args, complain, in_decl);
   if (processing_template_decl
       && (!in_template_context || (complain & tf_partial)

@@ -12919,7 +12919,8 @@ cp_parser_lambda_expression (cp_parser* parser,
        requires-expression tsubst_expr.  This is PR99546 and friends.  */
     processing_template_decl_sentinel ptds (/*reset*/false);
     if (processing_template_decl && !in_template_context
-	&& current_binding_level->requires_expression)
+	&& (current_binding_level->requires_expression
+	    || current_binding_level->kind == sk_contract))
       processing_template_decl = 0;
 
     type = begin_lambda_type (lambda_expr);
