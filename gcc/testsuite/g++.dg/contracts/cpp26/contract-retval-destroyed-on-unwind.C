@@ -18,8 +18,15 @@
          the function body exits via that same exception", describing a state
          in which the result object was never initialized.  We destroy it
          anyway.  Leaking an object the program can no longer reach is not a
-         defensible reading, and a core issue is owed; do NOT "fix" this test
-         back to expecting a leak on the strength of the wording.
+         defensible reading.
+
+         A core issue has been filed for this at
+         <https://github.com/cplusplus/cwg/issues/988> (it has no CWG issue
+         number yet), proposing that [except.ctor]/2 be extended to cover an
+         exception escaping the evaluation of a postcondition assertion.
+         Until that resolves this test deliberately runs ahead of the
+         wording: do NOT "fix" it back to expecting a leak on the strength of
+         the wording as it stands.
 
    Every case counts constructions against destructions, so a leak and a
    double destroy both fail, and the two cleanups involved -- the body's
