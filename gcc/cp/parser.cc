@@ -13895,7 +13895,30 @@ cp_parser_lambda_body (cp_parser* parser, tree lambda_expr)
 		location_t loc = DECL_SOURCE_LOCATION (cap_fld);
 		error_at (loc, "%qE is not implicitly captured by a contract"
 			  " assertion", expr);
-		inform (DECL_SOURCE_LOCATION (expr), "%q#E declared here", expr);
+
+		/* EXPR is the capture's initializer, which is only a DECL
+		   when the entity is captured directly from the enclosing
+		   function.  Capture it from two lambdas out and the
+		   initializer reads through the enclosing closure instead,
+		   so DECL_SOURCE_LOCATION would be applied to something that
+		   has no such field -- silently garbage in a release build,
+		   and a tree-check ICE with checking enabled.  Recover the
+		   variable being captured, and fall back to the expression's
+		   own location rather than ever reading a location out of a
+		   non-DECL.  */
+		tree decl = expr;
+		STRIP_NOPS (decl);
+		if (INDIRECT_REF_P (decl))
+		  {
+		    decl = TREE_OPERAND (decl, 0);
+		    STRIP_NOPS (decl);
+		  }
+		if (DECL_P (decl))
+		  decl = strip_normal_capture_proxy (decl);
+		location_t dloc = (DECL_P (decl)
+				   ? DECL_SOURCE_LOCATION (decl)
+				   : cp_expr_loc_or_loc (expr, loc));
+		inform (dloc, "%q#E declared here", expr);
 	      }
 	  }
       }
