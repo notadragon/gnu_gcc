@@ -4955,8 +4955,35 @@ finish_id_expression_1 (tree id_expression,
 	  && !processing_contract_condition
 	  && !processing_omp_trait_property_expr)
 	{
-	  *error_msg = G_("use of parameter outside function body");
-	  return error_mark_node;
+	  /* [expr.prim.lambda.capture]/3.3 permits a capture-default or
+	     simple-capture in a lambda whose innermost enclosing scope is a
+	     contract-assertion scope, so naming an enclosing function's
+	     parameter in such a lambda's body is a capture, not an error.
+
+	     outer_var_p above did not route us into the capture machinery
+	     because it requires DECL_FUNCTION_SCOPE_P, and on a free function
+	     the predicate is parsed off the declarator before any
+	     FUNCTION_DECL exists -- so the parameter's DECL_CONTEXT is still
+	     null.  (In a member function, or a lambda's own contract, the
+	     context is already set by the time the predicate is parsed, which
+	     is why those cases have always worked.)  Enter the capture
+	     machinery directly; process_outer_var_ref copes with the null
+	     context, since the enclosing non-lambda function context is null
+	     too and the two therefore match.  */
+	  tree in_contract_lambda
+	    = flag_contracts ? current_lambda_expr () : NULL_TREE;
+	  if (in_contract_lambda
+	      && LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (in_contract_lambda))
+	    {
+	      decl = process_outer_var_ref (decl, tf_warning_or_error);
+	      if (decl == error_mark_node)
+		return error_mark_node;
+	    }
+	  else
+	    {
+	      *error_msg = G_("use of parameter outside function body");
+	      return error_mark_node;
+	    }
 	}
     }
 
