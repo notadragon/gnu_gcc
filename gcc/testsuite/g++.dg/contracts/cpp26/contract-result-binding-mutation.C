@@ -86,6 +86,36 @@ bump_small (const Small &r)
 Big big () post (r : bump_big (r)) { return Big { 1, 2, 3, 4 }; }
 Small small_ () post (r : bump_small (r)) { return Small { 1 }; }
 
+/* A class-typed result with a NON-TRIVIAL copy constructor and destructor
+   must be bound WITHOUT introducing a temporary -- [dcl.contract.res]
+   Example 2's `B' row, "the postcondition check succeeds, no temporary is
+   introduced".  An extra copy here would be observable as extra constructor
+   and destructor calls, so pin the counts and not merely the address.
+
+   Example 2's `A' row permits a temporary otherwise, and both compilers do
+   introduce one for a TRIVIALLY-copyable class (measured 2026-09-03: the
+   predicate sees a different address on both).  That costs no constructor
+   call; the only consequence is whether a mutation through it survives, which
+   the Big/Small cases above cover.  */
+struct Counted
+{
+  int a;
+  static int ctor, copy, move;
+  Counted (int v) : a (v) { ++ctor; }
+  Counted (const Counted &o) : a (o.a) { ++copy; }
+  Counted (Counted &&o) : a (o.a) { ++move; }
+};
+int Counted::ctor = 0, Counted::copy = 0, Counted::move = 0;
+
+static const Counted *seen_addr = 0;
+static bool
+note_counted (const Counted &r)
+{
+  seen_addr = &r;
+  return true;
+}
+Counted counted () post (r : note_counted (r)) { return Counted (1); }
+
 /* A function returning a REFERENCE, whose result name is mutated.  Clang
    crashes in codegen on merely naming the result of a reference-returning
    function; GCC handles it.  */
@@ -104,6 +134,20 @@ main ()
   check ("class returned indirectly", big ().a, 8);
   check ("small class returned in registers", small_ ().a, 10);
   check ("reference return", reference_return (), 105);
+
+  {
+    Counted::ctor = Counted::copy = Counted::move = 0;
+    Counted c = counted ();
+    check ("non-trivial result: constructions", Counted::ctor, 1);
+    check ("non-trivial result: copies", Counted::copy, 0);
+    check ("non-trivial result: moves", Counted::move, 0);
+    if (seen_addr != &c)
+      {
+	std::printf ("FAIL: non-trivial result: the predicate saw a temporary,"
+		     " not the returned object\n");
+	++failures;
+      }
+  }
 
   if (failures)
     __builtin_abort ();
