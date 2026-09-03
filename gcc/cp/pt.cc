@@ -12747,12 +12747,65 @@ tsubst_contract_specifiers (tree specifiers, tree decl, tree args,
    "parameter used in a late-specified return type" recovery.  That shape
    crashes before this change too, so it is not a regression from it.  */
 
+/* Walker for the below: map a capture proxy named in a contract predicate to
+   the instantiation's proxy for the same capture.
+
+   It takes two hops, and only following both lands on a proxy.  The pattern's
+   proxy stands for a variable of the enclosing function; substituting that
+   function's body registered the instantiated variable under it; and
+   insert_capture_proxy then registered the instantiation's proxy under *that*,
+   because it keys on the variable it captures, which is by then the
+   substituted one.  So the pattern's proxy is never itself a key, and one hop
+   stops on the instantiated variable -- an automatic of the containing
+   function, which the predicate is then rightly refused access to.  */
+
+static tree
+bridge_lambda_capture_proxy_r (tree *tp, int *, void *)
+{
+  tree t = *tp;
+  if (!VAR_P (t) || !is_normal_capture_proxy (t)
+      || retrieve_local_specialization (t))
+    return NULL_TREE;
+
+  tree var = strip_normal_capture_proxy (t);
+  tree inst = var ? retrieve_local_specialization (var) : NULL_TREE;
+  if (inst)
+    inst = retrieve_local_specialization (inst);
+
+  if (inst && is_capture_proxy (inst))
+    register_local_specialization (inst, t);
+  return NULL_TREE;
+}
+
 static void
 tsubst_lambda_contract_specifiers (tree fn, tree oldfn, tree args,
 				   tsubst_flags_t complain)
 {
-  if (tree specifiers = get_fn_contract_specifiers (fn))
-    subst_contract_specifiers (specifiers, fn, args, complain, oldfn);
+  tree specifiers = get_fn_contract_specifiers (fn);
+  if (!specifiers)
+    return;
+
+  /* A capture named in a predicate is the PATTERN lambda's capture proxy, for
+     which there is no specialization; substitution would fall through to its
+     "parameter used in a late-specified return type" recovery, whose
+     gcc_assert (cp_unevaluated_operand) does not hold for a predicate, which
+     is evaluated.  Bridge each one to the instantiation's proxy first.
+
+     Register into the CURRENT map, not a pushed copy of it: a copy pushed
+     here does not reach the substitution below, which pushes one of its own.
+     The mappings do not leak past the lambda -- tsubst_lambda_expr already
+     holds a local_specialization_stack across all of this -- and they say the
+     same thing the body's own references to these captures resolve to.  */
+  for (int ix = 0; ix < TREE_VEC_LENGTH (specifiers); ix++)
+    {
+      tree cond = CONTRACT_CONDITION (TREE_VEC_ELT (specifiers, ix));
+      if (cond && cond != error_mark_node
+	  && TREE_CODE (cond) != DEFERRED_PARSE)
+	cp_walk_tree_without_duplicates (&cond, bridge_lambda_capture_proxy_r,
+					 NULL);
+    }
+
+  subst_contract_specifiers (specifiers, fn, args, complain, oldfn);
 }
 
 /* Instantiate a single dependent attribute T (a TREE_LIST), and return either

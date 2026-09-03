@@ -4804,8 +4804,12 @@ process_outer_var_ref (tree decl, tsubst_flags_t complain,
 	}
       return error_mark_node;
     }
-  else if (processing_contract_condition && TREE_CODE (decl) == PARM_DECL)
-    /* Use of a parameter in a contract condition is fine.  */
+  else if (processing_contract_condition
+	   && (TREE_CODE (decl) == PARM_DECL || is_capture_proxy (decl)))
+    /* Use of a parameter in a contract condition is fine, and so is use of a
+       capture: a contract on a lambda may name what the lambda captured, and
+       by the time the predicate is substituted the capture proxy belongs to
+       the instantiated operator() rather than to the enclosing function.  */
     return decl;
   else if (processing_postcondition_predicate && VAR_P (decl))
     /* Use of a postcondition capture (a VAR_DECL, already remapped to the
