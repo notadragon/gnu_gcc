@@ -67,8 +67,9 @@ int no_result_name () post (true) { return 77; }
 
 /* Class-typed results: one returned indirectly, one small enough to come back
    in registers.  These are the two Clang still loses.  */
-struct Big { int a, b, c, d; };
-struct Small { int a; };
+struct Big { int a, b, c, d; };       /* coerced to { i64, i64 } */
+struct Small { int a; };              /* coerced to i32 */
+struct Huge { int a; char pad[64]; }; /* returned indirectly, via sret */
 
 static bool
 bump_big (const Big &r)
@@ -83,8 +84,16 @@ bump_small (const Small &r)
   return true;
 }
 
+static bool
+bump_huge (const Huge &r)
+{
+  const_cast<Huge &> (r).a += 11;
+  return true;
+}
+
 Big big () post (r : bump_big (r)) { return Big { 1, 2, 3, 4 }; }
 Small small_ () post (r : bump_small (r)) { return Small { 1 }; }
+Huge huge () post (r : bump_huge (r)) { Huge h { }; h.a = 1; return h; }
 
 /* A class-typed result with a NON-TRIVIAL copy constructor and destructor
    must be bound WITHOUT introducing a temporary -- [dcl.contract.res]
@@ -133,6 +142,7 @@ main ()
   check ("no result name", no_result_name (), 77);
   check ("class returned indirectly", big ().a, 8);
   check ("small class returned in registers", small_ ().a, 10);
+  check ("class returned via sret", huge ().a, 12);
   check ("reference return", reference_return (), 105);
 
   {
