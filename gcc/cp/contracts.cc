@@ -1508,6 +1508,41 @@ check_param_in_postcondition (tree decl, location_t location)
     }
 }
 
+/* [dcl.fct.def.coroutine]/5 says a coroutine's parameter copies are created
+   "at the beginning of the replacement body", and describes the copy of a
+   non-reference parameter of type CV T as direct-initialized from an xvalue
+   of type T -- the UNQUALIFIED type.  A postcondition odr-using such a
+   parameter must have it const ([dcl.contract.func]), and no such xvalue can
+   then be formed, so the two requirements cannot both be met.  The standard
+   states the consequence outright, as a note on [dcl.fct.def.coroutine]:
+   "An odr-use of a non-reference parameter in a postcondition assertion of a
+   coroutine is ill-formed."
+
+   A reference parameter is fine: its copy is bound to the same object.  So is
+   a precondition, which is not subject to the const rule.
+
+   This cannot be checked where the const rule is, because a function is not
+   known to be a coroutine until its body has been parsed -- which is after
+   its contracts.  FNDECL's parameters carry the flag set by
+   check_param_in_postcondition, so the check is a walk once we know.  */
+
+void
+diagnose_coroutine_postcondition_params (tree fndecl)
+{
+  for (tree parm = DECL_ARGUMENTS (fndecl); parm; parm = DECL_CHAIN (parm))
+    if (parm_used_in_post_p (parm))
+      {
+	auto_diagnostic_group d;
+	error_at (DECL_SOURCE_LOCATION (parm),
+		  "parameter %qD is odr-used in a postcondition of a "
+		  "coroutine", parm);
+	inform (DECL_SOURCE_LOCATION (parm),
+		"a coroutine copies its parameters at the beginning of the "
+		"replacement body, so a postcondition cannot name one; "
+		"consider a reference parameter");
+      }
+}
+
 /* Callback for check_selected_pack_index_params: apply the postcondition
    const check to every PARM_DECL referenced by the selected pack-index
    element.  */

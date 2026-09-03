@@ -198,6 +198,7 @@ extern void check_redecl_contract		(tree, tree);
 extern void check_contract_on_defaulted_or_deleted (tree, bool);
 extern tree invalidate_contract			(tree);
 extern tree copy_and_remap_contracts		(tree, tree, contract_match_kind = cmk_all);
+extern void diagnose_coroutine_postcondition_params (tree);
 extern tree constify_contract_access		(tree);
 extern tree view_as_const			(tree);
 

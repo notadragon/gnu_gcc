@@ -20734,6 +20734,13 @@ finish_function (bool inline_p)
      error_mark_node.  */
   gcc_assert (DECL_INITIAL (fndecl) == error_mark_node);
 
+  /* Now the body has been parsed we know whether this is a coroutine, which
+     is the earliest point the [dcl.fct.def.coroutine] restriction on a
+     postcondition naming a parameter can be applied.  Diagnose it for a
+     template too, hence ahead of the transform's own guards.  */
+  if (flag_coroutines && DECL_COROUTINE_P (fndecl) && !DECL_RAMP_FN (fndecl))
+    diagnose_coroutine_postcondition_params (fndecl);
+
   cp_coroutine_transform *coroutine = nullptr;
   if (flag_coroutines
       && !processing_template_decl
