@@ -46,15 +46,37 @@ Some papers were called out as ready in P3850, others have been written and impl
 - P3400
   - The Dimensions label has not yet been implemented as its final design is being reconsidered
 
-## Known Issues
+## Known Limitations
 
-- Outlined checks + constification: when `-fcontract-checks-outlined` is used,
-  modifications to constified variables via `const_cast` in contract predicates
-  produce incorrect runtime results. Affects both explicit outlined mode and
-  observe semantic at `-O2`. (expr.prim.id.unqual.p7-3.C, p7-4.C)
 - C contracts runtime dependency: using contracts in C (`-fcontracts-dsg21-025`)
   currently requires linking the C++ runtime library (`-lstdc++`). A future
-  refactoring will separate the C contracts runtime into a standalone C library.
+  refactoring will separate the C contracts runtime into a standalone C
+  library.
+
+## Open Upstream Bugs
+
+Bugs found during this implementation that reproduce on stock upstream GCC,
+independent of anything in this branch. Each links to a self-contained
+report-ready writeup plus a reproducer. A row is removed (and its file
+deleted) once the bug is fixed on upstream master, regardless of who fixed
+it or whether it was ever formally filed.
+
+| Bug | Summary | Status | Upstream Link | Details |
+|-----|---------|--------|----------------|---------|
+| GCC-1 | Contract on a function with a variadic parameter pack ICEs or misattributes a diagnostic | Fixed here | [PR124395](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=124395) | [bug-reports/gcc-01-contract-pack-ice.md](bug-reports/gcc-01-contract-pack-ice.md) |
+| GCC-2 | Constant evaluator does not diagnose forming an address into an object before its constructor begins, for a virtual base | Open | — | [bug-reports/gcc-02-constexpr-vbase-before-ctor.md](bug-reports/gcc-02-constexpr-vbase-before-ctor.md) |
+| GCC-5 | Contract on a function returning a non-trivially-destructible class double-destroys the return value | Fixed here | — | [bug-reports/gcc-05-contract-retval-double-destroy.md](bug-reports/gcc-05-contract-retval-double-destroy.md) |
+| GCC-9 | Nested `[[assume]]` leaks the inner operand's side effects during constant evaluation | Fixed here | — | [bug-reports/gcc-09-nested-assume-side-effect-leak.md](bug-reports/gcc-09-nested-assume-side-effect-leak.md) |
+| GCC-10 | Contract predicate on a lambda capturing `this` reads the closure object as the enclosing class | Fixed here | — | [bug-reports/gcc-10-lambda-this-capture-in-contract.md](bug-reports/gcc-10-lambda-this-capture-in-contract.md) |
+| GCC-11 | Lambda in a non-member postcondition with a result name fails to parse | Fixed here | — | [bug-reports/gcc-11-lambda-in-postcondition-result-name.md](bug-reports/gcc-11-lambda-in-postcondition-result-name.md) |
+| GCC-12 | A postcondition's result binding denotes two different objects within one predicate evaluation | Fixed here | [PR112794](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=112794) | [bug-reports/gcc-12-result-binding-denotes-two-objects.md](bug-reports/gcc-12-result-binding-denotes-two-objects.md) |
+| GCC-13 | Lambda's own contract specifiers are never substituted when it's instantiated | Fixed here | — | [bug-reports/gcc-13-precondition-in-lambda-nested-in-generic-lambda.md](bug-reports/gcc-13-precondition-in-lambda-nested-in-generic-lambda.md) |
+| GCC-14 | Garbage source location on a contract-capture diagnostic note | Fixed here | [PR126041](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126041) | [bug-reports/gcc-14-contract-capture-note-garbage-location.md](bug-reports/gcc-14-contract-capture-note-garbage-location.md) |
+| GCC-15 | Outlined contract checks lose by-value parameter/result mutations | Fixed here | — | [bug-reports/gcc-15-outlined-checks-lose-by-value-mutations.md](bug-reports/gcc-15-outlined-checks-lose-by-value-mutations.md) |
+| GCC-16 | Contract on a capturing lambda inside an instantiated template segfaults | Fixed here | — | [bug-reports/gcc-16-lambda-capture-contract-in-template.md](bug-reports/gcc-16-lambda-capture-contract-in-template.md) |
+| GCC-17 | `this` accepted in the trailing return type of an explicit-object member function | Open | — | [bug-reports/gcc-17-this-in-xobj-declaration.md](bug-reports/gcc-17-this-in-xobj-declaration.md) |
+| GCC-18 | A predicate lambda naming a namespace-scope variable does not constify it | Fixed here | — | [bug-reports/gcc-18-lambda-in-predicate-global-not-constified.md](bug-reports/gcc-18-lambda-in-predicate-global-not-constified.md) |
+| GCC-19 | A discarded comma operand in a postcondition is wrongly treated as odr-using a by-value parameter | Fixed here | [PR126897](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126897) | [bug-reports/gcc-19-postcondition-comma-odr-use.md](bug-reports/gcc-19-postcondition-comma-odr-use.md) |
 
 ## Contact
 
