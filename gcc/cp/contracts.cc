@@ -3108,8 +3108,15 @@ emit_preconditions_and_capture_inits_interleaved (tree fndecl)
 	      add_decl_expr (var);
 	    }
 
-	  /* Try block: initialize captures.  */
-	  tree try_block = begin_try_block ();
+	  /* The try/catch exists only to turn a throwing capture initializer
+	     into a post_capture violation.  With -fno-exceptions nothing can
+	     throw and there is nothing to catch, so building it would just
+	     reach doing_eh() in cp/except.cc and error out; emit the bare
+	     initializations instead.  */
+	  tree try_block = NULL_TREE;
+	  if (flag_exceptions)
+	    try_block = begin_try_block ();
+
 	  for (tree cap = captures; cap; cap = TREE_CHAIN (cap))
 	    {
 	      tree var = TREE_VALUE (cap);
@@ -3128,29 +3135,35 @@ emit_preconditions_and_capture_inits_interleaved (tree fndecl)
 	      DECL_INITIAL (var) = NULL_TREE;
 	    }
 	  finish_expr_stmt (cp_build_init_expr (flag, boolean_true_node));
-	  finish_try_block (try_block);
 
-	  /* Catch handler.  */
-	  tree handler = begin_handler ();
-	  finish_handler_parms (NULL_TREE, handler);
-	  contract_evaluation_semantic sem
-	    = ensure_evaluation_semantic (contract, fndecl, false);
-	  if (sem == CES_QUICK)
-	    finish_expr_stmt
-	      (build_quick_enforce_reaction (EXPR_LOCATION (contract)));
-	  else
+	  if (flag_exceptions)
 	    {
-	      tree block_type;
-	      tree ctor = build_contract_data_block_ctor (contract, &block_type);
-	      tree data_var = build_contract_data_block_constant (ctor, block_type,
-								 contract);
-	      tree data_addr = build_address (data_var);
-	      tree ep = declare_cxa_entry_point (CAK_POST_CAPTURE, sem,
-						CDM_EVAL_EXCEPTION, false);
-	      finish_expr_stmt (build_call_n (ep, 1, data_addr));
+	      finish_try_block (try_block);
+
+	      /* Catch handler.  */
+	      tree handler = begin_handler ();
+	      finish_handler_parms (NULL_TREE, handler);
+	      contract_evaluation_semantic sem
+		= ensure_evaluation_semantic (contract, fndecl, false);
+	      if (sem == CES_QUICK)
+		finish_expr_stmt
+		  (build_quick_enforce_reaction (EXPR_LOCATION (contract)));
+	      else
+		{
+		  tree block_type;
+		  tree ctor = build_contract_data_block_ctor (contract,
+							      &block_type);
+		  tree data_var
+		    = build_contract_data_block_constant (ctor, block_type,
+							  contract);
+		  tree data_addr = build_address (data_var);
+		  tree ep = declare_cxa_entry_point (CAK_POST_CAPTURE, sem,
+						     CDM_EVAL_EXCEPTION, false);
+		  finish_expr_stmt (build_call_n (ep, 1, data_addr));
+		}
+	      finish_handler (handler);
+	      finish_handler_sequence (try_block);
 	    }
-	  finish_handler (handler);
-	  finish_handler_sequence (try_block);
 	}
     }
 }
@@ -5603,8 +5616,13 @@ emit_outlined_pre_body (tree fndecl, tree pre_fn)
 				  struct_ref, init_field, NULL_TREE);
 	  finish_expr_stmt (cp_build_init_expr (init_ref, boolean_false_node));
 
-	  /* Try block: initialize each capture field.  */
-	  tree try_block = begin_try_block ();
+	  /* Try block: initialize each capture field.  As at the ordinary
+	     capture site, this exists only to turn a throwing capture
+	     initializer into a post_capture violation, so with -fno-exceptions
+	     it is not built at all.  */
+	  tree try_block = NULL_TREE;
+	  if (flag_exceptions)
+	    try_block = begin_try_block ();
 
 	  tree field = DECL_CHAIN (init_field);
 	  tree captures = POSTCONDITION_CAPTURES (contract);
@@ -5632,31 +5650,37 @@ emit_outlined_pre_body (tree fndecl, tree pre_fn)
 
 	  /* All inits succeeded: set __initialized = true.  */
 	  finish_expr_stmt (cp_build_init_expr (init_ref, boolean_true_node));
-	  finish_try_block (try_block);
 
-	  /* Catch (...): call violation handler.  */
-	  tree handler = begin_handler ();
-	  finish_handler_parms (NULL_TREE, handler);
-
-	  contract_evaluation_semantic sem
-	    = ensure_evaluation_semantic (contract, fndecl, false);
-	  if (sem == CES_QUICK)
-	    finish_expr_stmt
-	      (build_quick_enforce_reaction (EXPR_LOCATION (contract)));
-	  else
+	  if (flag_exceptions)
 	    {
-	      tree block_type;
-	      tree ctor = build_contract_data_block_ctor (contract, &block_type);
-	      tree data_var = build_contract_data_block_constant (ctor, block_type,
-								 contract);
-	      tree data_addr = build_address (data_var);
-	      tree ep = declare_cxa_entry_point (CAK_POST_CAPTURE, sem,
-						CDM_EVAL_EXCEPTION, false);
-	      finish_expr_stmt (build_call_n (ep, 1, data_addr));
-	    }
+	      finish_try_block (try_block);
 
-	  finish_handler (handler);
-	  finish_handler_sequence (try_block);
+	      /* Catch (...): call violation handler.  */
+	      tree handler = begin_handler ();
+	      finish_handler_parms (NULL_TREE, handler);
+
+	      contract_evaluation_semantic sem
+		= ensure_evaluation_semantic (contract, fndecl, false);
+	      if (sem == CES_QUICK)
+		finish_expr_stmt
+		  (build_quick_enforce_reaction (EXPR_LOCATION (contract)));
+	      else
+		{
+		  tree block_type;
+		  tree ctor = build_contract_data_block_ctor (contract,
+							      &block_type);
+		  tree data_var
+		    = build_contract_data_block_constant (ctor, block_type,
+							  contract);
+		  tree data_addr = build_address (data_var);
+		  tree ep = declare_cxa_entry_point (CAK_POST_CAPTURE, sem,
+						     CDM_EVAL_EXCEPTION, false);
+		  finish_expr_stmt (build_call_n (ep, 1, data_addr));
+		}
+
+	      finish_handler (handler);
+	      finish_handler_sequence (try_block);
+	    }
 	}
     }
 }
