@@ -34036,7 +34036,7 @@ cp_parser_late_contract_condition (cp_parser *parser, tree fn, tree contract)
   tree message = cp_parser_contract_message (parser);
 
   /* Commit to changes.  */
-  update_late_contract (contract, result, parsed_condition);
+  update_late_contract (contract, fn, result, parsed_condition);
   if (undeduced_result_type_p)
     --processing_template_decl;
   /* Now that the condition is no longer deferred -- and we've left the
@@ -35141,9 +35141,9 @@ cp_parser_function_contract_specifier (cp_parser *parser)
 	for (tree cap = captures; cap; cap = TREE_CHAIN (cap))
 	  pushdecl (TREE_VALUE (cap));
 
-      /* NOW enable postcondition processing -- the predicate must see
-	 the check_param_in_postcondition restriction, but captures
-	 (parsed above) must not.  */
+      /* NOW enable postcondition processing -- the predicate is subject to
+	 [dcl.contract.func]/7, but the capture initializers parsed above are
+	 not.  */
       processing_postcondition_predicate = postcondition_p;
 
       tree result = NULL_TREE;

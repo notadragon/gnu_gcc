@@ -12589,6 +12589,12 @@ tsubst_contract (tree decl, tree t, tree args, tsubst_flags_t complain,
   cp_expr new_condition (cond_t, cond_l);
   CONTRACT_CONDITION (r) = finish_contract_condition (new_condition);
 
+  /* Now that the predicate is concrete, apply [dcl.contract.func]/7 to it.
+     A pack-index-expression has selected its element by this point, which is
+     why no per-element deferral is needed during the expansion above.  */
+  if (POSTCONDITION_P (r))
+    check_postcondition_param_odr_uses (CONTRACT_CONDITION (r), decl, cond_l);
+
   /* At present, the semantic, kind and comment cannot be dependent.  */
   gcc_checking_assert
     (!type_dependent_expression_p (CONTRACT_EVALUATION_SEMANTIC (r))
@@ -14975,25 +14981,16 @@ static tree
 tsubst_pack_index (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 {
   tree pack = PACK_INDEX_PACK (t);
-  {
-    /* Expanding the pack substitutes the pattern for every element, but a
-       pack-index-expression odr-uses only the selected one.  Defer the
-       postcondition const check on parameters (it is re-run below on the
-       selected element via check_selected_pack_index_params).  */
-    bool save = defer_postcondition_pack_index_check;
-    defer_postcondition_pack_index_check = true;
-    if (PACK_EXPANSION_P (pack))
-      pack = tsubst_pack_expansion (pack, args, complain, in_decl);
-    else
-      {
-	/* PACK can be {*args#0} whose args#0's value-expr refers to
-	   a partially instantiated closure.  Let tsubst find the
-	   fully-instantiated one.  */
-	gcc_assert (TREE_CODE (pack) == TREE_VEC);
-	pack = tsubst_tree_vec (pack, args, complain, in_decl);
-      }
-    defer_postcondition_pack_index_check = save;
-  }
+  if (PACK_EXPANSION_P (pack))
+    pack = tsubst_pack_expansion (pack, args, complain, in_decl);
+  else
+    {
+      /* PACK can be {*args#0} whose args#0's value-expr refers to
+	 a partially instantiated closure.  Let tsubst find the
+	 fully-instantiated one.  */
+      gcc_assert (TREE_CODE (pack) == TREE_VEC);
+      pack = tsubst_tree_vec (pack, args, complain, in_decl);
+    }
   if (TREE_CODE (pack) == TREE_VEC && TREE_VEC_LENGTH (pack) == 0)
     {
       if (complain & tf_error)
@@ -15011,10 +15008,6 @@ tsubst_pack_index (tree t, tree args, tsubst_flags_t complain, tree in_decl)
   if (!value_dependent_expression_p (index) && TREE_CODE (pack) == TREE_VEC)
     {
       r = pack_index_element (index, pack, parenthesized_p, complain);
-      /* Now that an element is selected, apply the deferred postcondition
-	 const check to the parameters it actually odr-uses.  */
-      if (flag_contracts && TREE_CODE (t) == PACK_INDEX_EXPR)
-	check_selected_pack_index_params (r, cp_expr_loc_or_input_loc (t));
     }
   else
     r = make_pack_index (pack, index);
@@ -23933,8 +23926,6 @@ tsubst_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 	if (REF_PARENTHESIZED_P (t))
 	  /* force_paren_expr can also create a VIEW_CONVERT_EXPR.  */
 	  RETURN (finish_parenthesized_expr (op));
-
-	check_param_in_postcondition (op, EXPR_LOCATION (t));
 
 	if (flag_contracts && processing_contract_condition)
 	    op = constify_contract_access (op);
