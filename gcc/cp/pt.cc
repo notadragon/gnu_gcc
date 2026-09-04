@@ -15916,6 +15916,13 @@ tsubst_function_decl (tree t, tree args, tsubst_flags_t complain,
   /* The parms have now been substituted, check for incorrect const cases.  */
   check_postconditions_in_redecl (t, r);
 
+  /* [dcl.contract.func]/7 constrains the corresponding parameter on ALL
+     declarations, and a declaration whose parameter type was dependent could
+     not be judged when it was merged away.  Now that the arguments are known,
+     finish those (PR c++/127196).  */
+  if (flag_contracts)
+    check_postcondition_redecl_parm_types (t, r, args);
+
   if (DECL_FRIEND_CONTEXT (t))
     SET_DECL_FRIEND_CONTEXT (r,
 			     tsubst (DECL_FRIEND_CONTEXT (t),
