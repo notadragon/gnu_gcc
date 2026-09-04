@@ -1408,6 +1408,102 @@ view_as_const (tree decl)
   return decl;
 }
 
+/* True if DECL is declared in one of the binding levels between the current
+   one and CONTRACT_LEVEL, exclusive of CONTRACT_LEVEL itself -- that is,
+   inside a lambda that appears in the predicate rather than outside the
+   predicate.  [expr.prim.id.unqual]/3+d only constifies a variable "declared
+   outside of C".  */
+
+static bool
+declared_inside_contract_predicate_p (tree decl,
+				      cp_binding_level *contract_level)
+{
+  for (cp_binding_level *b = current_binding_level;
+       b && b != contract_level;
+       b = b->level_chain)
+    for (tree t = b->names; t; t = DECL_CHAIN (t))
+      if (t == decl)
+	return true;
+  return false;
+}
+
+/* True if DECL, named at the current point, must be constified because it is
+   named from inside a LAMBDA appearing in a contract predicate.
+
+   processing_contract_condition only tests whether the INNERMOST binding
+   level is the contract scope, so it is false as soon as a lambda in the
+   predicate pushes its own scopes -- which left a variable named there
+   unconstified even though [expr.prim.id.unqual]/3+d covers it.  The
+   paragraph's own example is explicit about this: given a namespace-scope
+   `int n`, `pre([=,&i,*this] mutable { ++n; ... }())` marks `++n` an error.
+
+   This is deliberately additive: when the innermost level IS the contract
+   scope, nothing here runs and the existing path is unchanged.
+
+   Two exemptions keep the rest of that example working:
+
+     * A lambda CAPTURE PROXY is not the variable; the id-expression denotes a
+       member of the closure type, which the example marks OK (`++p`, `++r`).
+       A captured entity that must be const already is -- the capture
+       initializer was constified out in the enclosing predicate, which is why
+       `++i` on a by-reference capture is an error for its own reason.
+     * An entity DECLARED INSIDE the predicate -- a local of the lambda -- is
+       not "declared outside of C" (`++j`, `++k` in the example).
+
+   Members reached through a captured `*this` (`++this->z`, `++z`) never come
+   here: they are FIELD_DECLs on the member-access path, not variables.  */
+
+static bool
+constify_from_lambda_in_predicate_p (tree decl)
+{
+  if (processing_contract_condition)
+    return false;
+
+  cp_binding_level *contract_level = NULL;
+  for (cp_binding_level *b = current_binding_level; b; b = b->level_chain)
+    {
+      if (b->kind == sk_contract)
+	{
+	  contract_level = b;
+	  break;
+	}
+      /* A contract scope is inside a function; reaching namespace scope means
+	 there is none enclosing us.  */
+      if (b->kind == sk_namespace)
+	return false;
+    }
+  if (!contract_level)
+    return false;
+
+  /* Reach the underlying declaration: the caller may hand us a location
+     wrapper, or a dereference of a reference (including a by-reference
+     capture), and is_capture_proxy asserts on the former.  */
+  tree d = decl;
+  STRIP_ANY_LOCATION_WRAPPER (d);
+  if (REFERENCE_REF_P (d))
+    {
+      d = TREE_OPERAND (d, 0);
+      STRIP_ANY_LOCATION_WRAPPER (d);
+    }
+  if (!DECL_P (d))
+    return false;
+
+  if (is_capture_proxy (d))
+    return false;
+
+  return !declared_inside_contract_predicate_p (d, contract_level);
+}
+
+/* True if naming DECL at the current point is a use from inside a contract
+   predicate that [expr.prim.id.unqual]/3+d constifies.  */
+
+bool
+constify_in_contract_predicate_p (tree decl)
+{
+  return (processing_contract_condition
+	  || constify_from_lambda_in_predicate_p (decl));
+}
+
 /* Constify access to DECL from within the contract condition.
 
    P3098: Postcondition capture VAR_DECLs are exempt from const-ification.

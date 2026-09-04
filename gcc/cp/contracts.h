@@ -200,6 +200,7 @@ extern tree invalidate_contract			(tree);
 extern tree copy_and_remap_contracts		(tree, tree, contract_match_kind = cmk_all);
 extern void diagnose_coroutine_postcondition_params (tree);
 extern tree constify_contract_access		(tree);
+extern bool constify_in_contract_predicate_p	(tree);
 extern tree view_as_const			(tree);
 
 extern void set_fn_contract_specifiers		(tree, tree);
