@@ -31,12 +31,12 @@
 //   | 1    | `pre`, non-generic lambda               | `expand_expr_real_1` -- the predicate's `b` has no RTL in this function |
 //   | 2    | `pre`, generic lambda                   | `tsubst_expr` `gcc_assert (cp_unevaluated_operand)` -- `retrieve_local_specialization` cannot find the pattern's `b` |
 //   | 3    | `post` with a result name, ONE instantiation  | `rebuild_postconditions` `gcc_checking_assert (!DECL_CONTEXT (oldvar) \|\| DECL_CONTEXT (oldvar) == fndecl)`.  **CHECKING BUILDS ONLY** |
-//   | 4    | `post` with a result name, TWO instantiations | `tsubst_expr`.  **RELEASE BUILDS TOO** -- face 3 silently reparents the pattern's result variable onto the first instantiation, and the second one then trips over it |
+//   | 4    | `post` with a result name, TWO instantiations | `rebuild_postconditions`, same assertion as face 3.  **CHECKING BUILDS ONLY** -- face 3 silently reparents the pattern's result variable onto the first instantiation, and the second one then trips over it |
 //
-// Face 4 is the one that makes the postcondition half reportable rather than a
-// checking-build curiosity: `g++ 16.2.0` compiles a single instantiation
-// cleanly AND RUNS IT CORRECTLY (verified: the postcondition sees the right
-// value), then ICEs on the second instantiation of the very same template.
+// Face 4 does NOT reach an ICE on stock `g++ 16.2.0` -- confirmed clean for
+// every `post` shape, matching the matrix below.  It only ICEs on a checking
+// build (`g++-trunk` with `--enable-checking`), where the second
+// instantiation trips the same `rebuild_postconditions` assertion as face 3.
 //
 // PROVENANCE: UPSTREAM'S, measured 2026-09-02 -- identical on stock
 // `g++ 16.2.0`, on `g++-trunk` (17.0.0 20260901) and on our branch, at the

@@ -3,6 +3,8 @@
 **Status:** Fixed here (commit `3092d1ee80a`)
 **Component:** c++ / contracts
 **Upstream Link:** [PR124395](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=124395) (also duplicates PR126837, PR126836)
+**Affects:** stock g++ 16.2.0, trunk; originally confirmed via public
+Compiler Explorer, 2026-08-20
 
 ## Bug Report
 

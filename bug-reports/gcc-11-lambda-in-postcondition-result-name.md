@@ -2,7 +2,9 @@
 
 **Status:** Fixed here (commit `bb488b220c0`)
 **Component:** c++ / parser
-**Upstream Link:** —
+**Upstream Link:** --
+**Affects:** stock g++ 16.2.0, trunk (17.0.0 20260901); g++ 15.3.0 predates
+the `post` syntax entirely and rejects it outright
 
 ## Bug Report
 

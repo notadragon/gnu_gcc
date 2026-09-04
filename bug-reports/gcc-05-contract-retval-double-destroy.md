@@ -2,7 +2,10 @@
 
 **Status:** Fixed here (commit `6e5a47c2a39`)
 **Component:** c++ / contracts
-**Upstream Link:** —
+**Upstream Link:** --
+**Affects:** stock g++ 16.2.0, trunk; also reproduces on this branch's
+pre-fix baseline, whose relevant functions are byte-identical to trunk; not
+independently confirmed on public Compiler Explorer
 
 ## Bug Report
 

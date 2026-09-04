@@ -1,4 +1,4 @@
-// xobj-this-in-declaration.cpp -- no contracts involved, plain C++23.
+// gcc-17-this-in-xobj-declaration.cpp -- no contracts involved, plain C++23.
 //
 // [expr.prim.this]/3 (as amended by P0847R7): the keyword `this` "shall not
 // appear within the declaration of either a static member function or an
@@ -63,6 +63,9 @@ struct S
 #elif CASE == 10
   void h () noexcept (noexcept (this->x));
 #elif CASE == 11
+  // Note: the requires-clause rows (CASE 3, 7, 11) are rejected by g++ 16,
+  // g++ trunk, clang 22 and clang trunk alike, so they are a separate
+  // question about requires-clauses and not part of this bug.
   void h ()
     requires (sizeof (this) > 0);
 #else

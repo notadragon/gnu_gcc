@@ -3,9 +3,9 @@
 // GCC-9: nested [[assume]] leaks the inner one's side effects into the
 // enclosing constant evaluation.
 //
-// (Numbered 9, not 8: TODO.md already calls the -std=c++29 libcontracts link
-// gap "GCC-8", and that one is OURS and owes no upstream report, so reusing
-// the number here would collide with it.)
+// (Numbered 9, not 8: the -std=c++29 libcontracts link gap is already
+// tracked internally as GCC-8, and that one is OURS and owes no upstream
+// report, so reusing the number here would collide with it.)
 //
 //   g++ -std=c++23 gcc-09-nested-assume-side-effect-leak.cpp -fsyntax-only
 //   -> static assertion failed: nested: modification leaked out of [[assume]]
@@ -15,12 +15,13 @@
 // the branch adds a second user of the machinery below and so reaches it far
 // more easily, but does not cause it.
 //
-// PROVENANCE: MEASURED, not inferred.  Reproduces on stock g++ 14.4.0,
-// 15.3.0 and 16.2.0 (three shipped releases) as well as on trunk; the faulty
-// line is byte-identical in upstream/master and the P3850 branch does not
-// touch it.  Clang is CORRECT here: stock clang++ 19.1.0 and 22.1.6, and our
-// branch clang, all roll the modification back -- and note HOW: Clang declines
-// to evaluate a side-effecting assumption at all, saying so under -Wassume
+// PROVENANCE: MEASURED, not inferred.  Reproduces on stock g++ 13.4.0,
+// 14.4.0, 15.3.0 and 16.2.0 (four shipped releases) as well as on trunk; the
+// faulty line is byte-identical in upstream/master and the P3850 branch does
+// not touch it.  Clang is CORRECT here: stock clang++ 19.1.0 and 22.1.6, and
+// our branch clang, all roll the modification back -- and note HOW: Clang
+// declines to evaluate a side-effecting assumption at all, saying so under
+// -Wassume
 // ("assumption is ignored because it contains (potential) side-effects"),
 // which sidesteps the whole question rather than solving it the way GCC does.
 //

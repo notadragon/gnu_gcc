@@ -2,7 +2,11 @@
 
 **Status:** Open
 **Component:** c++ / constexpr
-**Upstream Link:** —
+**Upstream Link:** --
+**Affects:** measured against this branch's GCC and Clang builds
+(2026-08-25), not an independent stock build; stock g++ 13.3 rejects the
+program, but for an unrelated reason (virtual base classes were not yet
+allowed in a constexpr constructor at all)
 
 ## Bug Report
 
@@ -10,11 +14,10 @@ The constant evaluator does not diagnose forming the address of a
 non-static member or base before a non-trivial constructor begins
 ([class.cdtor]/1, /3). GCC additionally fails to diagnose even the one
 shape Clang catches, because GCC never performs a dynamic virtual-base
-conversion when the most-derived type is statically known — it folds
-straight to a constant offset. The following is copied verbatim (per the
-task's data table instruction) from "The report to write" section of
-`notadragon_wg21`'s `src/pubs/impl/p3850impl/gcc-bugs/pending_reports.md`,
-under the GCC-2 entry:
+conversion when the most-derived type is statically known -- it folds
+straight to a constant offset. The following report text was drafted after
+reading [class.cdtor] directly. (The table it refers to as "the table
+above" is reproduced further down in this file.)
 
 > **The report to write.**  Lead with the rule and the table, in that order:
 >
@@ -58,24 +61,25 @@ in this directory.
 
 ## Our Fix
 
-None — deliberately. This is a core-language constant-evaluator change
+None -- deliberately. This is a core-language constant-evaluator change
 owed to the compiler, not something to patch on this branch. This is not
 contracts-related at all (pure core-language constexpr; found only because
 contracts work led here), so it is filable against both GCC and LLVM today.
 Clang's counterpart is CLANG-1 in the `llvm_llvm-project` fork, whose row
-(a) has already been fixed there — that fix does not close rows (b) or (c)
+(a) has already been fixed there -- that fix does not close rows (b) or (c)
 on Clang either.
 
 ## Notes
 
 Scope decision taken by the user, 2026-09-04: report the full gap (rows (b)
-and (c)), not just the one row ((a)) where GCC and Clang currently differ —
+and (c)), not just the one row ((a)) where GCC and Clang currently differ --
 narrowly reporting only (a) would describe the symptom that happens to be
 visible rather than the actual defect, and would misdescribe GCC's reason
 for missing (a). Send the same report to LLVM as well, adjusted: Clang
 rejects (a) and accepts (b) and (c), so its gap is the same two rows, and
 its (a) is incidental to the virtual-base-offset path rather than a general
-check. See `notadragon_wg21`'s
+check. Tracked as CLANG-9 in the `llvm_llvm-project` fork. See
+`notadragon_wg21`'s
 `src/pubs/impl/p3850impl/gcc-bugs/pending_reports.md` (GCC-2 entry) for the
 full analysis this report is drawn from, including "Why GCC does not catch
 (a)".

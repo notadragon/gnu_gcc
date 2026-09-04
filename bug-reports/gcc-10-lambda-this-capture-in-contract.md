@@ -2,7 +2,9 @@
 
 **Status:** Fixed here (commit `cbccf256658`)
 **Component:** c++ / contracts
-**Upstream Link:** —
+**Upstream Link:** --
+**Affects:** stock g++ 16.2.0 (measured, emits identical wrong code);
+byte-identical source on trunk (not independently run)
 
 ## Bug Report
 

@@ -3,6 +3,9 @@
 **Status:** Fixed here (commit `f3ff6a8e22f`)
 **Component:** c++ / contracts
 **Upstream Link:** [PR126897](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126897)
+**Affects:** measured against this branch's pre-fix baseline only;
+stock-version matrix not recorded (matches a pre-existing upstream report,
+PR126897, filed independently)
 
 ## Bug Report
 
@@ -22,7 +25,7 @@ in this directory.
 
 Moved the [dcl.contract.func]/7 odr-use check from `finish_id_expression`
 to a walk over the *finished* predicate that models potential-results (not
-subtrees — `(f(b), true)` still correctly odr-uses `b` as a call argument),
+subtrees -- `(f(b), true)` still correctly odr-uses `b` as a call argument),
 retiring `defer_postcondition_pack_index_check` as a byproduct.
 
 ## Notes

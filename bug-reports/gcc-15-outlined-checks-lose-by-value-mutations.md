@@ -2,7 +2,8 @@
 
 **Status:** Fixed here (commit `0377d4408ab`)
 **Component:** c++ / contracts
-**Upstream Link:** —
+**Upstream Link:** --
+**Affects:** stock g++ 16.2.0, trunk
 
 ## Bug Report
 

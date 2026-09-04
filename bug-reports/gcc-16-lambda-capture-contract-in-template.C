@@ -1,4 +1,4 @@
-// GCC-16: contract on a lambda that captures, inside a template -- segfault.
+// GCC-16: contract on a lambda that captures, inside a template -- ICE.
 //
 // Extracted from the fix commit's test,
 // gcc/testsuite/g++.dg/contracts/cpp26/lambda-capture-contract-in-template.C
@@ -29,8 +29,8 @@
       another for a postcondition naming a variable, but none for a
       precondition naming a capture.
 
-   Before the fix this crashed with a segfault on stock 16.2.0 and on trunk,
-   so nothing here is branch-specific.
+   Before the fix this crashed with an internal compiler error (ICE) on
+   stock 16.2.0 and on trunk, so nothing here is branch-specific.
 
    Every check reports the value the PREDICATE saw.  That matters most for
    `copy_not_alias' below: a by-value capture is a copy taken when the closure

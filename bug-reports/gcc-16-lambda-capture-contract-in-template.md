@@ -1,13 +1,15 @@
-# GCC-16: Contract on a lambda that captures, inside a template, segfaults
+# GCC-16: Contract on a lambda that captures, inside a template, ICEs
 
 **Status:** Fixed here (commit `1f764681499`)
 **Component:** c++ / contracts
-**Upstream Link:** —
+**Upstream Link:** --
+**Affects:** stock g++ 16.2.0, trunk (17.0.0 20260901)
 
 ## Bug Report
 
 A contract predicate on a lambda that captures a local (by value or
-reference) segfaults when the lambda is written inside an instantiated
+reference) hits an internal compiler error (ICE) when the lambda is written
+inside an instantiated
 template, because nothing maps the pattern lambda's capture proxy to the
 instantiation's, and `process_outer_var_ref` has no carve-out for a capture
 proxy inside a contract condition. This reproduces on stock g++ 16.2.0 and
@@ -35,5 +37,6 @@ The reproducer was extracted from the fix commit's own DejaGnu test,
 The DejaGnu `dg-do run`, `dg-additional-options`, and `dg-skip-if` directive
 lines were stripped; the C++ source (including the test's own commentary
 comment block) was kept as-is. Requires `-fcontracts
--fcontract-evaluation-semantic=observe` and a hosted `<contracts>` header
-(C++26) to build and run.
+-fcontract-evaluation-semantic=observe`, linked with `-lstdc++exp`, and a
+hosted `<contracts>` header (C++26) to build and run (the stripped
+`dg-skip-if` noted this needs a hosted libstdc++ for `stdc++exp`).

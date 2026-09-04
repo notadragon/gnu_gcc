@@ -23,8 +23,8 @@
 //
 // FOUND 2026-09-02 while implementing [expr.prim.lambda.capture]/3.3 capture
 // support for lambdas in contract predicates (PR117435); it surfaced as a
-// spurious failure in that work's test and was isolated out of it.  See
-// ../final-passes/RESUME-lambda-capture-in-contracts.md.
+// spurious failure in that work's test and was isolated out of it, tracked
+// internally as GCC-11.
 
 bool ok () { return true; }
 

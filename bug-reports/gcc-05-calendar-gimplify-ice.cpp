@@ -2,7 +2,7 @@
 //
 // Found 2026-08-24 during the same `-k`/keep-going clean GCC build as GCC-4
 // (assert2pre `bsl`/`bdl`/`bal` migration, `dbg_64_cpp26_contracts` ufid).
-// Tracked in ../TODO.md.  MINIMIZED 2026-08-24 (see below) -- the entry
+// Tracked internally as GCC-5.  MINIMIZED 2026-08-24 (see below) -- the entry
 // below is corrected from the original write-up in two ways: the "function
 // at the crash site" quote named the WRONG overload (see note), and only
 // ONE precondition turns out to be needed, not several.
@@ -24,8 +24,9 @@
 // NEEDS NO EXTENSION OF OURS: reproduces with plain `-fcontracts` (no
 // `-fcontracts-p3850`), at `-std=c++23` as well as `-std=c++26`.  Like
 // GCC-4, `-fsyntax-only` alone compiles clean -- the crash needs the
-// function to be emitted (`-c`).  Contracts are in GCC trunk, so on the
-// provenance checklist in `pending_reports.md` this is filable.  PROVENANCE
+// function to be emitted (`-c`).  Contracts are in GCC trunk, so per the
+// provenance checklist used to confirm this is upstream's, not ours, this
+// is filable.  PROVENANCE
 // SETTLED 2026-08-25: upstream's, not ours -- both halves of the mechanism
 // are byte-identical in trunk (`master:gcc/cp/contracts.cc:1372` and
 // `master:gcc/cp/except.cc:1379`).  Still not run against a trunk build or
@@ -61,11 +62,11 @@
 // destructor on the return type.
 //
 // FIXED 2026-08-25, gnu_gcc `6e5a47c2a39`; test
-// `g++.dg/contracts/cpp26/contract-retval-sentinel.C`.  See GCC-5 in
-// `pending_reports.md` for the full write-up, the provenance finding
-// (upstream's -- both halves are byte-identical in trunk) and the still-owed
-// upstream filing.  TWO CORRECTIONS to the analysis below, both established
-// 2026-08-25:
+// `g++.dg/contracts/cpp26/contract-retval-sentinel.C`.  See
+// `gcc-05-contract-retval-double-destroy.md` in this directory for the full
+// write-up, the provenance finding (upstream's -- both halves are
+// byte-identical in trunk) and the still-owed upstream filing.  TWO
+// CORRECTIONS to the analysis below, both established 2026-08-25:
 //
 //   * "NOT YET LOCALIZED: which binding scope contracts push/pop
 //     differently" -- the question was wrong.  Contracts push nothing

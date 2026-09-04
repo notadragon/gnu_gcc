@@ -2,7 +2,9 @@
 
 **Status:** Open
 **Component:** c++ / declarations
-**Upstream Link:** —
+**Upstream Link:** --
+**Affects:** stock g++ 14.4.0, 15.3.0, 16.2.0, trunk (13.4.0 predates
+explicit object parameters and rejects the reproducer outright)
 
 ## Bug Report
 
@@ -10,9 +12,10 @@
 explicit-object member function, but GCC accepts it in the trailing return
 type (e.g. `auto f (this S &self) -> decltype (this->x)`), while correctly
 rejecting the identical shape on a `static` member function (the control).
-This is not contracts-related; it reproduces on stock g++ from 13.4.0
-through trunk. It shares its root cause with CLANG-8 in the
-`llvm_llvm-project` fork — both reports should be filed together,
+This is not contracts-related; it reproduces on stock g++ from 14.4.0
+through trunk (13.4.0 predates explicit object parameters and rejects the
+reproducer outright). It shares its root cause with CLANG-8 in the
+`llvm_llvm-project` fork -- both reports should be filed together,
 cross-referencing each other.
 
 ## Reproducer
@@ -22,7 +25,7 @@ in this directory.
 
 ## Our Fix
 
-None — genuinely upstream's. Found while fixing the contracts-specific
+None -- genuinely upstream's. Found while fixing the contracts-specific
 analog; that fix was deliberately kept at the contracts call site so this
 shared, non-contracts behavior stays reproducible and untouched.
 

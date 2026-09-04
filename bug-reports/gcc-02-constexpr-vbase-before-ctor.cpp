@@ -31,8 +31,8 @@
 // non-trivial constructor are accepted by GCC *and* Clang alike.  Reading the
 // member rather than taking its address is rejected by both.  So this file
 // captures the one shape where the two disagree, not the boundary of the
-// defect.  See GCC-2 in `pending_reports.md` for the table and for the scope
-// decision owed before filing.
+// defect.  See `gcc-02-constexpr-vbase-before-ctor.md` in this directory for
+// the table and for the scope decision owed before filing.
 //
 // NO CONTRACTS ARE INVOLVED.  This is a pure core-language constexpr
 // evaluator issue.
@@ -42,8 +42,9 @@
 //   note: dynamic_cast of object outside its lifetime is not allowed in a
 //         constant expression
 // (Clang only started rejecting it after llvm 8b33919f7aea, our own fix for
-// the mirror-image Clang bug -- see ../clang-bugs/pending_reports.md CLANG-1.
-// GCC and Clang were BOTH under-diagnosing here; only Clang has been fixed.)
+// the mirror-image Clang bug -- tracked as CLANG-1 (and, for the full-gap
+// report, CLANG-9) in the `llvm_llvm-project` fork.  GCC and Clang were BOTH
+// under-diagnosing here; only Clang has been fixed.)
 //
 // Not a trunk regression.  Older GCC (13.3) rejects this program, but for an
 // unrelated reason -- it did not allow virtual base classes in a constexpr
