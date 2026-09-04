@@ -5164,7 +5164,16 @@ finish_id_expression_1 (tree id_expression,
 	}
       else if (TREE_CODE (decl) == FIELD_DECL)
 	{
+	  /* CONTRACT_CLASS_PTR is only set for a constructor precondition or a
+	     destructor postcondition, where a member must be named through an
+	     explicit 'this'.  Test it for non-nullness first: it and
+	     CURRENT_CLASS_PTR are BOTH null in an explicit object member
+	     function, which has no 'this' at all, and comparing them alone made
+	     this constructor/destructor diagnostic fire there.  Falling through
+	     instead gives such a function the same "invalid use of non-static
+	     data member" diagnostic its body already gets.  */
 	  if (flag_contracts && processing_contract_condition
+	      && contract_class_ptr
 	      && contract_class_ptr == current_class_ptr)
 	    {
 	      error ("%qD 'this' required when accessing a member within a "
@@ -5194,8 +5203,10 @@ finish_id_expression_1 (tree id_expression,
 		      && DECL_FUNCTION_MEMBER_P (first_fn)
 		      && !shared_member_p (decl))))
 	    {
-	      /* A set of member functions.  */
+	      /* A set of member functions.  See the FIELD_DECL case above for
+		 why CONTRACT_CLASS_PTR is tested for non-nullness.  */
 	      if (flag_contracts && processing_contract_condition
+		  && contract_class_ptr
 		  && contract_class_ptr == current_class_ptr)
 		{
 		  error ("%qD 'this' required when accessing a member within a "

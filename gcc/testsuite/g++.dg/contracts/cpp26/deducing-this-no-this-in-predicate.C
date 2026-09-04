@@ -3,19 +3,17 @@
 // it.  Naming `this` -- explicitly, or implicitly by naming a non-static data
 // member unqualified, which means (*this).m -- must be rejected.
 //
-// GCC rejects both.  Clang accepts both and then asserts in CodeGen
-// (LoadCXXThis: "no 'this' value for this function"), while correctly
-// rejecting the identical use in the function BODY -- so the hole there is
-// contracts-specific.  The Clang mirror of this file is XFAILed.
-//
-// The unqualified-member diagnostics below are DEFECTIVE, and the xfail'd
-// expectations record what they should say.  GCC reports every one of them as
-// "'this' required when accessing a member within a constructor precondition
-// or destructor postcondition contract check", but none of these functions is
-// a constructor or a destructor -- each is an explicit object member function,
-// for which GCC already has the right message and uses it for the explicit
-// `this` case.  It is wrong in a precondition, in a postcondition, and in an
-// assertion-statement in the body alike.  When that is fixed, drop the xfails.
+// The unqualified-member cases used to be reported as "'this' required when
+// accessing a member within a constructor precondition or destructor
+// postcondition contract check", for a function that is neither a constructor
+// nor a destructor.  contract_class_ptr is set to current_class_ptr only for a
+// constructor precondition or destructor postcondition and to NULL_TREE
+// otherwise, and in an explicit object member function current_class_ptr is
+// ALSO null, so the guard `contract_class_ptr == current_class_ptr` in
+// cp/semantics.cc was true by coincidence.  Testing it for non-nullness lets
+// the case fall through to the ordinary path, which gives it the same
+// diagnostic the function BODY already gives -- consistency with the body
+// being the point, rather than a new bespoke message.
 //
 // { dg-do compile { target c++26 } }
 // { dg-additional-options "-fcontracts" }
@@ -39,15 +37,13 @@ struct ExplicitThis : S
 // An unqualified non-static data member in a precondition.
 struct ImplicitThisPre : S
 {
-  void f (this ImplicitThisPre &self) pre (x == 0); // { dg-error "'this' required when accessing a member within a constructor precondition or destructor postcondition contract check" }
-  // { dg-error "'this' is unavailable for explicit object member functions" "unqualified member should use the explicit-object-member-function message" { xfail *-*-* } .-1 }
+  void f (this ImplicitThisPre &self) pre (x == 0); // { dg-error "invalid use of non-static data member 'S::x'" }
 };
 
 // The same in a postcondition.
 struct ImplicitThisPost : S
 {
-  int f (this ImplicitThisPost &self) post (r : x == r); // { dg-error "'this' required when accessing a member within a constructor precondition or destructor postcondition contract check" }
-  // { dg-error "'this' is unavailable for explicit object member functions" "unqualified member should use the explicit-object-member-function message" { xfail *-*-* } .-1 }
+  int f (this ImplicitThisPost &self) post (r : x == r); // { dg-error "invalid use of non-static data member 'S::x'" }
 };
 
 // The same in an assertion-statement in the body.
@@ -56,15 +52,24 @@ struct ImplicitThisAssert : S
   void
   f (this ImplicitThisAssert &self)
   {
-    contract_assert (x == 0); // { dg-error "'this' required when accessing a member within a constructor precondition or destructor postcondition contract check" }
-    // { dg-error "'this' is unavailable for explicit object member functions" "unqualified member should use the explicit-object-member-function message" { xfail *-*-* } .-1 }
+    contract_assert (x == 0); // { dg-error "invalid use of non-static data member 'S::x'" }
   }
 };
 
-// CONTROL: the explicit object parameter itself is of course usable.
+// An unqualified MEMBER FUNCTION call in a predicate.  This is the second of
+// the two guards in cp/semantics.cc, and it went wrong the same way.
+struct ImplicitThisCall : S
+{
+  bool ok () const;
+  void f (this ImplicitThisCall &self) pre (ok ()); // { dg-error "cannot call member function 'bool ImplicitThisCall::ok\\(\\) const' without object" }
+};
+
+// CONTROL: the explicit object parameter itself is of course usable, for a
+// member function as well as for data.
 struct ViaSelf : S
 {
-  void f (this ViaSelf &self) pre (self.x == 0);
+  bool ok () const;
+  void f (this ViaSelf &self) pre (self.x == 0) pre (self.ok ());
 };
 
 // CONTROL: an ordinary (implicit object) member function may name `this` and
