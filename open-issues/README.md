@@ -21,12 +21,18 @@ IDs come from one sequence per compiler, shared with `bug-reports/`, and are
 never reused. Allocate from the line above and increment it. Both tables
 delete rows, so the highest ID visible in either is not a reliable counter.
 
+`--` in the Upstream column would mean the issue is ours alone with nothing
+upstream to link. **No row here qualifies**: contracts are upstream in GCC, so
+every one of these is filable. (On the Clang side it does apply, to
+contracts-dependent issues.) `None found (searched <date>)` means Bugzilla was
+searched and nothing matched; `UNKNOWN` means nobody has looked.
+
 **Kind** is one of `defect` (wrong, and we intend to fix it), `deferred`
 (known, deliberately not fixed yet) or `divergence` (GCC and Clang disagree
 and the standard does not clearly settle which is right).
 
 | ID | Symptom | Kind | Workaround | Upstream | Details |
 |----|---------|------|------------|----------|---------|
-| GCC-2 | Constant evaluation accepts forming the address of a member, or of a virtual base, before its constructor begins | defect | none; the program is accepted silently | UNKNOWN | [../bug-reports/gcc-02-constexpr-vbase-before-ctor.md](../bug-reports/gcc-02-constexpr-vbase-before-ctor.md) |
-| GCC-17 | `this` is accepted in the trailing return type of an explicit-object member function, where it is ill-formed | defect | name the object parameter instead, `decltype (self.x)` | UNKNOWN | [../bug-reports/gcc-17-this-in-xobj-declaration.md](../bug-reports/gcc-17-this-in-xobj-declaration.md) |
-| GCC-27 | Two friend declarations of one function with contradictory contracts are accepted silently | deferred | declare the function at namespace scope and befriend that declaration | -- | [gcc-27-deferred-friend-contract-mismatch.md](gcc-27-deferred-friend-contract-mismatch.md) |
+| GCC-2 | Constant evaluation accepts forming the address of a member, or of a virtual base, before its constructor begins | defect | none; the program is accepted silently | [PR126357](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126357) (partial) | [../bug-reports/gcc-02-constexpr-vbase-before-ctor.md](../bug-reports/gcc-02-constexpr-vbase-before-ctor.md) |
+| GCC-17 | `this` is accepted in the trailing return type of an explicit-object member function, where it is ill-formed | defect | name the object parameter instead, `decltype (self.x)` | None found (searched 2026-09-05) | [../bug-reports/gcc-17-this-in-xobj-declaration.md](../bug-reports/gcc-17-this-in-xobj-declaration.md) |
+| GCC-27 | Two friend declarations of one function with contradictory contracts are accepted silently | deferred | declare the function at namespace scope and befriend that declaration | None found (searched 2026-09-05) | [../bug-reports/gcc-27-deferred-friend-contract-mismatch.md](../bug-reports/gcc-27-deferred-friend-contract-mismatch.md) |
