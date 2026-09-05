@@ -15,7 +15,7 @@ fixed here, and a row there survives until *upstream* fixes it. An upstream
 bug we have not yet fixed appears in both; its single writeup lives in
 `bug-reports/` and the row below links to it.
 
-**Next ID:** GCC-33
+**Next ID:** GCC-34
 
 IDs come from one sequence per compiler, shared with `bug-reports/`, and are
 never reused. Allocate from the line above and increment it. Both tables

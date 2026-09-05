@@ -2,7 +2,14 @@
 
 **Status:** Fixed here (commit `1f764681499`)
 **Component:** c++ / contracts
-**Upstream Link:** --
+**Upstream Link:** [PR126038](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126038) -- correlated by the 2026-09-05
+sweep: a contract on a lambda capturing surrounding locals (by reference OR by
+value) ICEs stock trunk in `gimplify_var_or_parm_decl` and compiles clean
+here. The report supplies only a preprocessed attachment, so the shape was
+reconstructed from its prose description; it reproduces. Note the PR's own
+case needs no template, where this entry's title says one -- the template is
+not load-bearing, and the report is the broader statement of the same defect.
+
 **Affects:** stock g++ 16.2.0, trunk (17.0.0 20260901)
 
 ## Bug Report

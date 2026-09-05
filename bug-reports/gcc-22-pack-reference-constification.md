@@ -2,6 +2,11 @@
 
 **Status:** Fixed here (commit `ea65bf85250`)
 **Component:** c++ / contracts, constification
+**Also reported as:** [PR126039](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126039) -- a fold expression over a
+generic lambda's `auto&&...` pack, which produces the identical diagnostic
+("'const' qualifiers cannot be applied to 'auto:1&&'") and is fixed by the
+same change. Correlated 2026-09-05.
+
 **Upstream Link:** [PR126878](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126878) (also PR126039, same root cause via a generic lambda's `auto&&...`)
 **Affects:** stock g++ 16.2.0, trunk (17.0.0 20260901)
 

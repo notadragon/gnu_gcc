@@ -2,6 +2,12 @@
 
 **Status:** Fixed here (commit `25bec7a0e6f`)
 **Component:** c++ / contracts, declaration checking
+**Also reported as:** [PR125403](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=125403) -- the same defect reaching the
+user as an ICE rather than a missing diagnostic: `Foo() post(empty()) =
+default;` crashes stock trunk, where this branch reports "defaulted on its
+first declaration cannot have a function-contract-specifier". Correlated
+2026-09-05.
+
 **Upstream Link:** [PR124486](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=124486) (also PR125403, an ICE subsumed by the same fix)
 **Affects:** stock g++ 16.2.0, trunk (17.0.0 20260901)
 

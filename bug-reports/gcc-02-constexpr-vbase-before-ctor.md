@@ -2,9 +2,13 @@
 
 **Status:** Open
 **Component:** c++ / constexpr
-**Upstream Link:** UNKNOWN -- not contracts-dependent, so it would not surface
-in a Bugzilla search scoped to contracts terms; no dedicated search has been
-done for this one
+**Upstream Link:** [PR126357](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126357) -- **PARTIAL, not this bug.** That
+report is the same family (using a subobject before its initialization is not
+diagnosed in constant evaluation) but a different shape: it CALLS a member
+function before the base is initialized, where this one FORMS AN ADDRESS into
+a not-yet-constructed virtual base. Found by the 2026-09-05 sweep. Filing
+this one should cite 126357 as related rather than duplicate it; nothing
+covering the address-formation shape was found.
 **Affects:** measured against this branch's GCC and Clang builds
 (2026-08-25), not an independent stock build; stock g++ 13.3 rejects the
 program, but for an unrelated reason (virtual base classes were not yet

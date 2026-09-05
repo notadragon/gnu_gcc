@@ -3,7 +3,13 @@
 **Status:** Fixed here -- layer 1 in `e3c949476e4`, layer 2 in the commit
 that added this paragraph (`git log -- gcc/cp/semantics.cc`)
 **Component:** c++ / contracts, lambdas
-**Upstream Link:** UNKNOWN -- not yet filed
+**Upstream Link:** [PR117435](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=117435) -- **already filed, and it reports
+LAYER 2 as the primary symptom.** The reporter's ICE is
+`expand_expr_real_1, at expr.cc:11415` (the same assertion as ours, the line
+number having moved since), and their analysis reads "It would seem that x is
+not captured". Filed 2024, using the old `[[pre: ]]` attribute spelling, in
+which the capture parses and then fails in the middle end. Independent
+confirmation that the two layers are one bug. Correlated 2026-09-05.
 **Affects:** measured 2026-09-05 -- reproduces on stock g++ trunk with plain
 `-fcontracts`
 
