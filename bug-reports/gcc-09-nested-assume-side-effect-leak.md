@@ -2,7 +2,8 @@
 
 **Status:** Fixed here (commit `eb33a898bab`)
 **Component:** c++ / constexpr
-**Upstream Link:** --
+**Upstream Link:** None found. Searched 2026-09-05, including resolved
+bugs, on comment text `assume nested side effect constant evaluation`
 **Affects:** stock g++ 13.4.0, 14.4.0, 15.3.0, 16.2.0, trunk
 
 ## Bug Report

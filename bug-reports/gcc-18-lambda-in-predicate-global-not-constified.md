@@ -2,7 +2,8 @@
 
 **Status:** Fixed here (commit `5442adee87a`)
 **Component:** c++ / contracts
-**Upstream Link:** --
+**Upstream Link:** None found. Searched 2026-09-05, including resolved
+bugs, on comment text `contract lambda global variable const`
 **Affects:** stock g++ 16.2.0 and trunk (contracts not available before
 16.2.0; on 15.3.0 and earlier, `pre(...)` is not recognized and the
 reproducer fails to parse instead). Measured 2026-09-04 with the file's
