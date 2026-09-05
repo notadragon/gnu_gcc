@@ -2,7 +2,9 @@
 
 **Status:** Open
 **Component:** c++ / constexpr
-**Upstream Link:** --
+**Upstream Link:** UNKNOWN -- not contracts-dependent, so it would not surface
+in a Bugzilla search scoped to contracts terms; no dedicated search has been
+done for this one
 **Affects:** measured against this branch's GCC and Clang builds
 (2026-08-25), not an independent stock build; stock g++ 13.3 rejects the
 program, but for an unrelated reason (virtual base classes were not yet

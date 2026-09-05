@@ -2,7 +2,9 @@
 
 **Status:** Open
 **Component:** c++ / declarations
-**Upstream Link:** --
+**Upstream Link:** UNKNOWN -- not contracts-dependent, so it would not surface
+in a Bugzilla search scoped to contracts terms; no dedicated search has been
+done for this one
 **Affects:** stock g++ 14.4.0, 15.3.0, 16.2.0, trunk (13.4.0 predates
 explicit object parameters and rejects the reproducer outright)
 

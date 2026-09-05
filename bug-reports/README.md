@@ -9,7 +9,7 @@ it or whether it was ever formally filed.
 | Bug | Summary | Status | Upstream Link | Details |
 |-----|---------|--------|----------------|---------|
 | GCC-1 | Contract on a function with a variadic parameter pack ICEs or misattributes a diagnostic | Fixed here | [PR124395](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=124395) | [gcc-01-contract-pack-ice.md](gcc-01-contract-pack-ice.md) |
-| GCC-2 | Constant evaluator does not diagnose forming an address into an object before its constructor begins, for a virtual base | Open | -- | [gcc-02-constexpr-vbase-before-ctor.md](gcc-02-constexpr-vbase-before-ctor.md) |
+| GCC-2 | Constant evaluator does not diagnose forming an address into an object before its constructor begins, for a virtual base | Open | UNKNOWN | [gcc-02-constexpr-vbase-before-ctor.md](gcc-02-constexpr-vbase-before-ctor.md) |
 | GCC-3 | A contract condition that re-calls a constexpr function already called in the same constant evaluation is wrongly rejected as non-constant | Fixed here | [PR125459](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=125459) | [gcc-03-constexpr-repeat-call.md](gcc-03-constexpr-repeat-call.md) |
 | GCC-5 | Contract on a function returning a non-trivially-destructible class double-destroys the return value | Fixed here | -- | [gcc-05-contract-retval-double-destroy.md](gcc-05-contract-retval-double-destroy.md) |
 | GCC-9 | Nested `[[assume]]` leaks the inner operand's side effects during constant evaluation | Fixed here | -- | [gcc-09-nested-assume-side-effect-leak.md](gcc-09-nested-assume-side-effect-leak.md) |
@@ -20,7 +20,7 @@ it or whether it was ever formally filed.
 | GCC-14 | Garbage source location on a contract-capture diagnostic note | Fixed here | [PR126041](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126041) | [gcc-14-contract-capture-note-garbage-location.md](gcc-14-contract-capture-note-garbage-location.md) |
 | GCC-15 | Outlined contract checks lose by-value parameter/result mutations | Fixed here | -- | [gcc-15-outlined-checks-lose-by-value-mutations.md](gcc-15-outlined-checks-lose-by-value-mutations.md) |
 | GCC-16 | Contract on a capturing lambda inside an instantiated template segfaults | Fixed here | -- | [gcc-16-lambda-capture-contract-in-template.md](gcc-16-lambda-capture-contract-in-template.md) |
-| GCC-17 | `this` accepted in the trailing return type of an explicit-object member function | Open | -- | [gcc-17-this-in-xobj-declaration.md](gcc-17-this-in-xobj-declaration.md) |
+| GCC-17 | `this` accepted in the trailing return type of an explicit-object member function | Open | UNKNOWN | [gcc-17-this-in-xobj-declaration.md](gcc-17-this-in-xobj-declaration.md) |
 | GCC-18 | A predicate lambda naming a namespace-scope variable does not constify it | Fixed here | -- | [gcc-18-lambda-in-predicate-global-not-constified.md](gcc-18-lambda-in-predicate-global-not-constified.md) |
 | GCC-19 | A discarded comma operand in a postcondition is wrongly treated as odr-using a by-value parameter | Fixed here | [PR126897](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126897) | [gcc-19-postcondition-comma-odr-use.md](gcc-19-postcondition-comma-odr-use.md) |
 | GCC-20 | A pack of non-reference type named in a contract ICEs template substitution | Fixed here | [PR126804](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126804) | [gcc-20-pack-by-value-in-contract.md](gcc-20-pack-by-value-in-contract.md) |
