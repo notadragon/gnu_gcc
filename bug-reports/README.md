@@ -32,6 +32,31 @@ issues that never reproduce upstream -- see
 [`../open-issues/README.md`](../open-issues/README.md). That file also carries
 the `Next ID` line both directories allocate from.
 
+## Checking whether a row still belongs here
+
+The removal rule above -- a row goes when upstream fixes it -- has no
+automatic trigger: upstream closing a bug is silent from here, and re-running
+thirty reproducers by hand is a thing nobody does. [`verify.sh`](verify.sh)
+does it instead. It measures every reproducer against both stock upstream
+trunk and this branch, and prints only what has moved since the checked-in
+baseline in [`verify-expected.txt`](verify-expected.txt):
+
+```
+./verify.sh              # report anything that moved
+./verify.sh --record     # re-baseline, then review the git diff
+./verify.sh -v GCC-30    # show the diagnostics behind a moved digest
+```
+
+A move in the **stock** column is the event this table cares about. A move in
+the **branch** column is a regression or a fix here, and the Status column
+should follow it.
+
+Run it after every rebase, once the branch compiler is rebuilt *and* the stock
+nightly refreshed -- a stale nightly answers last week's question. The
+procedure is `notadragon_wg21`'s
+`src/pubs/impl/p3850impl/final-passes/rebase-runbook.md`; the cases and their
+flags are in [`verify-cases.txt`](verify-cases.txt).
+
 | Bug | Summary | Status | Upstream Link | Details |
 |-----|---------|--------|----------------|---------|
 | GCC-1 | Contract on a function with a variadic parameter pack ICEs or misattributes a diagnostic | Fixed here | [PR124395](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=124395) | [gcc-01-contract-pack-ice.md](gcc-01-contract-pack-ice.md) |

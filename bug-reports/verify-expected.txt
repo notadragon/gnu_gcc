@@ -1,0 +1,57 @@
+# Measured behaviour of every reproducer in this directory.
+#
+# Regenerate with ./verify.sh --record, and READ THE DIFF: a line
+# that moved in the STOCK column means upstream's behaviour changed,
+# which is the event that retires a row from README.md.  A line that
+# moved in the BRANCH column with stock unchanged is a regression
+# here, or a fix here, and the README Status column should follow.
+#
+# stock:  g++ (Compiler-Explorer-Build-gcc-3653b8dd68b0caf1c713058854d1efde9cc14329-binutils-2.44) 17.0.0 20260905 (experimental)
+# branch: g++ (GCC) 17.0.0 20260905 (experimental)
+# dated:  2026-09-05
+#
+# id | stock | branch
+GCC-1a|ice[1:bbb59b9c]|clean
+GCC-1b|ice[1:b4a674bf]|clean
+GCC-1c|error[2:27619e80]|clean
+GCC-2|clean|clean
+GCC-3|error[4:811ed23c]|clean
+GCC-5a|ice[1:53ebb4b5]|clean
+GCC-5b|clean exit:255 out:[]|clean exit:0 out:[]
+GCC-9|error[1:b12b4ccb]|clean
+GCC-10|clean exit:1 out:[body saw m = 2, predicate saw m = NNNN FAIL: predicate read the closure, not the object]|clean exit:0 out:[body saw m = 2, predicate saw m = 2]
+GCC-11a|error[2:7972a57b]|clean
+GCC-11b|error[11:146b59b0]|clean exit:0 out:[]
+GCC-12|clean exit:134 out:[contract violation in function int value_form() at gcc-12-result-binding-denotes-two-objects.cpp:104: same (r, &r) [assertion_kind: post, semantic: enforce, mod]|clean exit:0 out:[value = 7 &r taken directly = 0xADDR &r via const int& = 0xADDR same object? YES]
+GCC-13|ice[1:eb001340]|clean
+GCC-14|ice[2:f60a3f09]|error[2:011bd670]
+GCC-15a|clean exit:0 out:[]|clean exit:0 out:[]
+GCC-15b|clean exit:19 out:[]|clean exit:0 out:[]
+GCC-16|ice[1:36a65c4c]|clean
+GCC-17-1|clean|clean
+GCC-17-2|error[1:d7ef67de]|error[1:d7ef67de]
+GCC-17-3|error[1:a6c53d69]|error[1:a6c53d69]
+GCC-17-4|error[2:6be5f981]|error[2:6be5f981]
+GCC-17-5|error[2:827a517f]|error[2:827a517f]
+GCC-17-6|error[1:c9b1ec0b]|error[1:c9b1ec0b]
+GCC-17-7|error[2:327ddd16]|error[2:327ddd16]
+GCC-17-8|error[1:91ecafe4]|error[1:91ecafe4]
+GCC-17-9|clean|clean
+GCC-17-10|clean|clean
+GCC-17-11|error[1:78aa2eb7]|error[1:78aa2eb7]
+GCC-18|error[1:19ecdcb8]|error[2:f0606a72]
+GCC-19|error[48:1978ea89]|error[14:7a44c4b2]
+GCC-20|clean|clean
+GCC-21|link-error[0:da39a3ee]|clean
+GCC-22|error[5:a6117394]|clean
+GCC-23a|clean|error[5:cca34275]
+GCC-23b|error[2:7ebde49f]|error[2:7ebde49f]
+GCC-24|ice[1:b578db9f]|clean
+GCC-25|error[41:25b60ed6]|clean[2:4a8c2b88]
+GCC-26|error[8:42aa4b9c]|error[14:e3326c6a]
+GCC-27|clean|clean
+GCC-28|error[7:ba95260f]|error[10:7137c3e6]
+GCC-29|ice[1:7b2272ab]|clean
+GCC-30|error[2:b6ba1d03]|error[6:a8a02d7c]
+GCC-31|error[9:8bbe9f91]|clean
+GCC-33|ice[1:37dff941]|clean
