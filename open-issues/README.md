@@ -28,11 +28,16 @@ contracts-dependent issues.) `None found (searched <date>)` means Bugzilla was
 searched and nothing matched; `UNKNOWN` means nobody has looked.
 
 **Kind** is one of `defect` (wrong, and we intend to fix it), `deferred`
-(known, deliberately not fixed yet) or `divergence` (GCC and Clang disagree
-and the standard does not clearly settle which is right).
+(known, currently out of scope) or `divergence` (GCC and Clang disagree and
+the standard does not clearly settle which is right).
 
-| ID | Symptom | Kind | Workaround | Upstream | Details |
-|----|---------|------|------------|----------|---------|
-| GCC-2 | Constant evaluation accepts forming the address of a member, or of a virtual base, before its constructor begins | defect | none; the program is accepted silently | [PR126357](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126357) (partial) | [../bug-reports/gcc-02-constexpr-vbase-before-ctor.md](../bug-reports/gcc-02-constexpr-vbase-before-ctor.md) |
-| GCC-17 | `this` is accepted in the trailing return type of an explicit-object member function, where it is ill-formed | defect | name the object parameter instead, `decltype (self.x)` | None found (searched 2026-09-05) | [../bug-reports/gcc-17-this-in-xobj-declaration.md](../bug-reports/gcc-17-this-in-xobj-declaration.md) |
-| GCC-27 | Two friend declarations of one function with contradictory contracts are accepted silently | deferred | declare the function at namespace scope and befriend that declaration | None found (searched 2026-09-05) | [../bug-reports/gcc-27-deferred-friend-contract-mismatch.md](../bug-reports/gcc-27-deferred-friend-contract-mismatch.md) |
+**A new issue is always recorded as `defect` when it is discovered.** It
+becomes `deferred` only when the user has explicitly said they do not want to
+expand scope far enough to fix it -- never by an agent's own judgement that a
+fix looks hard or invasive.
+
+| ID | Symptom | Kind | Upstream | Details |
+|----|---------|------|----------|---------|
+| GCC-2 | Constant evaluation accepts forming the address of a member, or of a virtual base, before its constructor begins | deferred | [PR126357](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126357) (partial) | [../bug-reports/gcc-02-constexpr-vbase-before-ctor.md](../bug-reports/gcc-02-constexpr-vbase-before-ctor.md) |
+| GCC-17 | `this` is accepted in the trailing return type of an explicit-object member function, where it is ill-formed | deferred | None found (searched 2026-09-05) | [../bug-reports/gcc-17-this-in-xobj-declaration.md](../bug-reports/gcc-17-this-in-xobj-declaration.md) |
+| GCC-27 | Two friend declarations of one function with contradictory contracts are accepted silently | deferred | None found (searched 2026-09-05) | [../bug-reports/gcc-27-deferred-friend-contract-mismatch.md](../bug-reports/gcc-27-deferred-friend-contract-mismatch.md) |
