@@ -6,6 +6,15 @@ report-ready writeup plus a reproducer. A row is removed (and its file
 deleted) once the bug is fixed on upstream master, regardless of who fixed
 it or whether it was ever formally filed.
 
+**The entry criterion is reproduction on stock, and nothing else.** It does
+not matter whether the bug was ever "pending" a report, whether it was
+classified as upstream's before it was fixed, or whether it was found and
+fixed in one sitting. GCC-28 was missed for exactly that reason: the sweep
+that populated this table drew from a list of bugs someone had already set
+aside as upstream's, so a bug fixed the moment it was found never appeared.
+When fixing anything in `gcc/cp`, ask whether the pre-fix behaviour
+reproduces with plain `-fcontracts` on stock; if it does, it belongs here.
+
 For what is broken on **this branch** right now -- including branch-only
 issues that never reproduce upstream -- see
 [`../open-issues/README.md`](../open-issues/README.md). That file also carries
@@ -35,3 +44,7 @@ the `Next ID` line both directories allocate from.
 | GCC-24 | A noexcept function with a contract segfaults the compiler under `-fno-enforce-eh-specs` | Fixed here | [PR127173](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=127173) | [gcc-24-noexcept-body-wrapper-assumption.md](gcc-24-noexcept-body-wrapper-assumption.md) |
 | GCC-25 | A postcondition's result-name-introducer does not accept `identifier attribute-specifier-seq :` | Fixed here | [PR125725](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=125725) | [gcc-25-postcondition-result-name-attribute.md](gcc-25-postcondition-result-name-attribute.md) |
 | GCC-26 | A redeclaration whose parameter type is dependent escapes the postcondition const rule | Fixed here | [PR127196](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=127196) | [gcc-26-postcondition-redecl-dependent-param.md](gcc-26-postcondition-redecl-dependent-param.md) |
+| GCC-28 | A member named unqualified in an explicit-object member function's contract is diagnosed with a constructor/destructor message | Fixed here | UNKNOWN | [gcc-28-xobj-member-in-predicate-ctor-message.md](gcc-28-xobj-member-in-predicate-ctor-message.md) |
+| GCC-29 | The `__contract_assert` extension spelling ICEs in `grok_contract` | Fixed here | UNKNOWN | [gcc-29-contract-assert-alt-spelling-ice.md](gcc-29-contract-assert-alt-spelling-ice.md) |
+| GCC-30 | A coroutine's postcondition may odr-use a `const` by-value parameter | Fixed here | UNKNOWN | [gcc-30-coroutine-postcondition-const-param.md](gcc-30-coroutine-postcondition-const-param.md) |
+| GCC-31 | A lambda in a contract predicate cannot capture the enclosing function's parameters | Fixed here | UNKNOWN | [gcc-31-lambda-capture-in-contract-predicate.md](gcc-31-lambda-capture-in-contract-predicate.md) |

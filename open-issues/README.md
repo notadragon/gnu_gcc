@@ -15,7 +15,7 @@ fixed here, and a row there survives until *upstream* fixes it. An upstream
 bug we have not yet fixed appears in both; its single writeup lives in
 `bug-reports/` and the row below links to it.
 
-**Next ID:** GCC-28
+**Next ID:** GCC-33
 
 IDs come from one sequence per compiler, shared with `bug-reports/`, and are
 never reused. Allocate from the line above and increment it. Both tables
@@ -30,3 +30,4 @@ and the standard does not clearly settle which is right).
 | GCC-2 | Constant evaluation accepts forming the address of a member, or of a virtual base, before its constructor begins | defect | none; the program is accepted silently | UNKNOWN | [../bug-reports/gcc-02-constexpr-vbase-before-ctor.md](../bug-reports/gcc-02-constexpr-vbase-before-ctor.md) |
 | GCC-17 | `this` is accepted in the trailing return type of an explicit-object member function, where it is ill-formed | defect | name the object parameter instead, `decltype (self.x)` | UNKNOWN | [../bug-reports/gcc-17-this-in-xobj-declaration.md](../bug-reports/gcc-17-this-in-xobj-declaration.md) |
 | GCC-27 | Two friend declarations of one function with contradictory contracts are accepted silently | deferred | declare the function at namespace scope and befriend that declaration | -- | [gcc-27-deferred-friend-contract-mismatch.md](gcc-27-deferred-friend-contract-mismatch.md) |
+| GCC-32 | A `contract_assert` naming a capture, inside a lambda in a `pre`/`post` predicate, ICEs the compiler | defect | move the nested assert out of the lambda, or have it name something other than a capture | -- | [gcc-32-nested-assert-in-predicate-lambda-ice.md](gcc-32-nested-assert-in-predicate-lambda-ice.md) |

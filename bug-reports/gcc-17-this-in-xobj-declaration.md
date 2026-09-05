@@ -25,11 +25,32 @@ cross-referencing each other.
 See [`gcc-17-this-in-xobj-declaration.cpp`](gcc-17-this-in-xobj-declaration.cpp)
 in this directory.
 
+## Why it matters for contracts
+
+The trailing return type is where a postcondition's **result binding** gets
+its type, so this accepted-invalid declaration feeds one:
+
+```cpp
+struct D : S {
+  auto f (this D &self) -> decltype (this->x) post (r : r == 0) { return self.x; }
+};
+```
+
+Accepted by stock g++ trunk, by this branch, and by our Clang: `r` takes its
+type from a declaration that should have been rejected outright. Nothing
+downstream of the bad declaration misbehaves on its own -- this is GCC-17
+showing through contracts, not a second defect -- but it is the concrete cost
+of leaving it unfixed, and worth stating when the report is filed.
+
 ## Our Fix
 
 None -- genuinely upstream's. Found while fixing the contracts-specific
-analog; that fix was deliberately kept at the contracts call site so this
-shared, non-contracts behavior stays reproducible and untouched.
+analog, which is [GCC-28](gcc-28-xobj-member-in-predicate-ctor-message.md):
+an unqualified member named in an explicit-object member function's contract
+predicate was diagnosed with a constructor/destructor message. The two are
+the non-contracts and contracts-specific halves of the same sentence in
+[expr.prim.this]/3. That fix was deliberately kept at the contracts call site
+so this shared, non-contracts behavior stays reproducible and untouched.
 
 ## Notes
 

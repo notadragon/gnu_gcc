@@ -35,8 +35,8 @@ void default_copy (int x) pre ([=] { return record (x); } ()) { }
    Deliberately written WITHOUT a result-name-introducer.  A lambda in a free
    function's postcondition that does have one -- post (r : []{...}()) -- does
    not parse, which is an unrelated and pre-existing upstream defect (it needs
-   no capture, and reproduces on stock g++ 16.2.0 and g++-trunk); see
-   gcc-11 in ../../../../../notadragon_wg21 p3850impl/gcc-bugs.  The member
+   no capture, and reproduces on stock g++ 16.2.0 and g++-trunk); see GCC-11
+   in this repository's bug-reports/ directory.  The member
    function equivalent below parses fine, so this file still covers the
    result-name interaction on that side.  */
 int post_cap (const int x) post ([x] { return record (x); } ())
@@ -59,6 +59,20 @@ struct S
      through the remapped dummy rather than through a capture.  */
   void mem_this (int x) pre ([this, x] { return record (x + m); } ()) { }
 };
+
+/* An assertion-statement in the body.  This reaches the capture machinery by
+   a third path -- neither a function-contract-specifier on a free function
+   nor on a member -- and had no coverage; the audit of 2026-09-05 added it.
+   A local variable as well as a parameter, since an assertion-statement is
+   the only contract that can see one.  */
+void
+in_assert (int x)
+{
+  int local = x + 1;
+  contract_assert ([x] { return record (x); } ());
+  contract_assert ([&local] { return record (local); } ());
+  contract_assert ([=] { return record (x + local); } ());
+}
 
 /* A lambda's own precondition capturing that lambda's parameter.  */
 void
@@ -111,6 +125,10 @@ main ()
 
   lambda_own_pre ();
   if (g_seen != 66)
+    __builtin_abort ();
+
+  in_assert (120);
+  if (g_seen != 120 + 121)
     __builtin_abort ();
 
   return 0;

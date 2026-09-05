@@ -34,6 +34,33 @@ struct ExplicitThis : S
   void f (this ExplicitThis &self) pre (this->x == 0); // { dg-error "'this' is unavailable for explicit object member functions" }
 };
 
+// Explicit `this` in a POSTCONDITION, and in one with a
+// result-name-introducer.  A postcondition is parsed on a different path from
+// a precondition -- the result name is a declaration, and the predicate is
+// dependent while it is being parsed -- so the two spellings above were not
+// enough on their own.  Added by the audit of 2026-09-05, which found the
+// explicit spelling covered only for `pre`.
+struct ExplicitThisPost : S
+{
+  void f (this ExplicitThisPost &self) post (this->x == 0); // { dg-error "'this' is unavailable for explicit object member functions" }
+};
+
+struct ExplicitThisPostResult : S
+{
+  int f (this ExplicitThisPostResult &self) post (r : this->x == r); // { dg-error "'this' is unavailable for explicit object member functions" }
+};
+
+// And in an assertion-statement in the body, for the same reason the implicit
+// spelling is covered there.
+struct ExplicitThisAssert : S
+{
+  void
+  f (this ExplicitThisAssert &self)
+  {
+    contract_assert (this->x == 0); // { dg-error "'this' is unavailable for explicit object member functions" }
+  }
+};
+
 // An unqualified non-static data member in a precondition.
 struct ImplicitThisPre : S
 {
