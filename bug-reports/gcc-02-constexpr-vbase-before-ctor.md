@@ -6,7 +6,9 @@
 report is the same family (using a subobject before its initialization is not
 diagnosed in constant evaluation) but a different shape: it CALLS a member
 function before the base is initialized, where this one FORMS AN ADDRESS into
-a not-yet-constructed virtual base. Found by the 2026-09-05 sweep. Filing
+a not-yet-constructed virtual base. Found by the 2026-09-05 sweep. **The same report was filed against LLVM too**,
+with identical text, as [llvm/llvm-project#211286](https://github.com/llvm/llvm-project/issues/211286)
+(open, `confirmed`) -- linked the same way from CLANG-9 in that fork. Filing
 this one should cite 126357 as related rather than duplicate it; nothing
 covering the address-formation shape was found.
 **Affects:** measured against this branch's GCC and Clang builds
