@@ -6,6 +6,11 @@ report-ready writeup plus a reproducer. A row is removed (and its file
 deleted) once the bug is fixed on upstream master, regardless of who fixed
 it or whether it was ever formally filed.
 
+For what is broken on **this branch** right now -- including branch-only
+issues that never reproduce upstream -- see
+[`../open-issues/README.md`](../open-issues/README.md). That file also carries
+the `Next ID` line both directories allocate from.
+
 | Bug | Summary | Status | Upstream Link | Details |
 |-----|---------|--------|----------------|---------|
 | GCC-1 | Contract on a function with a variadic parameter pack ICEs or misattributes a diagnostic | Fixed here | [PR124395](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=124395) | [gcc-01-contract-pack-ice.md](gcc-01-contract-pack-ice.md) |

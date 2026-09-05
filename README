@@ -53,13 +53,19 @@ Some papers were called out as ready in P3850, others have been written and impl
   refactoring will separate the C contracts runtime into a standalone C
   library.
 
-## Open Upstream Bugs
+## Known Bugs and Open Issues
 
-Bugs found during this implementation that reproduce on stock upstream GCC,
-independent of anything in this branch, are tracked in
-[bug-reports/README.md](bug-reports/README.md) (kept as a separate `.md`
-file so its table renders correctly, since this file does not have a
-markdown extension).
+Two lists, answering two different questions. Both are kept as separate `.md`
+files so their tables render correctly, since this file has no markdown
+extension.
+
+- [open-issues/README.md](open-issues/README.md) -- **what is still broken on
+  this branch**, whatever its origin. Start here if you hit something: a row
+  means we already know, and says whether there is a way around it. A row is
+  deleted when we fix it.
+- [bug-reports/README.md](bug-reports/README.md) -- bugs that reproduce on
+  **stock upstream GCC**, independent of anything in this branch, including
+  ones we have already fixed here. A row survives until upstream fixes it.
 
 ## Contact
 
