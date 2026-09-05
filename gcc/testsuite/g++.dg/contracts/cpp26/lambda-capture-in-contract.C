@@ -74,6 +74,17 @@ in_assert (int x)
   contract_assert ([=] { return record (x + local); } ());
 }
 
+/* A nested contract_assert inside a predicate lambda, NAMING THE CAPTURE.
+   This was the second layer of the same defect as the capture itself: the
+   nested assert re-enters processing_contract_condition, which exempted the
+   reference from the capture machinery, so a bare reference to the enclosing
+   function's parameter survived into the lambda body and reached expansion
+   ("Variables inherited from containing functions should have been lowered by
+   this point").  Checked by value, since a lambda that captured nothing would
+   still compile.  */
+void nested_assert_on_capture (int x)
+  pre ([x] { contract_assert (x >= 0); return record (x); } ()) { }
+
 /* A lambda's own precondition capturing that lambda's parameter.  */
 void
 lambda_own_pre ()
@@ -129,6 +140,10 @@ main ()
 
   in_assert (120);
   if (g_seen != 120 + 121)
+    __builtin_abort ();
+
+  nested_assert_on_capture (131);
+  if (g_seen != 131)
     __builtin_abort ();
 
   return 0;

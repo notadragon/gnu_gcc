@@ -4956,7 +4956,6 @@ finish_id_expression_1 (tree id_expression,
 	  && DECL_CONTEXT (decl) == NULL_TREE
 	  && !CONSTRAINT_VAR_P (decl)
 	  && !cp_unevaluated_operand
-	  && !processing_contract_condition
 	  && !processing_omp_trait_property_expr)
 	{
 	  /* [expr.prim.lambda.capture]/3.3 permits a capture-default or
@@ -4977,13 +4976,29 @@ finish_id_expression_1 (tree id_expression,
 	  tree in_contract_lambda
 	    = flag_contracts ? current_lambda_expr () : NULL_TREE;
 	  if (in_contract_lambda
-	      && LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (in_contract_lambda))
+	      && !LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (in_contract_lambda))
+	    in_contract_lambda = NULL_TREE;
+
+	  if (in_contract_lambda)
 	    {
 	      decl = process_outer_var_ref (decl, tf_warning_or_error);
 	      if (decl == error_mark_node)
 		return error_mark_node;
 	    }
-	  else
+	  /* A predicate written DIRECTLY on the function may name a parameter:
+	     the contract is part of that function's declaration, so there is
+	     no other function in between and nothing to capture.  That is what
+	     processing_contract_condition exempts here.
+
+	     It must not exempt a lambda in the predicate, which IS another
+	     function -- and the flag is set again for a contract_assert
+	     nested inside such a lambda.  Skipping the capture machinery there
+	     left a bare reference to the enclosing function's parameter in the
+	     lambda body, which survives to expansion and trips
+	     "Variables inherited from containing functions should have been
+	     lowered by this point".  So the exemption is tested only after the
+	     in-predicate-lambda case has been taken.  */
+	  else if (!processing_contract_condition)
 	    {
 	      *error_msg = G_("use of parameter outside function body");
 	      return error_mark_node;

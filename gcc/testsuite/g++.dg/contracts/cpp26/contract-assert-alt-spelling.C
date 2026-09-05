@@ -36,18 +36,21 @@ void in_lambda (int x)
 }
 
 // Inside a lambda that is itself written in a contract predicate, which is
-// the most indirect route to grok_contract in the front end.
-//
-// The lambda deliberately does NOT capture: the nested assert naming a
-// CAPTURE is GCC-32 in this repository's open-issues/, an ICE in
-// expand_expr_real_1 that has nothing to do with the spelling (both spellings
-// fail it identically).  Adding this case is what found it.
+// the most indirect route to grok_contract in the front end.  Both with and
+// without a capture named by the nested assert: adding this case is what
+// found the second layer of GCC-31, where the nested assert's reference to a
+// capture never reached the capture machinery.
 int g_alt_spelling_n = 0;
 
 void in_predicate_lambda (int x)
   pre ([] { __contract_assert (g_alt_spelling_n >= 0); return true; } ())
 {
   (void) x;
+}
+
+void in_predicate_lambda_capture (int x)
+  pre ([x] { __contract_assert (x >= 0); return x > 0; } ())
+{
 }
 
 // Mixed spellings on one function, to be sure recognising one does not
