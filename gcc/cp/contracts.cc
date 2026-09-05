@@ -1648,13 +1648,22 @@ check_postcondition_odr_use_r (tree *tp, int *walk_subtrees, void *data)
   auto *d = (postcondition_odr_use_data *) data;
 
   /* An unevaluated operand is not an odr-use.  Most of these have already
-     folded away by now, but a dependent one has not.  */
+     folded away by now, but a dependent one has not.
+
+     The set to stop at is not a judgement call: cp_walk_subtrees enters
+     exactly three kinds of subtree under `cp_unevaluated`, and this switch
+     covers all three.  Missing two of them rejected programs stock g++
+     accepts -- a decltype whose operand is still dependent, and a
+     requires-expression, which survives into the finished predicate whether
+     or not anything in it is dependent.  */
   switch (TREE_CODE (t))
     {
     case SIZEOF_EXPR:
     case ALIGNOF_EXPR:
     case NOEXCEPT_EXPR:
     case AT_ENCODE_EXPR:
+    case DECLTYPE_TYPE:
+    case REQUIRES_EXPR:
       *walk_subtrees = 0;
       return NULL_TREE;
 
