@@ -1,4 +1,4 @@
-// PR c++/127196: a redeclaration whose corresponding parameter has a
+// GCC-26 / PR c++/127196: a redeclaration whose corresponding parameter has a
 // DEPENDENT type escapes the postcondition const rule.
 //
 // [dcl.contract.func]/7 requires the parameter odr-used by the predicate
@@ -10,46 +10,42 @@
 // declaration below -- the one with the contract, and the one that is
 // wrong -- had simply ceased to exist by instantiation time.
 //
-// { dg-do compile { target c++26 } }
-// { dg-additional-options "-fcontracts" }
 
 // The report's own case: contract on the non-const declaration, const on the
 // definition.
 namespace Reported {
-  template <typename T> void f (T a) post (a); // { dg-message "declared .int. here, which is not const" }
-  template <typename T> void f (T const a) {}  // { dg-error "value parameter 'a' used in a postcondition must be const" }
-  template void f<int> (int);                  // { dg-message "required from here" }
+  template <typename T> void f (T a) post (a); // expected-note "declared .int. here, which is not const"
+  template <typename T> void f (T const a) {}  // expected-error "value parameter 'a' used in a postcondition must be const"
+  template void f<int> (int);                  // expected-note "required from here"
 }
 
 // CONTROL, non-dependent: the same shape with concrete types was always
 // caught, on the contract's own declaration and at parse time.  This is what
 // says the gap was specific to dependence.
 namespace NonDependent {
-  void f (int a) post (a); // { dg-error "value parameter used in a postcondition must be const" }
+  void f (int a) post (a); // expected-error "value parameter used in a postcondition must be const"
   void f (const int a) {}
 }
 
 // CONTROL: the contract on the const declaration, the other non-const.  Also
 // ill-formed, and always was -- the non-const one is the definition, so it is
 // the parameter that survives and gets checked.
-// The next two each draw a second diagnostic -- the redeclaration check and
-// the walk over the substituted predicate reporting on different lines.
-// Measured against stock g++ 16.2: BothNonConst double-reports there too, so
-// that one is pre-existing; OtherWayRound gains its second from the PR126897
-// fix.  Neither comes from the PR127196 fix, which adds only the two
-// diagnostics it exists for.
+// The second diagnostic on each of the next two is pre-existing and shared
+// with stock g++ 16.2: the redeclaration check and the walk over the
+// substituted predicate both report, on different lines.  Recorded, not
+// introduced here.
 namespace OtherWayRound {
-  template <typename T> void f (T const a) post (a); // { dg-error "value parameter used in a postcondition must be const" }
-  template <typename T> void f (T a) {} // { dg-error "value parameter 'a' used in a postcondition must be const" }
-  template void f<int> (int);           // { dg-message "required from here" }
+  template <typename T> void f (T const a) post (a); // expected-error "value parameter used in a postcondition must be const"
+  template <typename T> void f (T a) {} // expected-error "value parameter 'a' used in a postcondition must be const"
+  template void f<int> (int);           // expected-note "required from here"
 }
 
 // CONTROL: both declarations non-const.  Ill-formed with no redeclaration
 // question involved.
 namespace BothNonConst {
-  template <typename T> void f (T a) post (a); // { dg-error "value parameter used in a postcondition must be const" }
-  template <typename T> void f (T a) {} // { dg-error "value parameter 'a' used in a postcondition must be const" }
-  template void f<int> (int);           // { dg-message "required from here" }
+  template <typename T> void f (T a) post (a); // expected-error "value parameter used in a postcondition must be const"
+  template <typename T> void f (T a) {} // expected-error "value parameter 'a' used in a postcondition must be const"
+  template void f<int> (int);           // expected-note "required from here"
 }
 
 // Both const: WELL-FORMED, and the check must not over-reject it.
@@ -87,7 +83,7 @@ namespace Reference {
 // to survive more than a single merge.
 namespace ThreeDeclarations {
   template <typename T> void f (T const a) post (a);
-  template <typename T> void f (T a);         // { dg-message "declared .int. here, which is not const" }
-  template <typename T> void f (T const a) {} // { dg-error "value parameter 'a' used in a postcondition must be const" }
-  template void f<int> (int);                 // { dg-message "required from here" }
+  template <typename T> void f (T a);         // expected-note "declared .int. here, which is not const"
+  template <typename T> void f (T const a) {} // expected-error "value parameter 'a' used in a postcondition must be const"
+  template void f<int> (int);                 // expected-note "required from here"
 }
