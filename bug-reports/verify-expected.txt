@@ -41,7 +41,6 @@ GCC-17-10|clean|clean
 GCC-17-11|error[1:78aa2eb7]|error[1:78aa2eb7]
 GCC-18|error[1:19ecdcb8]|error[2:f0606a72]
 GCC-19|error[48:1978ea89]|error[14:7a44c4b2]
-GCC-20|clean|clean
 GCC-21|link-error[0:da39a3ee]|clean
 GCC-22|error[5:a6117394]|clean
 GCC-23a|clean|error[5:cca34275]

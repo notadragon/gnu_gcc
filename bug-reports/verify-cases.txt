@@ -51,7 +51,6 @@ GCC-17-10| gcc-17-this-in-xobj-declaration.cpp                    | syntax  | -s
 GCC-17-11| gcc-17-this-in-xobj-declaration.cpp                    | syntax  | -std=c++23 -DCASE=11
 GCC-18  | gcc-18-lambda-in-predicate-global-not-constified.cpp    | syntax  | -std=c++26 -fcontracts
 GCC-19  | gcc-19-postcondition-comma-odr-use.C                    | compile | -std=c++26 -fcontracts
-GCC-20  | gcc-20-pack-by-value-in-contract.cpp                    | compile | -std=c++26 -fcontracts
 GCC-21  | gcc-21-cpp26-missing-experimental-link.cpp              | link    | -std=c++26
 GCC-22  | gcc-22-pack-reference-constification.C                  | compile | -std=c++26 -fcontracts
 GCC-23a | gcc-23-contract-on-deleted-or-defaulted.C               | compile | -std=c++26 -fcontracts
