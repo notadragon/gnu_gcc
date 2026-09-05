@@ -6,6 +6,11 @@ report-ready writeup plus a reproducer. A row is removed (and its file
 deleted) once the bug is fixed on upstream master, regardless of who fixed
 it or whether it was ever formally filed.
 
+**Upstream Link** distinguishes three states, and the difference matters:
+a link means a PR exists; `None found (searched <date>)` means Bugzilla was
+actually searched and nothing matched; `UNKNOWN` means nobody has looked yet.
+Conflating the last two is how GCC-28 stayed invisible.
+
 **The entry criterion is reproduction on stock, and nothing else.** It does
 not matter whether the bug was ever "pending" a report, whether it was
 classified as upstream's before it was fixed, or whether it was found and
@@ -34,7 +39,7 @@ the `Next ID` line both directories allocate from.
 | GCC-14 | Garbage source location on a contract-capture diagnostic note | Fixed here | [PR126041](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126041) | [gcc-14-contract-capture-note-garbage-location.md](gcc-14-contract-capture-note-garbage-location.md) |
 | GCC-15 | Outlined contract checks lose by-value parameter/result mutations | Fixed here | -- | [gcc-15-outlined-checks-lose-by-value-mutations.md](gcc-15-outlined-checks-lose-by-value-mutations.md) |
 | GCC-16 | Contract on a capturing lambda inside an instantiated template segfaults | Fixed here | [PR126038](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126038) | [gcc-16-lambda-capture-contract-in-template.md](gcc-16-lambda-capture-contract-in-template.md) |
-| GCC-17 | `this` accepted in the trailing return type of an explicit-object member function | Open | UNKNOWN | [gcc-17-this-in-xobj-declaration.md](gcc-17-this-in-xobj-declaration.md) |
+| GCC-17 | `this` accepted in the trailing return type of an explicit-object member function | Open | None found (searched 2026-09-05) | [gcc-17-this-in-xobj-declaration.md](gcc-17-this-in-xobj-declaration.md) |
 | GCC-18 | A predicate lambda naming a namespace-scope variable does not constify it | Fixed here | -- | [gcc-18-lambda-in-predicate-global-not-constified.md](gcc-18-lambda-in-predicate-global-not-constified.md) |
 | GCC-19 | A discarded comma operand in a postcondition is wrongly treated as odr-using a by-value parameter | Fixed here | [PR126897](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126897) | [gcc-19-postcondition-comma-odr-use.md](gcc-19-postcondition-comma-odr-use.md) |
 | GCC-20 | A pack of non-reference type named in a contract ICEs template substitution | Fixed here | [PR126804](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126804) | [gcc-20-pack-by-value-in-contract.md](gcc-20-pack-by-value-in-contract.md) |
@@ -44,8 +49,8 @@ the `Next ID` line both directories allocate from.
 | GCC-24 | A noexcept function with a contract segfaults the compiler under `-fno-enforce-eh-specs` | Fixed here | [PR127173](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=127173) | [gcc-24-noexcept-body-wrapper-assumption.md](gcc-24-noexcept-body-wrapper-assumption.md) |
 | GCC-25 | A postcondition's result-name-introducer does not accept `identifier attribute-specifier-seq :` | Fixed here | [PR125725](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=125725) | [gcc-25-postcondition-result-name-attribute.md](gcc-25-postcondition-result-name-attribute.md) |
 | GCC-26 | A redeclaration whose parameter type is dependent escapes the postcondition const rule | Fixed here | [PR127196](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=127196) | [gcc-26-postcondition-redecl-dependent-param.md](gcc-26-postcondition-redecl-dependent-param.md) |
-| GCC-28 | A member named unqualified in an explicit-object member function's contract is diagnosed with a constructor/destructor message | Fixed here | UNKNOWN | [gcc-28-xobj-member-in-predicate-ctor-message.md](gcc-28-xobj-member-in-predicate-ctor-message.md) |
-| GCC-29 | The `__contract_assert` extension spelling ICEs in `grok_contract` | Fixed here | UNKNOWN | [gcc-29-contract-assert-alt-spelling-ice.md](gcc-29-contract-assert-alt-spelling-ice.md) |
-| GCC-30 | A coroutine's postcondition may odr-use a `const` by-value parameter | Fixed here | UNKNOWN | [gcc-30-coroutine-postcondition-const-param.md](gcc-30-coroutine-postcondition-const-param.md) |
+| GCC-28 | A member named unqualified in an explicit-object member function's contract is diagnosed with a constructor/destructor message | Fixed here | None found (searched 2026-09-05) | [gcc-28-xobj-member-in-predicate-ctor-message.md](gcc-28-xobj-member-in-predicate-ctor-message.md) |
+| GCC-29 | The `__contract_assert` extension spelling ICEs in `grok_contract` | Fixed here | None found (searched 2026-09-05) | [gcc-29-contract-assert-alt-spelling-ice.md](gcc-29-contract-assert-alt-spelling-ice.md) |
+| GCC-30 | A coroutine's postcondition may odr-use a `const` by-value parameter | Fixed here | None found (searched 2026-09-05) | [gcc-30-coroutine-postcondition-const-param.md](gcc-30-coroutine-postcondition-const-param.md) |
 | GCC-31 | A contract-assertion scope is not capture-transparent: a lambda in a predicate cannot capture the enclosing parameters, and once it can, a nested `contract_assert` naming a capture ICEs | Fixed here | [PR117435](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=117435) | [gcc-31-lambda-capture-in-contract-predicate.md](gcc-31-lambda-capture-in-contract-predicate.md) |
 | GCC-33 | A class-type result binding passed to a function taking a reference ICEs at codegen | Fixed here | [PR125574](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=125574) | [gcc-33-class-result-binding-by-reference.md](gcc-33-class-result-binding-by-reference.md) |

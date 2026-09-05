@@ -2,9 +2,14 @@
 
 **Status:** Open
 **Component:** c++ / declarations
-**Upstream Link:** UNKNOWN -- not contracts-dependent, so it would not surface
-in a Bugzilla search scoped to contracts terms; no dedicated search has been
-done for this one
+**Upstream Link:** None found. Searched 2026-09-05, including resolved bugs:
+summary `explicit object` (25 hits, none about `this` being accepted where it
+must be rejected), summary `trailing return` (20 hits, the closest being
+PR53721 which is the opposite direction -- `this` wrongly *rejected* in an
+ordinary member's trailing return type), and comment text
+`explicit object trailing return this`. PR125330 looked promising and is not
+this: it is the explicit object *parameter* being unavailable in a trailing
+requires-clause, already fixed
 **Affects:** stock g++ 14.4.0, 15.3.0, 16.2.0, trunk (13.4.0 predates
 explicit object parameters and rejects the reproducer outright)
 

@@ -2,7 +2,10 @@
 
 **Status:** Fixed here (commit `f64b7bbafac`)
 **Component:** c++ / contracts
-**Upstream Link:** UNKNOWN -- not yet filed
+**Upstream Link:** None found. Searched 2026-09-05, including resolved bugs:
+comment text `__contract_assert` returns **nothing at all** -- the extension
+spelling is not mentioned in any GCC bug -- and `grok_contract` returns only
+PR108542 and PR113968, both long-fixed ICEs elsewhere in that function
 **Affects:** measured 2026-09-05 -- reproduces on stock g++ trunk with plain
 `-fcontracts`
 

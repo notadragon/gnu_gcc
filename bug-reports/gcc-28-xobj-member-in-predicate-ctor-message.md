@@ -2,7 +2,11 @@
 
 **Status:** Fixed here (commit `a611ae28328`)
 **Component:** c++ / contracts
-**Upstream Link:** UNKNOWN -- not yet filed
+**Upstream Link:** None found. Searched 2026-09-05 on the distinctive message
+text itself -- comment search for
+`constructor precondition destructor postcondition contract check`, including
+resolved bugs -- with no hits. That phrase appears verbatim only in GCC's own
+source, so a report of this would almost certainly contain it
 **Affects:** measured 2026-09-05 -- reproduces on stock g++ 16.2.0 and trunk
 with plain `-fcontracts`; g++ 13/14/15 do not accept the contracts syntax
 these use

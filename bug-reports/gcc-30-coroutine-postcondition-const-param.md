@@ -2,7 +2,11 @@
 
 **Status:** Fixed here (commit `5dfac566c71`)
 **Component:** c++ / contracts, coroutines
-**Upstream Link:** UNKNOWN -- not yet filed
+**Upstream Link:** None found. Searched 2026-09-05, including resolved bugs:
+comment text `coroutine postcondition contract` returns three, all fixed and
+none about this rule (PR110871 precondition ordering vs initial suspend,
+PR110872 postcondition not evaluated, PR115434 post ignored with no return
+statement); `co_return contract const parameter` returns nothing
 **Affects:** measured 2026-09-05 -- reproduces on stock g++ trunk with plain
 `-fcontracts`
 
