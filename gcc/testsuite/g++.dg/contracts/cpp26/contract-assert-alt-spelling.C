@@ -28,6 +28,20 @@ void tmpl (T x)
 
 template void tmpl<int> (int);
 
+// On a member function, whose contracts are late-parsed -- a different path
+// again.  (Mirrors the member case in Clang's alternative-keywords.cpp.)
+struct S
+{
+  int m = 1;
+
+  int
+  mem (int x)
+  {
+    __contract_assert (m > 0);
+    return x;
+  }
+};
+
 // Inside a lambda body.
 void in_lambda (int x)
 {
