@@ -64,3 +64,5 @@ GCC-29  | gcc-29-contract-assert-alt-spelling-ice.cpp             | syntax  | -s
 GCC-30  | gcc-30-coroutine-postcondition-const-param.cpp          | syntax  | -std=c++26 -fcontracts
 GCC-31  | gcc-31-lambda-capture-in-contract-predicate.cpp         | syntax  | -std=c++26 -fcontracts
 GCC-33  | gcc-33-class-result-binding-by-reference.cpp            | compile | -std=c++26 -fcontracts
+GCC-36a | gcc-36a-postcondition-const-template.C                  | syntax  | -std=c++26 -fcontracts
+GCC-36b | gcc-36b-postcondition-const-nontemplate.C               | syntax  | -std=c++26 -fcontracts

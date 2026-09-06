@@ -8,7 +8,7 @@
 #
 # stock:  g++ (Compiler-Explorer-Build-gcc-3653b8dd68b0caf1c713058854d1efde9cc14329-binutils-2.44) 17.0.0 20260905 (experimental)
 # branch: g++ (GCC) 17.0.0 20260905 (experimental)
-# dated:  2026-09-05
+# dated:  2026-09-06
 #
 # id | stock | branch
 GCC-1a|ice[1:bbb59b9c]|clean
@@ -54,3 +54,5 @@ GCC-29|ice[1:7b2272ab]|clean
 GCC-30|error[2:b6ba1d03]|error[6:a8a02d7c]
 GCC-31|error[9:8bbe9f91]|clean
 GCC-33|ice[1:37dff941]|clean
+GCC-36a|error[4:c884ef26]|error[4:5cfcead6]
+GCC-36b|error[4:cca5add3]|error[2:7852054c]
