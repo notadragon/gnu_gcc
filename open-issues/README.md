@@ -15,7 +15,7 @@ fixed here, and a row there survives until *upstream* fixes it. An upstream
 bug we have not yet fixed appears in both; its single writeup lives in
 `bug-reports/` and the row below links to it.
 
-**Next ID:** GCC-36
+**Next ID:** GCC-37
 
 IDs come from one sequence per compiler, shared with `bug-reports/`, and are
 never reused. Allocate from the line above and increment it. Both tables
@@ -46,4 +46,4 @@ fix looks hard or invasive.
 | GCC-2 | Constant evaluation accepts forming the address of a member, or of a virtual base, before its constructor begins | deferred | [PR126357](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=126357) (partial) | [../bug-reports/gcc-02-constexpr-vbase-before-ctor.md](../bug-reports/gcc-02-constexpr-vbase-before-ctor.md) |
 | GCC-17 | `this` is accepted in the trailing return type of an explicit-object member function, where it is ill-formed | deferred | None found (searched 2026-09-05) | [../bug-reports/gcc-17-this-in-xobj-declaration.md](../bug-reports/gcc-17-this-in-xobj-declaration.md) |
 | GCC-27 | Two friend declarations of one function with contradictory contracts are accepted silently | deferred | None found (searched 2026-09-05) | [../bug-reports/gcc-27-deferred-friend-contract-mismatch.md](../bug-reports/gcc-27-deferred-friend-contract-mismatch.md) |
-| GCC-35 | An ill-formed contract predicate on a declared-only function template that is called is never diagnosed; Clang errors | defect | -- | [gcc-35-declared-only-template-contract-not-instantiated.md](gcc-35-declared-only-template-contract-not-instantiated.md) |
+| GCC-36 | The [dcl.contract.func]/7 const-parameter rule is reported twice for a function template, once by the redeclaration carry-over and once by the predicate walk | defect | UNKNOWN | [gcc-36-duplicate-postcondition-const-diagnostic.md](gcc-36-duplicate-postcondition-const-diagnostic.md) |

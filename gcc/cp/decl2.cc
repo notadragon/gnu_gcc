@@ -7145,6 +7145,28 @@ mark_used (tree decl, tsubst_flags_t complain /* = tf_warning_or_error */)
   if (DECL_CLONED_FUNCTION_P (decl))
     DECL_ODR_USED (DECL_CLONED_FUNCTION (decl)) = 1;
 
+  /* [dcl.contract.func]/9: a function's contract assertions are needed when it
+     is odr-used, not only when it is defined.  Substituting them here is the
+     only thing that will ever check the predicate of a template that is called
+     but never defined -- and such a call can still link, because if it is
+     optimized away there is no undefined reference either, so the predicate
+     would otherwise go undiagnosed in every translation unit.
+
+     Once per function per translation unit: the DECL_ODR_USED early return
+     above means we reach this at most once, and maybe_instantiate_contracts is
+     idempotent besides.
+
+     Setting DECL_ODR_USED *before* substituting is what makes this safe
+     against a predicate that odr-uses its own function, directly or through
+     another contracted one: the re-entrant mark_used hits that early return
+     instead of recursing.  Clang learned the same lesson the hard way as
+     CLANG-13.
+
+     The unevaluated-operand and discarded-statement cases returned above, so a
+     contract is still not needed by decltype, sizeof, noexcept or a
+     requires-expression naming the call.  */
+  maybe_instantiate_contracts (decl);
+
   /* DR 757: A type without linkage shall not be used as the type of a
      variable or function with linkage, unless
    o the variable or function has extern "C" linkage (7.5 [dcl.link]), or

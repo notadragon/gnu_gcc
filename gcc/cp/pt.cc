@@ -29082,6 +29082,20 @@ maybe_instantiate_contracts (tree decl)
       || get_fn_contract_specifiers (decl) != pattern_contracts)
     return;
 
+  /* If the pattern has a body then a definition will be instantiated, and
+     regenerate_decl_from_template will substitute the contracts as part of it.
+     Doing it here as well would substitute the same predicate twice and report
+     everything it diagnoses twice with it -- constification errors, the
+     [dcl.contract.func]/7 const-parameter rule, and so on.  Instantiation of
+     the definition is deferred, so "already done" cannot simply be tested for
+     at the point of an odr-use.
+
+     What is left is exactly the case this exists for: a function whose
+     definition will never be instantiated, whose contracts nothing else will
+     ever look at.  */
+  if (DECL_INITIAL (code_pattern))
+    return;
+
   /* Make sure that we can see identifiers, and compute access correctly --
      regenerate_decl_from_template does the same around its own call.  */
   push_access_scope (decl);

@@ -86,6 +86,14 @@ struct OrdinaryParameter : S
 struct DeducedByValue : S
 {
   template <class Self> void f (this Self self) post (self.x == 0); // { dg-error "value parameter .self. used in a postcondition must be const" }
+// The rule is reported twice here, by the two mechanisms that both implement
+// it: check_postcondition_parm_in_redecl, carrying the property from the
+// pattern to the instantiation, and the walk over the substituted predicate.
+// That duplication is not new -- a *defined* function template has always
+// reported it twice -- but it only became visible on a declared-only one when
+// GCC-35 made such a template's contracts substitute at its odr-use.  Tracked
+// as GCC-36; when that is fixed one of these two expectations goes away.
+// { dg-error "a value parameter used in a postcondition must be const" "" { target *-*-* } .-8 }
 };
 
 void
