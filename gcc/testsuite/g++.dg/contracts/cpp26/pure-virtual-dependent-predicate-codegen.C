@@ -1,28 +1,26 @@
-// Mirror of a CLANG-ONLY open bug: a pure virtual in a class template whose
-// contract predicate is value-dependent when parsed.
+// A pure virtual in a class template whose contract predicate is
+// value-dependent when parsed.  GCC has always compiled this; the file exists
+// because Clang did not, and it is kept so both suites keep asking.
 //
-// Tracked as CLANG-14 in the llvm_llvm-project fork's open-issues/.  There the
-// predicate reaches CodeGen still dependent and the constant evaluator asserts
-// (`!isValueDependent()`, ExprConstant.cpp).  All three of pure, class
-// template, and a value-dependent predicate are required; a non-dependent call
-// such as `pre (f () == 0)` compiles clean on Clang.
+// It was CLANG-14 until 2026-09-06.  A pure virtual called by unqualified
+// virtual dispatch is deliberately NOT odr-used ([basic.def.odr] excludes it
+// from being "named by" the expression), and Clang hung contract
+// instantiation off odr-use, so the predicate reached CodeGen still dependent.
+// Nothing else would substitute it either -- a pure virtual has no definition
+// to instantiate.
 //
-// Measured 2026-09-05: GCC compiles this, and a runnable version confirms the
-// interface precondition is genuinely evaluated through the P3097 wrapper (one
-// violation for a failing value, none for a passing one).  So this file is NOT
-// xfailed here; it is a plain expected-pass, and its job is to keep the two
-// suites asking the same question.
+// [dcl.contract.func] makes contracts needed only when the function "is
+// odr-used or the function is defined", so as written it never makes a pure
+// virtual's contracts needed at all; a core issue is being filed to add a
+// bullet matching [except.spec]'s "in an expression, the function is selected
+// by overload resolution".  GCC reaches the same place from
+// maybe_instantiate_contracts (GCC-34, GCC-35) rather than through odr-use,
+// which is why it was never exposed here.
 //
-// GCC only reached that state earlier the same day: before GCC-34 was fixed it
-// ICEd on an overlapping set of shapes.  The two compilers were broken here in
-// different halves, and this intersection -- pure + class template + dependent
-// predicate -- is what neither suite had a test for.
+// THIS MUST STAY A CODEGEN TEST.  Clang's failure was invisible to
+// -fsyntax-only, which is how a syntax-only probe matrix missed it.
 //
-// NOTE: this must be a codegen test, not `-fsyntax-only`.  Clang's failure is
-// in CodeGen, and the whole syntax-only probe matrix behind CLANG-13 walked
-// past it.
-//
-// Mirror: clang/test/Contracts/OpenBugs/pure-virtual-dependent-predicate-codegen.cpp
+// Mirror: clang/test/Contracts/pure-virtual-dependent-predicate-codegen.cpp
 
 // { dg-do compile { target c++26 } }
 // { dg-additional-options "-fcontracts -fcontracts-p3097" }
