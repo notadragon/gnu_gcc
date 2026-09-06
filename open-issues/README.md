@@ -15,7 +15,7 @@ fixed here, and a row there survives until *upstream* fixes it. An upstream
 bug we have not yet fixed appears in both; its single writeup lives in
 `bug-reports/` and the row below links to it.
 
-**Next ID:** GCC-34
+**Next ID:** GCC-35
 
 IDs come from one sequence per compiler, shared with `bug-reports/`, and are
 never reused. Allocate from the line above and increment it. Both tables
@@ -23,9 +23,14 @@ delete rows, so the highest ID visible in either is not a reliable counter.
 
 `--` in the Upstream column would mean the issue is ours alone with nothing
 upstream to link. **No row here qualifies**: contracts are upstream in GCC, so
-every one of these is filable. (On the Clang side it does apply, to
-contracts-dependent issues.) `None found (searched <date>)` means Bugzilla was
-searched and nothing matched; `UNKNOWN` means nobody has looked.
+every one of these is filable *except* an issue whose trigger needs one of our
+own extensions -- P3097 virtual contracts, P3595 caller-side checking and the
+rest are not upstream, so an issue that cannot be reached without them has
+nothing to file. GCC-34 was the first such row; it has since been fixed and
+removed, but the distinction stands for the next one. (On the Clang side `--`
+is the common case rather than the exception, since contracts as a whole are
+not upstream there.) `None found (searched <date>)` means Bugzilla was searched and
+nothing matched; `UNKNOWN` means nobody has looked.
 
 **Kind** is one of `defect` (wrong, and we intend to fix it), `deferred`
 (known, currently out of scope) or `divergence` (GCC and Clang disagree and

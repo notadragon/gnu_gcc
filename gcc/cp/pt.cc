@@ -29043,6 +29043,53 @@ template_for_substitution (tree decl)
   return tmpl;
 }
 
+/* DECL is about to have its contracts read by something other than its own
+   definition -- a P3097 interface wrapper around a virtual dispatch, or a
+   P3595 caller-side check at a call site.  Make sure they have actually been
+   substituted.
+
+   tsubst_function_decl deliberately copies a pattern's contract specifiers
+   onto an instantiation *without* substituting them, and
+   regenerate_decl_from_template does the substitution when the definition is
+   instantiated; contract_parameter_pattern's comment explains why the two are
+   kept in step.  A function that is never defined never reaches that point --
+   a pure virtual has no definition to instantiate, and neither does a
+   declaration-only template that is merely called -- so without this its
+   contracts stay written in terms of the pattern's parameters, and whoever
+   emits a check from them walks a dependent tree.  [dcl.contract.func]/9 puts
+   the odr-use and the definition on the same footing; this is the odr-use
+   half.
+
+   Idempotent: substitution replaces DECL's specifiers with a deep copy, so
+   anything other than the pattern's own tree means the work is already
+   done.  */
+
+void
+maybe_instantiate_contracts (tree decl)
+{
+  if (!flag_contracts
+      || !decl
+      || decl == error_mark_node
+      || TREE_CODE (decl) != FUNCTION_DECL
+      || !DECL_TEMPLATE_INFO (decl)
+      || !DECL_TEMPLATE_INSTANTIATION (decl))
+    return;
+
+  tree code_pattern = DECL_TEMPLATE_RESULT (template_for_substitution (decl));
+  tree pattern_contracts
+    = get_fn_contract_specifiers (contract_parameter_pattern (code_pattern));
+  if (!pattern_contracts
+      || get_fn_contract_specifiers (decl) != pattern_contracts)
+    return;
+
+  /* Make sure that we can see identifiers, and compute access correctly --
+     regenerate_decl_from_template does the same around its own call.  */
+  push_access_scope (decl);
+  tsubst_contract_specifiers (pattern_contracts, decl, DECL_TI_ARGS (decl),
+			      tf_warning_or_error, code_pattern);
+  pop_access_scope (decl);
+}
+
 /* Returns true if we need to instantiate this template instance even if we
    know we aren't going to emit it.  */
 

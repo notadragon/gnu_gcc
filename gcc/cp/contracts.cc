@@ -4597,6 +4597,18 @@ define_one_contract_wrapper_func (tree fndecl, tree wrapdecl)
 
   gcc_checking_assert (!DECL_HAS_CONTRACTS_P (wrapdecl));
 
+  /* This wrapper is about to copy FNDECL's contracts and emit checks from
+     them, and it is the one reader of those contracts that does not need
+     FNDECL to have a definition: a pure virtual has none, and neither does a
+     declaration-only template reached by a P3595 caller-side check.  For
+     either, nothing has substituted them yet -- that normally happens when the
+     definition is instantiated -- so the copy below would be the pattern's own
+     dependent tree.  A no-op for everything else.
+
+     DECL_ORIGIN, to match what the contracts are actually read from below: for
+     a wrapper around a CDTOR clone that is the original, not the clone.  */
+  maybe_instantiate_contracts (DECL_ORIGIN (fndecl));
+
   bool is_virtual = (DECL_IOBJ_MEMBER_FUNCTION_P (fndecl)
 		     && DECL_VIRTUAL_P (fndecl));
 
