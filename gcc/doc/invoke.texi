@@ -223,13 +223,18 @@ in the following sections.
 -fconstexpr-depth=@var{n}  -fconstexpr-cache-depth=@var{n}
 -fconstexpr-loop-limit=@var{n}  -fconstexpr-ops-limit=@var{n}
 -fcontracts
--fcontract-evaluation-semantic=@r{[}ignore@r{|}observe@r{|}enforce@r{|}quick_enforce@r{]}
+-fcontract-evaluation-semantic=@r{[}ignore@r{|}observe@r{|}enforce@r{|}quick_enforce@r{|}assume@r{|}noexcept_enforce@r{|}noexcept_observe@r{]}
 -fcontracts-conservative-ipa  -fcontract-checks-outlined
 -fcontract-disable-optimized-checks
 -fcontracts-client-check=@r{[}none@r{|}pre@r{|}all@r{]}
 -fcontracts-definition-check=@r{[}on@r{|}off@r{]}
 -fcontract-group-evaluation-semantic=@var{group}:@var{semantic}
 -fcontract-configuration=@var{json}  -fcontract-configuration-file=@var{file}
+-fcontracts-allow-assume  -Wcontract-configuration
+-Wcontract-constexpr-side-effect  -Wcontract-invalid-label-facet
+-fcontracts-p3850  -fcontracts-p3097  -fcontracts-p3098  -fcontracts-p3099
+-fcontracts-p3100  -fcontracts-p3290  -fcontracts-p3400  -fcontracts-p4283
+-fcontracts-p4298  -fcontracts-p4299  -fcontracts-p4301
 -fsanitize-semantic=@var{check}:@var{semantic}
 -fsanitize-noncontract-callbacks
 -fcoroutines  -fdiagnostics-all-candidates
@@ -3526,6 +3531,16 @@ giving each @option{-fcontracts-p@var{nnnn}} option individually.
 @itemx -fcontracts-p4298
 @itemx -fcontracts-p4299
 @itemx -fcontracts-p4301
+Enable an individual proposed extension to the contracts facility, named
+after the WG21 paper that proposes it: contracts on virtual functions
+(P3097), postcondition captures (P3098), the @code{comment} and
+@code{message} accessors (P3099), implicit contract assertions for
+undefined behaviour (P3100), integration with @code{assert} (P3290),
+assertion-control labels (P3400), @code{requires} clauses on contract
+assertions (P4283), non-throwing evaluation semantics (P4298), contracts
+for C (P4299), and context reports for the violation handler (P4301).
+Each defines its own feature-test macro.
+
 @opindex fsanitize-semantic
 @item -fsanitize-semantic=@var{check}:@var{semantic}
 Route the sanitizer check @var{check} to the contract-violation handler
