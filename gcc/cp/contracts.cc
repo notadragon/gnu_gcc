@@ -6298,10 +6298,12 @@ begin_contract_trampoline (const char *name_prefix, int &counter,
 static tree
 finish_contract_trampoline (tree body, tree compound_stmt)
 {
-  bool can_be_const = true;
-  uint16_t version = 1;
-  /* Default CDM_PREDICATE_FALSE. */
-  uint16_t detection_mode = CDM_PREDICATE_FALSE;
+  finish_compound_stmt (compound_stmt);
+  finish_function_body (body);
+  tree fn_decl = finish_function (false);
+  expand_or_defer_fn (fn_decl);
+  return fn_decl;
+}
 
 /* Close a trampoline whose body could not be built, and emit nothing.  */
 
@@ -6326,49 +6328,94 @@ abandon_contract_trampoline (tree body, tree compound_stmt)
    handler, for instance).  The rethrow analysis needs the resolved callee, not
    the overload set.  */
 
+static tree
+build_local_violation_trampoline (tree label_type, tree hcv_fn,
+				  tree *resolved_fn_out)
+{
+  *resolved_fn_out = NULL_TREE;
+
+  /* Build function type: int(const void*, const void*)
+     This matches __cxa_local_handler_fn_t in the ABI.  */
+  tree const_void_ptr = build_pointer_type (
+    cp_build_qualified_type (void_type_node, TYPE_QUAL_CONST));
+
+  tree fn_type = build_function_type_list (integer_type_node,
+					   const_void_ptr,
+					   const_void_ptr,
+					   NULL_TREE);
+
+  /* Save the enclosing parse state for the duration; see
+     trampoline_scope.  */
+  trampoline_scope sentry;
+
+  location_t loc = BUILTINS_LOCATION;
+  static int trampoline_counter = 0;
+  tree body, compound_stmt;
+  tree parm_types[] = { const_void_ptr, const_void_ptr };
+  tree fn_decl
+    = begin_contract_trampoline ("__contract_local_handler",
+				 trampoline_counter, fn_type, parm_types,
+				 &body, &compound_stmt);
+
+  tree parm_label_ptr = DECL_ARGUMENTS (fn_decl);
+  tree parm_violation_ptr = DECL_CHAIN (parm_label_ptr);
+
+  /* Cast: const LabelType& lbl = *(const LabelType*) label_ptr;
+
+     Const, matching the query trampoline below and the concept:
+     labels::local_violation_label requires `const _Tp __t', so a label whose
+     handle_contract_violation is not const does not provide the facet and is
+     rejected -- with -Wcontract-invalid-label-facet -- before any trampoline
+     is built for it.  A non-const cast here would be the one place the two
+     trampolines disagree, and would suggest, wrongly, that a non-const
+     handler can get here.  Pinned by
+     p3400-nonconst-handler-not-called.C.  */
+  tree const_label_type = cp_build_qualified_type (label_type, TYPE_QUAL_CONST);
+  tree label_ptr_type = build_pointer_type (const_label_type);
+  tree cast_label = build1 (NOP_EXPR, label_ptr_type, parm_label_ptr);
+  tree label_ref = cp_build_indirect_ref (loc, cast_label,
+					  RO_UNARY_STAR, tf_warning_or_error);
+
+  /* Cast: const contract_violation& v = *(const contract_violation*) ptr;  */
+  tree cv_type
+    = lookup_std_contracts_type (get_identifier ("contract_violation"));
+  tree cv_const = cp_build_qualified_type (cv_type, TYPE_QUAL_CONST);
+  tree cv_ptr_type = build_pointer_type (cv_const);
+  tree cast_viol = build1 (NOP_EXPR, cv_ptr_type, parm_violation_ptr);
+  tree violation_ref = cp_build_indirect_ref (loc, cast_viol,
+					      RO_UNARY_STAR, tf_warning_or_error);
+
+  /* Call: lbl.handle_contract_violation(violation);  */
+  vec<tree, va_gc> *args = NULL;
+  vec_safe_push (args, violation_ref);
+  tree call = build_new_method_call (label_ref, hcv_fn, &args,
+				     NULL_TREE, LOOKUP_NORMAL,
+				     NULL, tf_none);
+
+  if (!call || call == error_mark_node)
     {
-      contract_assertion_kind kind = get_contract_assertion_kind (contract);
-      assertion_kind = build_int_cst (uint16_type_node, kind);
+      abandon_contract_trampoline (body, compound_stmt);
+      return NULL_TREE;
+    }
+
+  /* Record which overload was picked; NULL for a virtual handler, which the
+     rethrow analysis then declines to reason about.  */
+  *resolved_fn_out = cp_get_callee_fndecl_nofold (call);
+
+  tree ret_type = TREE_TYPE (call);
+  if (VOID_TYPE_P (ret_type))
+    {
+      finish_expr_stmt (call);
+      finish_return_stmt (integer_zero_node);
     }
   else
-    can_be_const = false;
-
-  tree eval_semantic = CONTRACT_EVALUATION_SEMANTIC (contract);
-  gcc_checking_assert (eval_semantic);
-  if (!really_constant_p (eval_semantic))
-    can_be_const = false;
-
-  tree comment = CONTRACT_COMMENT (contract);
-  if (comment && !really_constant_p (comment))
-    can_be_const = false;
-
-  tree std_src_loc_impl_ptr = CONTRACT_STD_SOURCE_LOC (contract);
-  if (std_src_loc_impl_ptr)
     {
-      std_src_loc_impl_ptr = convert_from_reference (std_src_loc_impl_ptr);
-      if (!really_constant_p (std_src_loc_impl_ptr))
-	can_be_const = false;
+      tree int_result = build1 (NOP_EXPR, integer_type_node, call);
+      finish_return_stmt (int_result);
     }
-  else
-    std_src_loc_impl_ptr = get_src_loc_impl_ptr (EXPR_LOCATION (contract));
 
-  /* Must match the type layout in builtin_contract_violation_type.  */
-  tree f0 = next_aggregate_field (TYPE_FIELDS (builtin_contract_violation_type));
-  tree f1 = next_aggregate_field (DECL_CHAIN (f0));
-  tree f2 = next_aggregate_field (DECL_CHAIN (f1));
-  tree f3 = next_aggregate_field (DECL_CHAIN (f2));
-  tree f4 = next_aggregate_field (DECL_CHAIN (f3));
-  tree f5 = next_aggregate_field (DECL_CHAIN (f4));
-  tree f6 = next_aggregate_field (DECL_CHAIN (f5));
-  tree ctor = build_constructor_va
-    (builtin_contract_violation_type, 7,
-     f0, build_int_cst (uint16_type_node, version),
-     f1, assertion_kind,
-     f2, eval_semantic,
-     f3, build_int_cst (uint16_type_node, detection_mode),
-     f4, comment,
-     f5, std_src_loc_impl_ptr,
-     f6, build_zero_cst (nullptr_type_node)); // __vendor_ext
+  return finish_contract_trampoline (body, compound_stmt);
+}
 
   TREE_READONLY (ctor) = true;
   if (can_be_const)
