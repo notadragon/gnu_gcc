@@ -1004,6 +1004,44 @@ diagnose_coroutine_postcondition_params (tree fndecl)
    is not on its first declaration is unaffected -- the contract lives on the
    earlier declaration, which is where it belongs.  */
 
+void
+check_contract_on_defaulted_or_deleted (tree decl, bool deleted_p)
+{
+  if (!flag_contracts || !DECL_P (decl) || TREE_CODE (decl) != FUNCTION_DECL)
+    return;
+
+  /* Only a first-declaration default is restricted.  */
+  if (!deleted_p && !DECL_DEFAULTED_IN_CLASS_P (decl))
+    return;
+
+  tree specs = get_fn_contract_specifiers (decl);
+  if (!specs || specs == error_mark_node)
+    return;
+
+  error_at (DECL_SOURCE_LOCATION (decl),
+	    deleted_p
+	    ? G_("deleted function %qD cannot have a "
+		 "function-contract-specifier")
+	    : G_("function %qD defaulted on its first declaration cannot "
+		 "have a function-contract-specifier"),
+	    decl);
+  remove_fn_contract_specifiers (decl);
+}
+
+/* Maps a FUNCTION_DECL to a TREE_LIST recording, for a declaration that
+   duplicate_decls merged away, a parameter whose dependent type was not
+   const: TREE_PURPOSE is its index in the parameter list and TREE_VALUE is
+   the PARM_DECL itself, which carries both the type to substitute and the
+   location to point at.
+
+   Keyed on the function rather than on a parameter because which PARAMETERS
+   survive a merge varies -- the definition's win -- while the surviving
+   FUNCTION_DECL is always duplicate_decls' OLDDECL, which is also the pattern
+   an instantiation is later made from.  Keying on a parameter loses any
+   declaration that is neither the first nor the last of three.
+
+   See check_postcondition_redecl_parm_types.  */
+
     }
 }
 
