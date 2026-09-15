@@ -1,0 +1,64 @@
+# Measured behaviour of every reproducer in this directory.
+#
+# Regenerate with ./verify.sh --record, and READ THE DIFF: a line
+# that moved in the STOCK column means upstream's behaviour changed,
+# which is the event that retires a row from README.md.  A line that
+# moved in the BRANCH column with stock unchanged is a regression
+# here, or a fix here, and the README Status column should follow.
+#
+# stock:  g++ (Compiler-Explorer-Build-gcc-b76fde4b175ff5f8e8ed8affede662bacb5775a4-binutils-2.44) 17.0.0 20260914 (experimental)
+# branch: g++ (GCC) 17.0.0 20260914 (experimental)
+# dated:  2026-09-14
+#
+# id | stock | branch
+GCC-1a|ice[1:12388e11]|clean
+GCC-1b|ice[1:f4203d13]|clean
+GCC-1c|error[2:e41a7277]|clean
+GCC-2|clean|clean
+GCC-3|error[4:39761ff9]|clean
+GCC-5a|ice[1:de164533]|clean
+GCC-5b|clean exit:255 out:[]|clean exit:0 out:[]
+GCC-10|clean exit:1 out:[]|clean exit:0 out:[]
+GCC-11a|error[2:55c1ac8c]|clean
+GCC-11b|error[11:788fbe23]|clean exit:0 out:[]
+GCC-12|clean exit:134 out:[contract violation in function int value_form() at gcc-12/gcc-12-result-binding-denotes-two-objects.cpp:104: same (r, &r) [assertion_kind: post, semantic: enfor]|clean exit:0 out:[value = 7 &r taken directly = 0xADDR &r via const int& = 0xADDR same object? YES]
+GCC-13|ice[1:25c3df6f]|clean
+GCC-14|ice[2:db1be632]|error[2:98d08cbe]
+GCC-15a|clean exit:0 out:[]|clean exit:0 out:[]
+GCC-15b|clean exit:19 out:[]|clean exit:0 out:[]
+GCC-16|ice[1:ede8e1fe]|clean
+GCC-17-1|clean|clean
+GCC-17-2|error[1:a638eaa0]|error[1:a638eaa0]
+GCC-17-3|error[1:7daafcdf]|error[1:7daafcdf]
+GCC-17-4|error[2:eeb94009]|error[2:eeb94009]
+GCC-17-5|error[2:b354bd35]|error[2:b354bd35]
+GCC-17-6|error[1:d6b6c423]|error[1:d6b6c423]
+GCC-17-7|error[2:a0cd55b3]|error[2:a0cd55b3]
+GCC-17-8|error[1:43cc3117]|error[1:43cc3117]
+GCC-17-9|clean|clean
+GCC-17-10|clean|clean
+GCC-17-11|error[1:90a44439]|error[1:90a44439]
+GCC-18|error[1:b3c269cd]|error[2:f2ea9536]
+GCC-19|error[48:874a85a0]|error[14:916add75]
+GCC-21|link-error[0:da39a3ee]|clean
+GCC-22|error[5:d856cb2e]|clean
+GCC-23a|clean|error[5:17ae5e08]
+GCC-23b|error[2:a19ac497]|error[2:a19ac497]
+GCC-24|ice[1:cb9a0a0b]|clean
+GCC-25|error[41:cf71600a]|clean[2:97bc88c4]
+GCC-26|error[8:baa9eff3]|error[14:f6ce4745]
+GCC-27|clean|clean
+GCC-28|error[7:7afd2dd9]|error[10:e94f6acb]
+GCC-29|ice[1:fa331d41]|clean
+GCC-30|error[2:1fae0a07]|error[6:04d4ba50]
+GCC-31|error[9:e4de6f05]|clean
+GCC-33|ice[1:93f20e65]|clean
+GCC-36b|error[4:146af8f0]|error[2:3899586e]
+GCC-37a|ice[1:06e78834]|clean
+GCC-37b|ice[2:1ccf84a9]|clean
+GCC-38|clean[1:4a54d28a]|clean
+GCC-39|error[1:79ca4bb7]|error[1:79ca4bb7]
+GCC-42a|error[3:a3e9abdf]|clean[4:d276aaca]
+GCC-42b|error[3:a3e9abdf]|clean exit:1 out:[]
+GCC-43a|error[1:b17d36ce]|clean
+GCC-43b|clean exit:0 out:[]|clean exit:0 out:[]
