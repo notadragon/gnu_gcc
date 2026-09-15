@@ -2654,10 +2654,18 @@ check_redecl_contract (tree newdecl, tree olddecl)
   else if (contract_any_deferred_p (old_contracts)
 	   || contract_any_deferred_p (new_contracts))
     {
-      /* TODO: ignore these and figure out how to process them later.  */
-      /* Note that a friend declaration has deferred contracts, but the
-	 declaration of the same function outside the class definition
-	 doesn't.  */
+      /* Known limitation: when either side still has DEFERRED_PARSE contracts at
+	 this merge point -- which happens for a friend declaration, whose
+	 contracts are late-parsed at the end of the class, while the same
+	 function declared outside the class definition is not deferred --
+	 redeclaration contract matching is skipped here and is never re-run once
+	 the contracts are late-parsed.  A contract *mismatch* between two such
+	 declarations (e.g. two friend declarations of the same function with
+	 different predicates) is therefore silently accepted rather than
+	 diagnosed, unlike every non-deferred redeclaration path.  Diagnosing it
+	 would require queuing the deferred contracts and comparing them after
+	 late-parse.  See g++.dg/contracts/cpp26/contract-friend-deferred-mismatch.C
+	 (xfail).  */
     }
   else
     {
