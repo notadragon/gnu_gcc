@@ -3468,6 +3468,9 @@ diagnosed.
 @opindex Wcontract-invalid-label-facet
 @opindex Wno-contract-invalid-label-facet
 @item -Wcontract-invalid-label-facet
+Enable all of the contracts extension papers listed below.  Equivalent to
+giving each @option{-fcontracts-p@var{nnnn}} option individually.
+
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines
