@@ -33932,6 +33932,72 @@ cp_parser_late_contracts (cp_parser *parser, tree fndecl)
   update_fn_contract_specifiers (fndecl, contracts);
 }
 
+static cp_expr
+cp_parser_contract_result_name (cp_parser *parser, bool postcondition_p,
+				tree *attrs /* = NULL */)
+{
+  if (attrs)
+    *attrs = NULL_TREE;
+
+  if (!cp_lexer_next_token_is (parser->lexer, CPP_NAME))
+    return NULL_TREE;
+
+  /* result-name-introducer:
+       identifier attribute-specifier-seq[opt] :
+
+     The attribute-specifier-seq is easy to miss: only the plain
+     `identifier :' spelling was recognized, so `post (r [[maybe_unused]]: c)'
+     fell through and was parsed as the start of the predicate, producing a
+     cascade of five unrelated errors beginning with "'r' was not declared in
+     this scope" (PR c++/125725).
+
+     An attribute can only follow the identifier here, so parse tentatively:
+     if what follows the attributes is not a colon this was never a
+     result-name-introducer, and the whole thing has to go back to being
+     parsed as a predicate.  */
+  cp_token *after = cp_lexer_peek_nth_token (parser->lexer, 2);
+  bool maybe_attrs = (after->type != CPP_COLON);
+  if (maybe_attrs)
+    {
+      if (after->type != CPP_OPEN_SQUARE
+	  && after->keyword != RID_ALIGNAS
+	  && after->keyword != RID_ATTRIBUTE)
+	return NULL_TREE;
+      cp_parser_parse_tentatively (parser);
+    }
+
+  /* The CPP_NAME above guarantees this succeeds.  */
+  cp_expr identifier = cp_parser_identifier (parser);
+
+  tree parsed_attrs = NULL_TREE;
+  if (maybe_attrs)
+    {
+      parsed_attrs = cp_parser_attributes_opt (parser);
+      if (!cp_lexer_next_token_is (parser->lexer, CPP_COLON))
+	{
+	  cp_parser_abort_tentative_parse (parser);
+	  return NULL_TREE;
+	}
+      if (!cp_parser_parse_definitely (parser))
+	return NULL_TREE;
+      /* Committed: the lexer now sits on the colon consumed below.  */
+    }
+
+  cp_parser_require (parser, CPP_COLON, RT_COLON);
+  if (attrs)
+    *attrs = parsed_attrs;
+
+  if (!postcondition_p)
+    {
+      error_at (identifier.get_location (),
+		"result name %qE not allowed outside of post condition "
+		"specifier", identifier.get_value ());
+      return NULL_TREE;
+    }
+
+  return identifier;
+}
+
 static tree
 cp_parser_contract_assert (cp_parser *parser, cp_token *token)
 {
@@ -33960,6 +34026,13 @@ cp_parser_contract_assert (cp_parser *parser, cp_token *token)
 
   matching_parens parens;
   parens.require_open (parser);
+
+  /* A result name is only meaningful on a postcondition; diagnose one here
+     rather than letting it fall through as the start of the predicate.
+     Recovery is to carry on and parse the predicate: the introducer has
+     been consumed, so the rest of the assertion is still intelligible.  */
+  cp_parser_contract_result_name (parser, false);
+
   /* Enable location wrappers when parsing contracts.  */
   auto suppression = make_temp_override (suppress_location_wrappers, 0);
 
@@ -34076,23 +34149,21 @@ cp_parser_function_contract_specifier (cp_parser *parser)
   matching_parens parens;
   parens.require_open (parser);
 
-  /* Check for postcondition identifiers.  */
-  cp_expr identifier;
-  if (postcondition_p && cp_lexer_next_token_is (parser->lexer, CPP_NAME)
-      && cp_lexer_peek_nth_token (parser->lexer, 2)->type == CPP_COLON)
-    identifier = cp_parser_identifier (parser);
+  /* Check for postcondition identifiers.
 
-  if (identifier == error_mark_node)
-    {
-      cp_parser_skip_to_closing_parenthesis (parser,
-					     /*recovering=*/true,
-					     /*or_comma=*/false,
-					     /*consume_paren=*/true);
-      return error_mark_node;
-    }
-
-  if (identifier)
-    cp_parser_require (parser, CPP_COLON, RT_COLON);
+     RESULT_ATTRS holds any attribute-specifier-seq written on the result
+     name.  It is applied below, where the result variable is built -- but
+     only on this path: an in-class contract defers its predicate, and its
+     result variable is built later, in cp_parser_late_contracts, from the
+     identifier stored on the contract node, which has nowhere to carry the
+     attributes.  So an attribute on an in-class postcondition result name is
+     accepted and then ignored.  That is a known and tested limitation rather
+     than an oversight; closing it means carrying the attributes on the
+     contract node too.  Nothing in the standard library's use of contracts
+     needs it, and the attributes that make sense here are advisory.  */
+  tree result_attrs = NULL_TREE;
+  cp_expr identifier
+    = cp_parser_contract_result_name (parser, postcondition_p, &result_attrs);
 
   tree contract;
   if (current_class_type && TYPE_BEING_DEFINED (current_class_type))
@@ -34143,6 +34214,8 @@ cp_parser_function_contract_specifier (cp_parser *parser)
 	{
 	  /* Build a fake variable for the result identifier.  */
 	  result = make_postcondition_variable (identifier);
+	  if (result_attrs && result != error_mark_node)
+	    cplus_decl_attributes (&result, result_attrs, 0);
 	  ++processing_template_decl;
 	}
       cp_expr condition = cp_parser_conditional_expression (parser);
