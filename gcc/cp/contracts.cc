@@ -204,6 +204,131 @@ mismatched_contracts_p (tree old_contract, tree new_contract)
       return true;
     }
 
+  /* Compare user-defined diagnostic messages (P3099).  Both must specify
+     a message with the same text, or neither specifies one.  */
+  tree old_msg = CONTRACT_MESSAGE (old_contract);
+  tree new_msg = CONTRACT_MESSAGE (new_contract);
+  if ((old_msg == NULL_TREE) != (new_msg == NULL_TREE)
+      || (old_msg && new_msg
+	  && (TREE_STRING_LENGTH (old_msg) != TREE_STRING_LENGTH (new_msg)
+	      || memcmp (TREE_STRING_POINTER (old_msg),
+			 TREE_STRING_POINTER (new_msg),
+			 TREE_STRING_LENGTH (old_msg)) != 0)))
+    {
+      auto_diagnostic_group d;
+      error_at (EXPR_LOCATION (new_contract),
+		"mismatched contract diagnostic message in declaration");
+      inform (EXPR_LOCATION (old_contract), "previous contract here");
+      return true;
+    }
+
+  /* Compare assertion-control labels (P3400).  Both must specify the same
+     label, or neither specifies one.  */
+  tree old_label = CONTRACT_LABEL (old_contract);
+  tree new_label = CONTRACT_LABEL (new_contract);
+  if ((old_label == NULL_TREE) != (new_label == NULL_TREE))
+    {
+      auto_diagnostic_group d;
+      error_at (EXPR_LOCATION (new_contract),
+		"mismatched assertion-control label in declaration");
+      inform (EXPR_LOCATION (old_contract), "previous contract here");
+      return true;
+    }
+  if (old_label && new_label)
+    {
+      tree l1 = cp_fully_fold_init (old_label);
+      tree l2 = cp_fully_fold_init (new_label);
+      if (!cp_tree_equal (l1, l2))
+	{
+	  auto_diagnostic_group d;
+	  error_at (EXPR_LOCATION (new_contract),
+		    "mismatched assertion-control label in declaration");
+	  inform (EXPR_LOCATION (old_contract), "previous contract here");
+	  return true;
+	}
+    }
+
+  /* Compare postcondition captures (P3098).  */
+  if (TREE_CODE (old_contract) == POSTCONDITION_STMT)
+    {
+      tree old_caps = POSTCONDITION_CAPTURES (old_contract);
+      tree new_caps = POSTCONDITION_CAPTURES (new_contract);
+
+      /* Both must have captures or neither.  */
+      if ((old_caps == NULL_TREE) != (new_caps == NULL_TREE))
+	{
+	  auto_diagnostic_group d;
+	  error_at (EXPR_LOCATION (new_contract),
+		    "mismatched postcondition captures in declaration");
+	  inform (EXPR_LOCATION (old_contract), "previous contract here");
+	  return true;
+	}
+
+      /* Compare captures pairwise: same count, same names, same inits.  */
+      if (old_caps && new_caps)
+	{
+	  tree oc = old_caps, nc = new_caps;
+	  bool saved_cc = comparing_contracts;
+	  comparing_contracts = true;
+	  for (; oc && nc; oc = TREE_CHAIN (oc), nc = TREE_CHAIN (nc))
+	    {
+	      tree old_var = TREE_VALUE (oc);
+	      tree new_var = TREE_VALUE (nc);
+	      if (DECL_NAME (old_var) != DECL_NAME (new_var)
+		  || !cp_tree_equal (DECL_INITIAL (old_var),
+				     DECL_INITIAL (new_var)))
+		{
+		  comparing_contracts = saved_cc;
+		  auto_diagnostic_group d;
+		  error_at (EXPR_LOCATION (new_contract),
+			    "mismatched postcondition captures in declaration");
+		  inform (EXPR_LOCATION (old_contract),
+			  "previous contract here");
+		  return true;
+		}
+	    }
+	  comparing_contracts = saved_cc;
+	  if (oc || nc)
+	    {
+	      auto_diagnostic_group d;
+	      error_at (EXPR_LOCATION (new_contract),
+			"mismatched postcondition captures in declaration");
+	      inform (EXPR_LOCATION (old_contract), "previous contract here");
+	      return true;
+	    }
+	}
+    }
+
+  /* Compare requires-clauses (P4283).  Both must specify the same
+     constraint, or neither specifies one.  */
+  tree old_req = CONTRACT_REQUIRES_CLAUSE (old_contract);
+  tree new_req = CONTRACT_REQUIRES_CLAUSE (new_contract);
+  if ((old_req == NULL_TREE) != (new_req == NULL_TREE))
+    {
+      auto_diagnostic_group d;
+      error_at (EXPR_LOCATION (new_contract),
+		"mismatched requires clause on contract assertion "
+		"in declaration");
+      inform (EXPR_LOCATION (old_contract), "previous contract here");
+      return true;
+    }
+  if (old_req && new_req)
+    {
+      bool saved_cc = comparing_contracts;
+      comparing_contracts = true;
+      bool match = cp_tree_equal (old_req, new_req);
+      comparing_contracts = saved_cc;
+      if (!match)
+	{
+	  auto_diagnostic_group d;
+	  error_at (EXPR_LOCATION (new_contract),
+		    "mismatched requires clause on contract assertion "
+		    "in declaration");
+	  inform (EXPR_LOCATION (old_contract), "previous contract here");
+	  return true;
+	}
+    }
+
   return false;
 }
 
@@ -5423,13 +5548,20 @@ resolve_contract_label (tree contract, tree label, location_t loc)
       = build_int_cst (uint16_type_node, allowed_mask);
 }
 
+tree
+grok_contract (tree contract_spec, tree result, cp_expr condition,
+	       location_t loc, tree message, tree label,
+	       tree requires_clause)
 {
   if (condition == error_mark_node)
     return error_mark_node;
 
   tree_code code;
   contract_assertion_kind kind = CAK_INVALID;
-  if (id_equal (contract_spec, "contract_assert"))
+  /* Both the standard spelling "contract_assert" and the extension spelling
+     "__contract_assert" (see c-common.cc) tokenize to RID_CONTASSERT.  */
+  if (id_equal (contract_spec, "contract_assert")
+      || id_equal (contract_spec, "__contract_assert"))
     {
       code = ASSERTION_STMT;
       kind = CAK_ASSERT;
@@ -5452,24 +5584,46 @@ resolve_contract_label (tree contract, tree label, location_t loc)
      variable.  */
   tree contract;
   if (code != POSTCONDITION_STMT)
-    contract = build5_loc (loc, code, void_type_node, mode,
+    {
+      /* PRECONDITION_STMT / ASSERTION_STMT: 12 operands, all NULL_TREE.
+	 Operands are filled in below and by ensure_evaluation_semantic.  */
+      contract = build_nt (code,
+			   NULL_TREE, NULL_TREE, NULL_TREE, NULL_TREE,
+			   NULL_TREE, NULL_TREE, NULL_TREE, NULL_TREE,
 			   NULL_TREE, NULL_TREE, NULL_TREE, NULL_TREE);
+      TREE_TYPE (contract) = void_type_node;
+      SET_EXPR_LOCATION (contract, loc);
+    }
   else
     {
-      contract = build_nt (code, mode, NULL_TREE, NULL_TREE,
-			   NULL_TREE, NULL_TREE, result);
+      /* POSTCONDITION_STMT: 14 operands; result (identifier) at op 12.  */
+      contract = build_nt (code,
+			   NULL_TREE, NULL_TREE, NULL_TREE, NULL_TREE,
+			   NULL_TREE, NULL_TREE, NULL_TREE, NULL_TREE,
+			   NULL_TREE, NULL_TREE, NULL_TREE, NULL_TREE,
+			   result, NULL_TREE);
       TREE_TYPE (contract) = void_type_node;
       SET_EXPR_LOCATION (contract, loc);
     }
 
+  CONTRACT_LABEL (contract) = label;
+  CONTRACT_REQUIRES_CLAUSE (contract) = requires_clause;
+
+  /* Validate the label and compute its derived facets.  Deliberately not
+     gated on whether CONDITION is deferred: for an in-class-defined member
+     function, only the predicate is deferred, never the label, so the label
+     is fully available here regardless.  (A template-dependent label is
+     handled separately, by tsubst_contract calling this again once the
+     label has been substituted to a concrete value.)  */
+  resolve_contract_label (contract, label, loc);
+
   /* Determine the assertion kind.  */
   CONTRACT_ASSERTION_KIND (contract) = build_int_cst (uint16_type_node, kind);
 
-  /* Determine the evaluation semantic.  This is now an override, so that if
-     not set we will get the default (currently enforce).  */
-  CONTRACT_EVALUATION_SEMANTIC (contract)
-    = build_int_cst (uint16_type_node, (uint16_t)
-		     flag_contract_evaluation_semantic);
+  /* Validate and extract the user-defined diagnostic message (P3099) and apply
+     the compute_message facet (P3400).  For a deferred contract the extraction
+     is redone from the late-parse path once the condition is available.  */
+  finish_contract_message (contract, message, condition, loc);
 
   /* If the contract is deferred, don't do anything with the condition.  */
   if (TREE_CODE (condition) == DEFERRED_PARSE)
@@ -5481,6 +5635,11 @@ resolve_contract_label (tree contract, tree label, location_t loc)
   /* Generate the comment from the original condition.  */
   CONTRACT_COMMENT (contract) = build_comment (condition);
 
+  /* Apply compute_comment facet (P3400) if present.  */
+  CONTRACT_COMMENT (contract)
+    = apply_label_string_facet (label, "compute_comment",
+				CONTRACT_COMMENT (contract), loc);
+
   /* The condition is converted to bool.  */
   condition = finish_contract_condition (condition);
 
@@ -5488,6 +5647,15 @@ resolve_contract_label (tree contract, tree label, location_t loc)
     return error_mark_node;
 
   CONTRACT_CONDITION (contract) = condition;
+
+  /* A contract outside a class definition is parsed here and now rather than
+     deferred, so this is where its predicate is complete.  There is no
+     FUNCTION_DECL yet -- we are still in the declarator -- and none is
+     needed: on this path any parameter belonging to a lambda's operator() is
+     necessarily a lambda written inside the predicate, because a contract on
+     a lambda is itself deferred and finishes in update_late_contract.  */
+  if (POSTCONDITION_P (contract))
+    check_postcondition_param_odr_uses (condition, NULL_TREE, loc);
 
   return contract;
 }
