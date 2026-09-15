@@ -2759,6 +2759,63 @@ cp_genericize (tree fndecl)
   if (DECL_CLONED_FUNCTION_P (fndecl))
     return;
 
+  /* P3100 (assume): when -fcontracts-p3100 resolves the user-space
+     address check to assume, AddressSanitizer must not instrument -- byte
+     identical to a build without -fsanitize=address for that check.  Realize
+     this per function by marking the definition no_sanitize("address").  Unlike
+     gating the asan pass on the front-end flags (which are gone at LTRANS), the
+     no_sanitize attribute lives in DECL_ATTRIBUTES and streams through LTO, so
+     pass_asan honors it under both -flto and non-LTO.  */
+  if (flag_contracts_p3100
+      && (flag_sanitize & SANITIZE_ADDRESS)
+      && resolved_sanitizer_semantic (SANITIZE_USER_ADDRESS) == CES_ASSUME)
+    add_no_sanitize_value (fndecl, SANITIZE_ADDRESS);
+
+  /* Same for the two ASan pointer-pair checks (pointer-compare,
+     pointer-subtract): when one resolves to assume, its instrumentation
+     (__sanitizer_ptr_cmp / __sanitizer_ptr_sub) must not be emitted.  Each is a
+     dedicated ASan-family bit, so mark no_sanitize for it individually.  */
+  if (flag_contracts_p3100)
+    {
+      static const sanitize_code_type pointer_pair_bits[]
+	= { SANITIZE_POINTER_COMPARE, SANITIZE_POINTER_SUBTRACT };
+      for (unsigned i = 0; i < ARRAY_SIZE (pointer_pair_bits); ++i)
+	if ((flag_sanitize & pointer_pair_bits[i])
+	    && (resolved_sanitizer_semantic (pointer_pair_bits[i])
+		== CES_ASSUME))
+	  add_no_sanitize_value (fndecl, pointer_pair_bits[i]);
+    }
+
+  /* Same for the routed UBSan runtime checks (vptr, alignment, object-size,
+     nonnull-attribute, returns-nonnull-attribute, pointer-overflow): when one
+     resolves to assume, its instrumentation must not be emitted (byte identical
+     to a build without that -fsanitize= check), realized per function via
+     no_sanitize so it streams through LTO.  */
+  if (flag_contracts_p3100)
+    {
+      /* Generated from cp/contracts-routed-checks.def -- the same list the
+	 wire descriptor is built from, so a check cannot be routed without
+	 also being realizable as "assume" here.  */
+      static const sanitize_code_type routed_ubsan_bits[] = {
+#define DEF_ROUTED_UBSAN_CHECK(ID, BIT) BIT,
+#include "contracts-routed-checks.def"
+      };
+      for (unsigned i = 0; i < ARRAY_SIZE (routed_ubsan_bits); ++i)
+	if ((flag_sanitize & routed_ubsan_bits[i])
+	    && (resolved_sanitizer_semantic (routed_ubsan_bits[i])
+		== CES_ASSUME))
+	  add_no_sanitize_value (fndecl, routed_ubsan_bits[i]);
+    }
+
+  /* Same for ThreadSanitizer: when -fcontracts-p3100 resolves the thread check
+     to assume, TSan must not instrument this function (byte identical to a
+     build without -fsanitize=thread), realized per function via no_sanitize so
+     it streams through LTO -- mirror of the ASan assume line above.  */
+  if (flag_contracts_p3100
+      && (flag_sanitize & SANITIZE_THREAD)
+      && resolved_sanitizer_semantic (SANITIZE_THREAD) == CES_ASSUME)
+    add_no_sanitize_value (fndecl, SANITIZE_THREAD);
+
   /* Allow cp_genericize calls to be nested.  */
   bc_state_t save_state;
   save_bc_state (&save_state);

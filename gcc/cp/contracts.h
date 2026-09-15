@@ -273,6 +273,11 @@ extern contract_evaluation_semantic ensure_evaluation_semantic
    the P4298 noexcept variants are added under -fcontracts-p4298.  A configured
    semantic outside the resulting set is clamped via the resolution fallback
    order.  */
+extern contract_evaluation_semantic resolve_implicit_contract_semantic
+  (tree, location_t, const char *, uint16_t = CES_ALL_ALLOWED);
+/* P3100: build the GENERIC reaction to append at a value-returning function's
+   fall-off point for the resolved semantic SEM (NULL_TREE for assume /
+   none).  */
 extern void maybe_instantiate_contracts (tree);
 
 /* Will this contract be ignored.  */
