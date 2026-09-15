@@ -2030,6 +2030,10 @@ fcontracts-p3097
 C++ ObjC++ Var(flag_contracts_p3097) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P3097 contract assertions on virtual functions.
 
+fcontracts-p4283
+C++ ObjC++ Var(flag_contracts_p4283) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P4283 requires clauses on contract assertions.
+
 fcoroutines
 C++ ObjC++ LTO Var(flag_coroutines)
 Enable C++ coroutines (experimental).

@@ -34243,6 +34243,63 @@ cp_parser_assertion_control_specifier (cp_parser *parser)
    return it.  Otherwise return NULL_TREE.  Diagnoses errors if the flag
    is not enabled or the function is not templated.  */
 
+static tree
+cp_parser_contract_requires_clause (cp_parser *parser)
+{
+  if (cp_lexer_peek_token (parser->lexer)->keyword != RID_REQUIRES)
+    return NULL_TREE;
+
+  location_t loc = cp_lexer_peek_token (parser->lexer)->location;
+
+  if (!flag_contracts_p4283)
+    {
+      error_at (loc,
+		"requires clause on contract assertions requires "
+		"%<-fcontracts-p4283%>");
+      /* Skip requires(...) to recover.  */
+      cp_lexer_consume_token (parser->lexer);
+      if (cp_lexer_next_token_is (parser->lexer, CPP_OPEN_PAREN))
+	cp_parser_skip_to_closing_parenthesis (parser, true, false, true);
+      return error_mark_node;
+    }
+
+  if (!processing_template_decl)
+    {
+      error_at (loc,
+		"requires clause on contract assertion only allowed on "
+		"templated functions");
+      cp_lexer_consume_token (parser->lexer);
+      if (cp_lexer_next_token_is (parser->lexer, CPP_OPEN_PAREN))
+	cp_parser_skip_to_closing_parenthesis (parser, true, false, true);
+      return error_mark_node;
+    }
+
+  /* Parse the requires-clause (including consuming 'requires').  Pass
+     lambda_p=true so that a '(' following the constraint (which is the
+     contract predicate) is not mistaken for a postfix function-call.  */
+  return cp_parser_requires_clause_opt (parser, /*lambda_p=*/true);
+}
+
+/* Parse an optional result-name-introducer
+
+     result-name-introducer:
+       identifier ':'
+
+   immediately inside a contract's condition parentheses.  Always parsed
+   -- even when POSTCONDITION_P is false -- so that a result name
+   misplaced on a precondition or contract_assert (which cannot declare
+   one) gets a targeted diagnostic naming the real problem, instead of
+   having its identifier fall through and be parsed as the start of the
+   predicate.  Doing so turns what was a "found ':' in
+   nested-name-specifier" cascade into one accurate error.
+
+   Returns the parsed identifier, or NULL_TREE if none is present or one
+   was present and rejected.
+
+   Note the grammar in the working paper writes attributed-identifier
+   here; an attribute on the result name is not accepted, matching the
+   pre-existing behaviour of the code this replaced.  */
+
 static cp_expr
 cp_parser_contract_result_name (cp_parser *parser, bool postcondition_p,
 				tree *attrs /* = NULL */)
@@ -35533,6 +35590,12 @@ cp_parser_constraint_requires_parens (cp_parser *parser, bool lambda_p)
 	  /* A primary-constraint-expression followed by a '[[' is not a
 	     postfix expression.  */
 	  if (cp_lexer_nth_token_is (parser->lexer, 2, CPP_OPEN_SQUARE))
+	    return pce_ok;
+
+	  /* In a contract requires-clause (lambda_p), a following '[' opens the
+	     postcondition capture list, not a subscript -- mirror the '(' case
+	     (the contract predicate) above.  */
+	  if (lambda_p)
 	    return pce_ok;
 
 	  gcc_fallthrough ();
