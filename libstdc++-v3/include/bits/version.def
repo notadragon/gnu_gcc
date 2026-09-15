@@ -2506,6 +2506,15 @@ ftms = {
 };
 
 ftms = {
+  name = contracts_report;
+  values = {
+    v = 202607;
+    cxxmin = 26;
+    extra_cond = "defined(__cpp_contracts_report)";
+  };
+};
+
+ftms = {
   name = simd;
   values = {
     no_stdname = true; // TODO: change once complete
