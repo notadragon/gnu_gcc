@@ -8616,6 +8616,72 @@ build_implicit_flow_off_check (tree fndecl, location_t loc,
    the CAK_IMPLICIT entry points (assertion_kind::implicit).  Builds GENERIC.  */
 
 tree
+build_implicit_coroutine_flow_off_check (tree fndecl, location_t loc,
+					 contract_evaluation_semantic sem)
+{
+  (void) fndecl;   /* Kept for signature symmetry with the flow-off builder.  */
+  if (sem == CES_ASSUME || sem == CES_IGNORE)
+    return NULL_TREE;
+
+  if (sem == CES_QUICK)
+    return build_quick_enforce_reaction (loc);
+
+  bool is_noexcept = (sem == CES_NOEXCEPT_ENFORCE
+		      || sem == CES_NOEXCEPT_OBSERVE);
+
+  tree contract = make_node (ASSERTION_STMT);
+  TREE_TYPE (contract) = void_type_node;
+  SET_EXPR_LOCATION (contract, loc);
+  CONTRACT_COMMENT (contract)
+    = build_string_literal ("control flowed off the end of a coroutine");
+
+  tree block_type;
+  tree ctor = build_contract_data_block_ctor (contract, &block_type);
+  tree data_var = build_contract_data_block_constant (ctor, block_type,
+						      contract);
+  tree data_addr = build_address (data_var);
+
+  tree entry = declare_cxa_entry_point (CAK_IMPLICIT, sem,
+					CDM_PREDICATE_FALSE, is_noexcept);
+  tree call = build_call_n (entry, 1, data_addr);
+  SET_EXPR_LOCATION (call, loc);
+  /* enforce/noexcept_enforce: the entry point is noreturn.  observe/
+     noexcept_observe: it returns and control continues to the final suspend.
+     Either way the call is the whole reaction -- no defined return.  */
+  return call;
+}
+
+/* P3100: select the __cxa_pure_virtual terminus for a pure virtual.
+
+   A call that dispatches to a pure virtual function
+   ({class.abstract.pure.virtual}) is core-language UB.  The "check" here is the
+   vtable slot itself: instead of the legacy __cxa_pure_virtual (which prints a
+   message and terminates), point the slot at a semantic-specific terminus that
+   reports the violation through the contract-violation handler as an implicit
+   (assertion_kind::implicit) assertion.  The slot stays a plain function
+   pointer -- only its default value changes.
+
+   The semantic is resolved HERE, where the vtable is emitted, using the class's
+   own definition location and namespace, so per-file/line and per-namespace
+   P3595 configuration selects it per class.  (The vtable is emitted once per
+   program for a class with a key function -- in that function's translation
+   unit -- and in every user translation unit otherwise; the configuration
+   active where the vtable is built therefore governs, and may differ across
+   translation units.  That is an accepted consequence of a shared terminus with
+   no per-call site.)
+
+   FN_ORIGINAL is the pure virtual filling the slot; its declared exception
+   specification chooses between the throwing terminus and the noexcept
+   (terminate-on-throw) terminus, so a throwing handler on a noexcept pure
+   virtual still terminates rather than escaping into a caller that assumed the
+   call could not throw.
+
+   Returns the terminus FUNCTION_DECL, or NULL_TREE when the caller should keep
+   the legacy __cxa_pure_virtual: -fcontracts-p3100 off, or the resolved
+   semantic is assume/ignore (a pure-virtual call has no defined value to
+   substitute, so ignore is the status quo).  */
+
+tree
 build_implicit_pure_virtual_terminus (tree fn_original)
 {
   if (!flag_contracts_p3100)

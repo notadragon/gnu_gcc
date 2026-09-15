@@ -283,6 +283,10 @@ extern tree build_implicit_flow_off_check
 /* P3100: reaction for control flowing off the end of a coroutine with no
    return_void ({stmt.return.coroutine.flow.off}); NULL_TREE for
    assume/ignore.  */
+extern tree build_implicit_coroutine_flow_off_check
+  (tree, location_t, contract_evaluation_semantic);
+/* P3100: build `if (!cond) <reaction>` for a configurable [[assume (cond)]]
+   whose site resolves to a checking semantic (see build_assume_call).  */
 extern tree build_implicit_divide_check
   (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
 /* P3100: build the guarded replacement for an integer shift SHIFT_RESULT (OP0
