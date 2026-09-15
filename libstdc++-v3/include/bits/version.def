@@ -2455,6 +2455,15 @@ ftms = {
 };
 
 ftms = {
+  name = contracts_message;
+  values = {
+    v = 202606;
+    cxxmin = 26;
+    extra_cond = "defined(__cpp_contracts_message)";
+  };
+};
+
+ftms = {
   name = contracts_api;
   values = {
     v = 202606;

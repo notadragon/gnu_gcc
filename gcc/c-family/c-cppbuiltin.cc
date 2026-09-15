@@ -1147,6 +1147,8 @@ c_cpp_builtins (cpp_reader *pfile)
 	cpp_define (pfile, "__cpp_contracts=202502L");
       else if (cxx_dialect >= cxx26)
 	cpp_warn (pfile, "__cpp_contracts");
+      if (flag_contracts_p3099)
+	cpp_define (pfile, "__cpp_contracts_message=202606L");
       if (flag_contracts_p3290)
 	cpp_define (pfile, "__gcc_contracts_p3290=202606L");
       if (flag_modules)
