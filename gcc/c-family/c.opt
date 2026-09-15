@@ -1947,8 +1947,7 @@ EnumValue
 Enum(contract_semantic) String(noexcept_enforce) Value(7)
 
 fcontract-evaluation-semantic=
-C++ ObjC++ Joined RejectNegative Enum(contract_semantic) Var(flag_contract_evaluation_semantic) Init(3)
--fcontract-evaluation-semantic=[ignore|observe|enforce|quick_enforce]	Select the contract evaluation semantic (defaults to enforce).
+C C++ ObjC ObjC++ Joined RejectNegative Enum(contract_semantic) Var(flag_contract_evaluation_semantic) Init(3)
 
 fcontracts-conservative-ipa
 C++ ObjC++ Var(flag_contracts_conservative_ipa) Init(1)
@@ -1983,7 +1982,7 @@ EnumValue
 Enum(client_contract_check) String(all) Value(2)
 
 fcontracts-client-check=
-C++ ObjC++ Joined RejectNegative Enum(client_contract_check) Var(flag_contract_client_check) Init (0)
+C C++ ObjC ObjC++ Joined RejectNegative Enum(client_contract_check) Var(flag_contract_client_check) Init (0)
 -fcontracts-client-check=[none|pre|all] Select which contracts will be checked on the client side for non virtual functions.
 
 Enum
@@ -1996,7 +1995,7 @@ EnumValue
 Enum(on_off) String(on) Value(1)
 
 fcontracts-definition-check=
-C++ ObjC++ Joined RejectNegative Enum(on_off) Var(flag_contracts_definition_check) Init(1)
+C C++ ObjC ObjC++ Joined RejectNegative Enum(on_off) Var(flag_contracts_definition_check) Init(1)
 -fcontracts-definition-check=[on|off]	Enable or disable contract checks on the definition side for all functions (default on).
 
 fcontract-group-evaluation-semantic=
@@ -2038,6 +2037,10 @@ Enable P3097 contract assertions on virtual functions.
 fcontracts-p4283
 C++ ObjC++ Var(flag_contracts_p4283) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P4283 requires clauses on contract assertions.
+
+fcontracts-p4299
+C ObjC Var(flag_contracts_p4299) Init(0)
+Enable C contracts support (D4299).
 
 fcontracts-p4298
 C++ ObjC++ Var(flag_contracts_p4298) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)

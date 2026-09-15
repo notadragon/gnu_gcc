@@ -76,6 +76,9 @@ along with GCC; see the file COPYING3.  If not see
 #include "toplev.h"
 #include "asan.h"
 #include "c-family/c-ubsan.h"
+#include "c-family/contracts-config.h"
+#include "c-family/contracts-config-query.h"
+#include "c-family/contracts-config-source.h"
 #include "gcc-urlifier.h"
 
 /* We need to walk over decls with incomplete struct/union/enum types
@@ -86,6 +89,43 @@ along with GCC; see the file COPYING3.  If not see
    and report error if any of the decls are still incomplete.  */
 
 vec<tree> incomplete_record_decls;
+
+/* Pending C contract specifier tokens for the current function
+   definition.  During declarator parsing, contract conditions can't
+   be parsed because parameters aren't in scope yet.  We save the raw
+   tokens and re-parse after store_parm_decls().  Each entry holds
+   the kind (CAK_PRE/CAK_POST), the location, and the token range
+   (start/end indices into the saved buffer).  */
+struct c_pending_contract {
+  int kind;
+  location_t loc;
+  unsigned start;
+  unsigned end;
+  bool has_result_name;
+  tree result_name;
+  location_t cond_start;
+  location_t cond_end;
+};
+static vec<c_token> pending_contract_tokens;
+static vec<c_pending_contract> pending_contracts;
+
+/* Cached helper function declarations for contract checks.
+   These persist across function boundaries.  */
+static tree c_contract_enforce_decl;
+static tree c_contract_observe_decl;
+
+/* Active postconditions for the current function being compiled.
+   Populated by c_inject_pending_contracts, consumed by
+   c_finish_return via c_maybe_check_postconditions.  */
+struct c_active_postcondition {
+  tree fndecl;
+  tree predicate;
+  location_t loc;
+  tree result_var;
+  location_t cond_start;
+  location_t cond_end;
+};
+static vec<c_active_postcondition> active_postconditions;
 
 void
 set_c_expr_source_range (c_expr *expr,
@@ -137,6 +177,8 @@ c_parse_init (void)
     }
   if (!c_dialect_objc ())
     mask |= D_OBJC | D_CXX_OBJC;
+  if (!flag_contracts_p4299)
+    mask |= D_C_CONTRACTS;
 
   ridpointers = ggc_cleared_vec_alloc<tree> ((int) RID_MAX);
   for (i = 0; i < num_c_common_reswords; i++)
@@ -1815,6 +1857,12 @@ static bool c_parser_handle_statement_omp_attributes (c_parser *, tree &,
 						      bool *);
 static void c_parser_static_assert_declaration_no_semi (c_parser *);
 static void c_parser_static_assert_declaration (c_parser *);
+static tree c_parser_contract_assert (c_parser *);
+static void c_parser_contract_specifiers (c_parser *);
+static void c_inject_pending_contracts (c_parser *);
+static tree c_get_contract_helper_decl (int semantic);
+void c_clear_postconditions (void);
+void c_clear_postconditions_for (tree);
 static struct c_typespec c_parser_enum_specifier (c_parser *);
 static struct c_typespec c_parser_struct_or_union_specifier (c_parser *);
 static tree c_parser_struct_declaration (c_parser *, tree *);
@@ -3169,6 +3217,15 @@ c_parser_declaration_or_fndef (c_parser *parser, bool fndef_ok,
 	    {
 	      if (!simple_ok)
 		c_parser_consume_token (parser);
+	      /* Contract specifiers on a non-defining declaration (e.g. a
+		 function prototype) have no effect; discard them so they
+		 cannot leak into a subsequent contract-free definition
+		 (D4299).  */
+	      if (flag_contracts_p4299 && !pending_contracts.is_empty ())
+		{
+		  pending_contracts.truncate (0);
+		  pending_contract_tokens.truncate (0);
+		}
 	      return result;
 	    }
 	  else if (c_parser_next_token_is_keyword (parser, RID_IN))
@@ -3294,12 +3351,31 @@ c_parser_declaration_or_fndef (c_parser *parser, bool fndef_ok,
       int save_debug_nonbind_markers_p = debug_nonbind_markers_p;
       debug_nonbind_markers_p = 0;
       c_parser_maybe_reclassify_token (parser);
+      /* Each old-style parameter declaration below is parsed via a
+	 recursive call to c_parser_declaration_or_fndef, which discards
+	 pending_contracts/pending_contract_tokens on any non-defining
+	 (semicolon-terminated) declaration -- exactly the shape of an
+	 old-style parameter declaration.  Since those are file-static
+	 globals, that discard would otherwise wipe out the contracts just
+	 parsed for the enclosing K&R function definition before they are
+	 ever injected (D4299).  Shield them for the duration of the loop.  */
+      vec<c_pending_contract> saved_pending_contracts = pending_contracts;
+      vec<c_token> saved_pending_contract_tokens = pending_contract_tokens;
+      pending_contracts = vNULL;
+      pending_contract_tokens = vNULL;
       while (c_parser_next_token_is_not (parser, CPP_EOF)
 	     && c_parser_next_token_is_not (parser, CPP_OPEN_BRACE))
 	c_parser_declaration_or_fndef (parser, false, false, false,
 				       true, false, false);
+      pending_contracts.release ();
+      pending_contract_tokens.release ();
+      pending_contracts = saved_pending_contracts;
+      pending_contract_tokens = saved_pending_contract_tokens;
       debug_nonbind_markers_p = save_debug_nonbind_markers_p;
       store_parm_decls ();
+      /* Inject _Pre contract checks at the start of the function body.  */
+      if (flag_contracts_p4299 && !pending_contracts.is_empty ())
+	c_inject_pending_contracts (parser);
       if (omp_declare_simd_clauses)
 	c_finish_omp_declare_simd (parser, current_function_decl, NULL_TREE,
 				   omp_declare_simd_clauses);
@@ -3364,6 +3440,9 @@ c_parser_declaration_or_fndef (c_parser *parser, bool fndef_ok,
 	  add_stmt (fnbody);
 	  finish_function (endloc);
 	  c_pop_function_context ();
+	  /* Only this nested function's entries: the enclosing function is
+	     still being parsed and its own postconditions are still live.  */
+	  c_clear_postconditions_for (decl);
 	  add_stmt (build_stmt (DECL_SOURCE_LOCATION (decl), DECL_EXPR, decl));
 	}
       else if (nested)
@@ -3374,12 +3453,14 @@ c_parser_declaration_or_fndef (c_parser *parser, bool fndef_ok,
 	    error ("%<__GIMPLE%> function cannot be a nested function");
 	  finish_function (endloc);
 	  c_pop_function_context ();
+	  c_clear_postconditions_for (fndecl);
 	}
       else
 	{
 	  if (fnbody)
 	    add_stmt (fnbody);
 	  finish_function (endloc);
+	  c_clear_postconditions ();
 	}
       /* Get rid of the empty stmt list for GIMPLE/RTL.  */
       if (specs->declspec_il != cdil_none)
@@ -3482,6 +3563,569 @@ c_parser_static_assert_declaration (c_parser *parser)
   if (parser->error
       || !c_parser_require (parser, CPP_SEMICOLON, "expected %<;%>"))
     c_parser_skip_to_end_of_block_or_statement (parser);
+}
+
+/* Build a string literal tree from the source text of a contract
+   predicate between START and FINISH locations.  Falls back to
+   FALLBACK if the source text cannot be extracted.  */
+
+static tree
+c_build_contract_comment (location_t start, location_t finish,
+			  const char *fallback)
+{
+  char *src = get_source_text_between (global_dc->get_file_cache (),
+				       start, finish);
+  if (src)
+    {
+      tree t = build_string_literal (strlen (src) + 1, src);
+      free (src);
+      return t;
+    }
+  return build_string_literal (fallback);
+}
+
+/* A result-name introducer ("identifier :") is only meaningful on a
+   postcondition.  Recognize one here on the kinds that do not accept it,
+   so that a misplaced result name is reported directly instead of falling
+   through into the predicate parse -- where the identifier is simply
+   undeclared and the colon is a syntax error, producing an unrelated
+   cascade.  Consumes the introducer when it diagnoses, so the predicate
+   still parses and the rest of the declaration is not lost.
+
+   Mirrors cp_parser_contract_result_name on the C++ side.  */
+
+static void
+c_parser_diagnose_misplaced_result_name (c_parser *parser)
+{
+  if (!c_parser_next_token_is (parser, CPP_NAME)
+      || c_parser_peek_2nd_token (parser)->type != CPP_COLON)
+    return;
+
+  c_token *tok = c_parser_peek_token (parser);
+  error_at (tok->location,
+	    "result name %qE not allowed outside of post condition "
+	    "specifier", tok->value);
+  c_parser_consume_token (parser);
+  c_parser_consume_token (parser);
+}
+
+/* Parse a C contract assertion (D4299).
+
+   _ContractAssert ( expression )
+
+   Generates: if (!(expr)) __c_contract_check_<semantic>(comment, file, func, line, kind);
+   For quick_enforce: if (!(expr)) __builtin_trap();
+   For ignore: nothing emitted.  */
+
+static tree
+c_parser_contract_assert (c_parser *parser)
+{
+  gcc_assert (c_parser_next_token_is_keyword (parser,
+					      RID_C_CONTRACT_ASSERT));
+  location_t assert_loc = c_parser_peek_token (parser)->location;
+  c_parser_consume_token (parser);
+
+  matching_parens parens;
+  if (!parens.require_open (parser))
+    return error_mark_node;
+
+  c_parser_diagnose_misplaced_result_name (parser);
+
+  location_t cond_loc = c_parser_peek_token (parser)->location;
+  struct c_expr cond = c_parser_expression (parser);
+  location_t cond_end = cond.src_range.m_finish;
+  cond = convert_lvalue_to_rvalue (cond_loc, cond, true, true);
+
+  if (!parens.require_close (parser))
+    {
+      c_parser_skip_to_end_of_block_or_statement (parser);
+      return error_mark_node;
+    }
+
+  /* Resolve the evaluation semantic via P3595 config.  */
+  contract_query q = {};
+  q.fndecl = current_function_decl;
+  q.kind = CAK_ASSERT;
+  q.caller_side = false;
+  q.in_constant_evaluation = false;
+  q.caller_fndecl = NULL_TREE;
+  q.allowed_mask = CES_ALL_ALLOWED;
+  q.groups = NULL;
+  q.loc = assert_loc;
+  int semantic = (int) contract_config_resolve (&q).semantic;
+
+  /* ignore: parse for syntax checking but emit nothing.  */
+  if (semantic == CES_IGNORE)
+    return void_node;
+
+  /* quick_enforce: emit __builtin_trap() on violation.  */
+  if (semantic == CES_QUICK)
+    {
+      tree trap_fn = builtin_decl_explicit (BUILT_IN_TRAP);
+      tree trap_call = build_call_expr (trap_fn, 0);
+      tree truth_cond = c_objc_common_truthvalue_conversion (cond_loc,
+							     cond.value);
+      tree folded_cond = c_fully_fold (truth_cond, false, NULL);
+      tree neg_cond = invert_truthvalue_loc (cond_loc, folded_cond);
+      /* if (!(cond)) __builtin_trap(); */
+      c_finish_if_stmt (assert_loc, neg_cond, trap_call, NULL_TREE);
+      return NULL_TREE;
+    }
+
+  /* enforce or observe: call the cached helper function.  */
+  tree helper_decl = c_get_contract_helper_decl (semantic);
+
+  tree comment_arg = c_build_contract_comment (cond_loc, cond_end,
+					       "<contract assertion>");
+  tree file_arg = build_string_literal (LOCATION_FILE (assert_loc));
+  tree func_arg;
+  if (current_function_decl)
+    func_arg = build_string_literal (
+	IDENTIFIER_POINTER (DECL_NAME (current_function_decl)));
+  else
+    func_arg = build_string_literal ("");
+  tree line_arg = build_int_cst (unsigned_type_node,
+				 LOCATION_LINE (assert_loc));
+  tree kind_arg = build_int_cst (unsigned_char_type_node, CAK_ASSERT);
+
+  tree call = build_call_expr (helper_decl, 5,
+			       comment_arg, file_arg, func_arg,
+			       line_arg, kind_arg);
+
+  tree truth_cond = c_objc_common_truthvalue_conversion (cond_loc,
+							 cond.value);
+  tree folded_cond = c_fully_fold (truth_cond, false, NULL);
+  tree neg_cond = invert_truthvalue_loc (cond_loc, folded_cond);
+  /* if (!(cond)) call_helper(); */
+  c_finish_if_stmt (assert_loc, neg_cond, call, NULL_TREE);
+  return NULL_TREE;
+}
+
+/* Parse a sequence of C contract specifiers (D4299).
+
+   Saves raw tokens for later re-parsing after store_parm_decls()
+   when function parameters are in scope.  */
+
+static void
+c_parser_contract_specifiers (c_parser *parser)
+{
+  pending_contract_tokens.truncate (0);
+  pending_contracts.truncate (0);
+
+  while (c_parser_next_token_is_keyword (parser, RID_C_PRE)
+	 || c_parser_next_token_is_keyword (parser, RID_C_POST))
+    {
+      bool is_pre = c_parser_next_token_is_keyword (parser, RID_C_PRE);
+      location_t loc = c_parser_peek_token (parser)->location;
+      c_parser_consume_token (parser);
+
+      if (!c_parser_require (parser, CPP_OPEN_PAREN, "expected %<(%>"))
+	return;
+
+      /* For _Post, check for result-name: identifier ':'  */
+      tree result_name = NULL_TREE;
+      bool has_result_name = false;
+      if (!is_pre
+	  && c_parser_next_token_is (parser, CPP_NAME)
+	  && c_parser_peek_2nd_token (parser)->type == CPP_COLON)
+	{
+	  result_name = c_parser_peek_token (parser)->value;
+	  has_result_name = true;
+	  c_parser_consume_token (parser);
+	  c_parser_consume_token (parser);
+	}
+      else if (is_pre)
+	c_parser_diagnose_misplaced_result_name (parser);
+
+      /* Save tokens until matching ')'.  */
+      location_t cond_start_loc
+	= c_parser_peek_token (parser)->location;
+      unsigned start = pending_contract_tokens.length ();
+      int depth = 1;
+      location_t last_tok_loc = cond_start_loc;
+      while (depth > 0
+	     && c_parser_peek_token (parser)->type != CPP_EOF)
+	{
+	  c_token *tok = c_parser_peek_token (parser);
+	  if (tok->type == CPP_OPEN_PAREN)
+	    depth++;
+	  else if (tok->type == CPP_CLOSE_PAREN)
+	    {
+	      depth--;
+	      if (depth == 0)
+		break;
+	    }
+	  last_tok_loc = tok->location;
+	  pending_contract_tokens.safe_push (*tok);
+	  c_parser_consume_token (parser);
+	}
+      unsigned end = pending_contract_tokens.length ();
+
+      if (!c_parser_require (parser, CPP_CLOSE_PAREN, "expected %<)%>"))
+	return;
+
+      c_pending_contract pc;
+      pc.kind = is_pre ? CAK_PRE : CAK_POST;
+      pc.loc = loc;
+      pc.start = start;
+      pc.end = end;
+      pc.has_result_name = has_result_name;
+      pc.result_name = result_name;
+      pc.cond_start = cond_start_loc;
+      pc.cond_end = last_tok_loc;
+      pending_contracts.safe_push (pc);
+    }
+}
+
+/* Inject pending contract checks into the current function body.
+   Called after store_parm_decls() when parameters are in scope.
+   Re-parses saved contract tokens to build predicate expressions,
+   then generates checking code.  */
+
+static void
+c_inject_pending_contracts (c_parser *parser)
+{
+  if (pending_contracts.is_empty ())
+    return;
+
+  /* Save the parser's token state.  The token pointer itself is not saved:
+     the restore below deliberately re-points tokens at the look-ahead buffer
+     to force re-lexing from the real source.  */
+  unsigned int saved_tokens_avail = parser->tokens_avail;
+  c_token saved_buf[4];
+  memcpy (saved_buf, parser->tokens_buf, sizeof (saved_buf));
+
+  for (unsigned i = 0; i < pending_contracts.length (); i++)
+    {
+      c_pending_contract &pc = pending_contracts[i];
+
+      /* Resolve the evaluation semantic for this contract.  */
+      contract_query q = {};
+      q.fndecl = current_function_decl;
+      q.kind = pc.kind;
+      q.caller_side = false;
+      q.in_constant_evaluation = false;
+      q.caller_fndecl = NULL_TREE;
+      q.allowed_mask = CES_ALL_ALLOWED;
+      q.groups = NULL;
+      q.loc = pc.loc;
+      int semantic = (int) contract_config_resolve (&q).semantic;
+
+      /* For _Post, late-parse the predicate now (parameters are in
+	 scope) and store it for c_maybe_check_postconditions to emit
+	 at each return site.  */
+      if (pc.kind == CAK_POST)
+	{
+	  unsigned ntokens = pc.end - pc.start;
+	  if (ntokens == 0)
+	    continue;
+
+	  auto_vec<c_token> replay_buf (ntokens + 1);
+	  for (unsigned j = pc.start; j < pc.end; j++)
+	    replay_buf.quick_push (pending_contract_tokens[j]);
+	  c_token eof_tok;
+	  memset (&eof_tok, 0, sizeof (eof_tok));
+	  eof_tok.type = CPP_EOF;
+	  eof_tok.location = pc.loc;
+	  replay_buf.quick_push (eof_tok);
+
+	  parser->tokens = replay_buf.address ();
+	  parser->tokens_avail = ntokens + 1;
+
+	  /* If result name present, create a local variable for it.  */
+	  tree result_var = NULL_TREE;
+	  if (pc.has_result_name && pc.result_name)
+	    {
+	      tree rettype = TREE_TYPE (TREE_TYPE (current_function_decl));
+	      if (rettype && rettype != void_type_node)
+		{
+		  result_var = build_decl (pc.loc, VAR_DECL,
+					  pc.result_name, rettype);
+		  DECL_ARTIFICIAL (result_var) = true;
+		  DECL_CONTEXT (result_var) = current_function_decl;
+		  pushdecl (result_var);
+		}
+	    }
+
+	  location_t cond_loc = c_parser_peek_token (parser)->location;
+	  struct c_expr cond = c_parser_expression (parser);
+	  cond = convert_lvalue_to_rvalue (cond_loc, cond, true, true);
+
+	  c_active_postcondition apc;
+	  apc.fndecl = current_function_decl;
+	  apc.predicate = cond.value;
+	  apc.loc = pc.loc;
+	  apc.result_var = result_var;
+	  apc.cond_start = pc.cond_start;
+	  apc.cond_end = pc.cond_end;
+	  active_postconditions.safe_push (apc);
+
+	  continue;
+	}
+
+      unsigned ntokens = pc.end - pc.start;
+      if (ntokens == 0)
+	continue;
+
+      /* Build a separate token buffer with EOF sentinel.
+	 We cannot modify pending_contract_tokens while parser->tokens
+	 might point into it (reallocation would invalidate the pointer).  */
+      auto_vec<c_token> replay_buf (ntokens + 1);
+      for (unsigned j = pc.start; j < pc.end; j++)
+	replay_buf.quick_push (pending_contract_tokens[j]);
+      c_token eof_tok;
+      memset (&eof_tok, 0, sizeof (eof_tok));
+      eof_tok.type = CPP_EOF;
+      eof_tok.location = pc.loc;
+      replay_buf.quick_push (eof_tok);
+
+      parser->tokens = replay_buf.address ();
+      parser->tokens_avail = ntokens + 1;
+
+      location_t cond_loc = c_parser_peek_token (parser)->location;
+      struct c_expr cond = c_parser_expression (parser);
+      cond = convert_lvalue_to_rvalue (cond_loc, cond, true, true);
+
+      /* Even an ignored precondition is parsed above so that an
+	 ill-formed predicate is diagnosed; only its emission is
+	 suppressed (D4299).  */
+      if (semantic == CES_IGNORE)
+	continue;
+
+      tree truth = c_objc_common_truthvalue_conversion (cond_loc,
+							cond.value);
+      tree folded = c_fully_fold (truth, false, NULL);
+      tree neg = invert_truthvalue_loc (cond_loc, folded);
+
+      if (semantic == CES_QUICK)
+	{
+	  tree trap_fn = builtin_decl_explicit (BUILT_IN_TRAP);
+	  tree trap_call = build_call_expr (trap_fn, 0);
+	  c_finish_if_stmt (pc.loc, neg, trap_call, NULL_TREE);
+	  continue;
+	}
+
+      const char *helper_name = (semantic == CES_ENFORCE)
+	? "__c_contract_check_enforce"
+	: "__c_contract_check_observe";
+
+      tree *cached = (semantic == CES_ENFORCE) ? &c_contract_enforce_decl
+				     : &c_contract_observe_decl;
+      tree helper_decl = *cached;
+      if (!helper_decl)
+	{
+	  tree ccp = build_pointer_type (
+	      build_qualified_type (char_type_node, TYPE_QUAL_CONST));
+	  tree atypes = tree_cons (NULL_TREE, ccp,
+		    tree_cons (NULL_TREE, ccp,
+		      tree_cons (NULL_TREE, ccp,
+			tree_cons (NULL_TREE, unsigned_type_node,
+			  tree_cons (NULL_TREE, unsigned_char_type_node,
+			    void_list_node)))));
+	  tree fn_type = build_function_type (void_type_node, atypes);
+	  tree helper_id = get_identifier (helper_name);
+	  helper_decl = build_decl (UNKNOWN_LOCATION, FUNCTION_DECL,
+				    helper_id, fn_type);
+	  TREE_PUBLIC (helper_decl) = true;
+	  DECL_EXTERNAL (helper_decl) = true;
+	  DECL_ARTIFICIAL (helper_decl) = true;
+	  if (semantic == CES_ENFORCE)
+	    TREE_THIS_VOLATILE (helper_decl) = true;
+	  *cached = helper_decl;
+	}
+
+      tree comment_arg = c_build_contract_comment (pc.cond_start,
+						   pc.cond_end,
+						   "<precondition>");
+      tree file_arg = build_string_literal (LOCATION_FILE (pc.loc));
+      tree func_arg = build_string_literal (
+	  IDENTIFIER_POINTER (DECL_NAME (current_function_decl)));
+      tree line_arg = build_int_cst (unsigned_type_node,
+				     LOCATION_LINE (pc.loc));
+      tree kind_arg = build_int_cst (unsigned_char_type_node,
+				     (unsigned char) pc.kind);
+
+      tree call = build_call_expr (helper_decl, 5,
+				   comment_arg, file_arg, func_arg,
+				   line_arg, kind_arg);
+
+      c_finish_if_stmt (pc.loc, neg, call, NULL_TREE);
+    }
+
+  /* Restore the parser's token state.  Force re-lexing from the real
+     source by resetting tokens_avail to 0 and pointing tokens back to
+     the look-ahead buffer.  */
+  memcpy (parser->tokens_buf, saved_buf, sizeof (saved_buf));
+  parser->tokens = parser->tokens_buf;
+  parser->tokens_avail = saved_tokens_avail;
+
+  pending_contracts.truncate (0);
+  pending_contract_tokens.truncate (0);
+}
+
+/* Get or create a cached helper function declaration for contract
+   violation dispatch.  SEMANTIC is 2 (observe) or 3 (enforce).  */
+
+static tree
+c_get_contract_helper_decl (int semantic)
+{
+  tree *cached = (semantic == CES_ENFORCE) ? &c_contract_enforce_decl
+				 : &c_contract_observe_decl;
+  if (!*cached)
+    {
+      const char *name = (semantic == CES_ENFORCE)
+	? "__c_contract_check_enforce"
+	: "__c_contract_check_observe";
+      tree ccp = build_pointer_type (
+	  build_qualified_type (char_type_node, TYPE_QUAL_CONST));
+      tree atypes = tree_cons (NULL_TREE, ccp,
+		tree_cons (NULL_TREE, ccp,
+		  tree_cons (NULL_TREE, ccp,
+		    tree_cons (NULL_TREE, unsigned_type_node,
+		      tree_cons (NULL_TREE, unsigned_char_type_node,
+			void_list_node)))));
+      tree fn_type = build_function_type (void_type_node, atypes);
+      *cached = build_decl (UNKNOWN_LOCATION, FUNCTION_DECL,
+			    get_identifier (name), fn_type);
+      TREE_PUBLIC (*cached) = true;
+      DECL_EXTERNAL (*cached) = true;
+      DECL_ARTIFICIAL (*cached) = true;
+      if (semantic == CES_ENFORCE)
+	TREE_THIS_VOLATILE (*cached) = true;
+    }
+  return *cached;
+}
+
+/* Emit postcondition checks for the current return statement.
+   RETVAL is the return value expression (may be NULL_TREE for void).
+   Called from c_finish_return in c-typeck.cc.  */
+
+void
+c_maybe_check_postconditions (location_t loc, tree retval)
+{
+  if (active_postconditions.is_empty ())
+    return;
+
+  for (unsigned i = 0; i < active_postconditions.length (); i++)
+    {
+      c_active_postcondition &pc = active_postconditions[i];
+
+      /* Postconditions are function-scoped: a nested function must not
+	 evaluate the enclosing function's postconditions (and vice versa),
+	 even though both share this vector (D4299).  */
+      if (pc.fndecl != current_function_decl)
+	continue;
+
+      contract_query q = {};
+      q.fndecl = current_function_decl;
+      q.kind = CAK_POST;
+      q.caller_side = false;
+      q.in_constant_evaluation = false;
+      q.caller_fndecl = NULL_TREE;
+      q.allowed_mask = CES_ALL_ALLOWED;
+      q.groups = NULL;
+      q.loc = pc.loc;
+      int semantic = (int) contract_config_resolve (&q).semantic;
+
+      if (semantic == CES_IGNORE)
+	continue;
+
+      /* If there's a result variable, bind it to the return value.  */
+      tree predicate = pc.predicate;
+      if (pc.result_var && retval)
+	{
+	  tree assign = build2 (MODIFY_EXPR, TREE_TYPE (pc.result_var),
+				pc.result_var, retval);
+	  SET_EXPR_LOCATION (assign, loc);
+	  add_stmt (assign);
+	}
+
+      tree truth = c_objc_common_truthvalue_conversion (pc.loc, predicate);
+      tree folded = c_fully_fold (truth, false, NULL);
+      tree neg = invert_truthvalue_loc (pc.loc, folded);
+
+      if (semantic == CES_QUICK)
+	{
+	  tree trap_fn = builtin_decl_explicit (BUILT_IN_TRAP);
+	  tree trap_call = build_call_expr (trap_fn, 0);
+	  c_finish_if_stmt (pc.loc, neg, trap_call, NULL_TREE);
+	  continue;
+	}
+
+      tree helper_decl = c_get_contract_helper_decl (semantic);
+
+      tree comment_arg = c_build_contract_comment (pc.cond_start,
+						   pc.cond_end,
+						   "<postcondition>");
+      tree file_arg = build_string_literal (LOCATION_FILE (pc.loc));
+      tree func_arg = build_string_literal (
+	  IDENTIFIER_POINTER (DECL_NAME (current_function_decl)));
+      tree line_arg = build_int_cst (unsigned_type_node,
+				     LOCATION_LINE (pc.loc));
+      tree kind_arg = build_int_cst (unsigned_char_type_node, CAK_POST);
+
+      tree call = build_call_expr (helper_decl, 5,
+				   comment_arg, file_arg, func_arg,
+				   line_arg, kind_arg);
+
+      c_finish_if_stmt (pc.loc, neg, call, NULL_TREE);
+    }
+}
+
+/* Clear active postconditions for the current function.
+   Called after finish_function.  */
+
+void
+c_clear_postconditions (void)
+{
+  active_postconditions.truncate (0);
+}
+
+/* Clear the active postconditions belonging to FNDECL only, leaving any
+   others in place.  A GNU nested function finishes while its enclosing
+   function is still being parsed and still has its own entries live, so
+   that case must not truncate the whole vector.  */
+
+void
+c_clear_postconditions_for (tree fndecl)
+{
+  unsigned i = 0;
+  while (i < active_postconditions.length ())
+    if (active_postconditions[i].fndecl == fndecl)
+      active_postconditions.unordered_remove (i);
+    else
+      ++i;
+}
+
+/* True if the current function has any postcondition to check at its
+   return sites.  c_finish_return uses this to know when it must
+   evaluate the return value exactly once before the checks (D4299).  */
+
+bool
+c_has_active_postconditions (void)
+{
+  for (unsigned i = 0; i < active_postconditions.length (); i++)
+    if (active_postconditions[i].fndecl == current_function_decl)
+      return true;
+  return false;
+}
+
+/* C implementation of contract_query::get_ns().
+   C has no namespaces, so this always returns NULL.  */
+
+const char *
+contract_query::get_ns () const
+{
+  return NULL;
+}
+
+/* C implementation of contract_query::get_caller_ns().
+   C has no namespaces, so this always returns NULL.  */
+
+const char *
+contract_query::get_caller_ns () const
+{
+  return NULL;
 }
 
 /* Parse a static assertion (C11 6.7.10), without the trailing
@@ -5244,8 +5888,28 @@ c_parser_direct_declarator_inner (c_parser *parser, bool id_present,
       bool have_gnu_attrs = c_parser_next_token_is_keyword (parser,
 							    RID_ATTRIBUTE);
       attrs = c_parser_gnu_attributes (parser);
+      /* A parameter may itself be declared with a function declarator, and
+	 c_parser_direct_declarator_inner will happily parse contract
+	 specifiers on it.  pending_contracts is a file-static global, so
+	 anything parsed in there would be injected into the *enclosing*
+	 function -- which is not merely a lost contract but a wrong one
+	 firing against a function that never had it.  Shield the globals
+	 across the parameter list, the same way the K&R old-style
+	 parameter loop does, and report anything left behind rather than
+	 dropping it silently.  */
+      vec<c_pending_contract> saved_pending_contracts = pending_contracts;
+      vec<c_token> saved_pending_contract_tokens = pending_contract_tokens;
+      pending_contracts = vNULL;
+      pending_contract_tokens = vNULL;
       args = c_parser_parms_declarator (parser, id_present, attrs,
 					have_gnu_attrs);
+      if (!pending_contracts.is_empty ())
+	warning_at (pending_contracts[0].loc, OPT_Wattributes,
+		    "contract on a parameter declarator is ignored");
+      pending_contracts.release ();
+      pending_contract_tokens.release ();
+      pending_contracts = saved_pending_contracts;
+      pending_contract_tokens = saved_pending_contract_tokens;
       if (args == NULL)
 	return NULL;
       else
@@ -5261,6 +5925,10 @@ c_parser_direct_declarator_inner (c_parser *parser, bool id_present,
 		inner = build_attrs_declarator (std_attrs, inner);
 	    }
 	  inner = build_function_declarator (args, inner);
+	  if (flag_contracts_p4299
+	      && (c_parser_next_token_is_keyword (parser, RID_C_PRE)
+		  || c_parser_next_token_is_keyword (parser, RID_C_POST)))
+	    c_parser_contract_specifiers (parser);
 	  return c_parser_direct_declarator_inner (parser, id_present, inner);
 	}
     }
@@ -8432,6 +9100,11 @@ c_parser_statement_after_labels (c_parser *parser, bool *if_p,
 				      astate.musttail_p);
 	      goto expect_semicolon;
 	    }
+	  break;
+	case RID_C_CONTRACT_ASSERT:
+	  c_parser_contract_assert (parser);
+	  c_parser_skip_until_found (parser, CPP_SEMICOLON,
+				     "expected %<;%>");
 	  break;
 	case RID_ASM:
 	  stmt = c_parser_asm_statement (parser);
