@@ -2601,6 +2601,47 @@ check_postcondition_result (tree fndecl, tree type, location_t loc)
   return true;
 }
 
+/* Callback for contract_condition_uses_pack_p.  */
+
+static tree
+find_pack_use_r (tree *tp, int *walk_subtrees, void *)
+{
+  tree t = *tp;
+
+  if (PACK_EXPANSION_P (t)
+      || TREE_CODE (t) == NONTYPE_ARGUMENT_PACK
+      || TREE_CODE (t) == TYPE_ARGUMENT_PACK
+      || (DECL_P (t) && DECL_PACK_P (t))
+      || (TREE_CODE (t) == TEMPLATE_TYPE_PARM
+	  && TEMPLATE_TYPE_PARAMETER_PACK (t)))
+    {
+      *walk_subtrees = 0;
+      return t;
+    }
+
+  /* A declaration's type is not walked by cp_walk_tree, but a reference to
+     a pack parameter carries the pack-ness there.  */
+  if (DECL_P (t) && TREE_TYPE (t) && PACK_EXPANSION_P (TREE_TYPE (t)))
+    {
+      *walk_subtrees = 0;
+      return t;
+    }
+
+  return NULL_TREE;
+}
+
+/* True if CONDITION mentions a parameter pack in any form.  Distinct from
+   uses_parameter_packs, which reports only packs that are still
+   *unexpanded*: a fold-expression expands its pack, so that predicate says
+   "no packs" for exactly the conditions that matter here.  */
+
+static bool
+contract_condition_uses_pack_p (tree condition)
+{
+  return cp_walk_tree_without_duplicates (&condition, find_pack_use_r, NULL)
+	 != NULL_TREE;
+}
+
 /* Instantiate each postcondition with the return type to finalize the
    contract specifiers on a function decl FNDECL.  */
 
@@ -2653,6 +2694,20 @@ rebuild_postconditions (tree fndecl)
       /* A concrete late-parsed result variable still needs validation, but
 	 not rebuilding.  Rebuild only one whose type was undeduced.  */
       if (!type_uses_auto (TREE_TYPE (oldvar)))
+	continue;
+
+      /* A condition mentioning a parameter pack cannot go through the
+	 substitution below.  It is deliberately handed the empty argument
+	 vector, relying only on the local identity mappings installed here
+	 -- but TMPL_ARGS_DEPTH reports depth 1 for a zero-length TREE_VEC
+	 (only NULL_TREE gives 0), so tsubst_pack_expansion believes there
+	 is an argument level to read and indexes out of the empty vector.
+
+	 Nothing needs doing here in any case: tsubst_contract rebuilds the
+	 result variable against the real return type and substitutes the
+	 condition with real arguments at instantiation.  A pack can only
+	 appear inside a template, so that path always runs.  */
+      if (contract_condition_uses_pack_p (condition))
 	continue;
 
       /* "Instantiate" the result variable using the known type.  */
