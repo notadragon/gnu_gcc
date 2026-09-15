@@ -568,16 +568,38 @@ DEFTREECODE (CO_YIELD_EXPR, "co_yield", tcc_expression, 2)
 
 DEFTREECODE (CO_RETURN_EXPR, "co_return", tcc_statement, 2)
 
-/* Different flavors of contracts.
+/* Different flavors of contracts (P3595 configuration system).
 
-   Assertions and preconditions have two operands: a node containing
-   the their mode and condition. Postconditions have an additional
-   operand to store the optional name for the result value.
+   ASSERTION_STMT, PRECONDITION_STMT: 12 operands
 
-   CONTRACT_SEMANTIC has the computed behavior of the contract.  */
-DEFTREECODE (ASSERTION_STMT, "assertion_stmt", tcc_statement, 5)
-DEFTREECODE (PRECONDITION_STMT, "precondition_stmt", tcc_statement, 5)
-DEFTREECODE (POSTCONDITION_STMT, "postcondition_stmt", tcc_statement, 6)
+   Group 1 -- Structural (ops 0-6, immutable after parse):
+     Op0: kind (CAK_PRE, CAK_POST, CAK_ASSERT, etc.)
+     Op1: condition (the assertion itself)
+     Op2: comment (optional user comment string)
+     Op3: source_location (location_t as tree)
+     Op4: message (optional diagnostic message, P3099)
+     Op5: label (optional assertion-control label, P3400)
+     Op6: requires_clause (optional requires-clause constraint, P4283)
+
+   Group 2 -- Config resolution inputs (ops 7-8, eager, set at parse time):
+     Op7: allowed_mask (uint16_t INTEGER_CST from label;
+	  NULL_TREE=CES_ALL_ALLOWED)
+     Op8: groups (TREE_LIST of STRING_CSTs from label; NULL_TREE=none)
+
+   Group 3 -- Evaluation semantics (ops 9-11, lazy, NULL_TREE=unresolved):
+     Op9:  runtime callee-side semantic
+     Op10: constexpr callee-side semantic
+     Op11: runtime dynamic-selector descriptor (P3595 output.dynamic), a
+	   TREE_LIST (PURPOSE=IDENTIFIER_NODE name, VALUE=INTEGER_CST packing
+	   dyn_linkage<<1|dyn_provideweak), or NULL_TREE when not dynamic
+
+   POSTCONDITION_STMT: 14 operands (ops 0-11 same as above, plus):
+     Op12: postcondition_identifier (optional result name)
+     Op13: postcondition_captures (optional TREE_LIST of capture VAR_DECLs,
+	   P3098)  */
+DEFTREECODE (ASSERTION_STMT, "assertion_stmt", tcc_statement, 12)
+DEFTREECODE (PRECONDITION_STMT, "precondition_stmt", tcc_statement, 12)
+DEFTREECODE (POSTCONDITION_STMT, "postcondition_stmt", tcc_statement, 14)
 
 /* A reference to a translation-unit local entity.
 

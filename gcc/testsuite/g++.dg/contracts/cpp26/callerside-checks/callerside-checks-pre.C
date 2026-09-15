@@ -1,5 +1,5 @@
 // { dg-do run { target c++26 } }
-// { dg-additional-options "-fcontracts -fcontracts-client-check=pre" }
+// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=enforce -fcontracts-client-check=pre -fcontract-configuration-file=${srcdir}/g++.dg/contracts/cpp26/callerside-checks/callerside-enforce-caller.json" }
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 
 static int pre_check = 0;

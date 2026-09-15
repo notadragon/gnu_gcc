@@ -1,0 +1,3 @@
+[
+  {"match": {"caller": true, "kind": "pre"}, "output": {"semantic": "enforce"}}
+]

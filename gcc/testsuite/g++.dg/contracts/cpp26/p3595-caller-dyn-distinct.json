@@ -1,0 +1,8 @@
+[
+  {"match": {"caller": {"location": "p3595-caller-dyn-distinct.C:23-23"}},
+   "output": {"semantic": "ignore",
+              "dynamic": {"linkage": "C++", "name": "p3595_caller_sel_a"}}},
+  {"match": {"caller": {"location": "p3595-caller-dyn-distinct.C:24-24"}},
+   "output": {"semantic": "ignore",
+              "dynamic": {"linkage": "C++", "name": "p3595_caller_sel_b"}}}
+]

@@ -1,0 +1,5 @@
+[
+  {"output": {"dynamic": {"linkage": "C++"}}},
+  {"output": {"dynamic": {"name": "sel_x", "provideweak": true}}},
+  {"output": {}}
+]
