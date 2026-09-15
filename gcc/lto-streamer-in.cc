@@ -44,6 +44,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "debug.h"
 #include "alloc-pool.h"
 #include "toplev.h"
+#include "ubsan.h"
 
 /* Allocator used to hold string slot entries for line map streaming.  */
 static struct object_allocator<struct string_slot> *string_slot_allocator;
@@ -1558,7 +1559,35 @@ input_function (tree fn_decl, class data_in *data_in,
 		    case IFN_UBSAN_NULL:
 		      if ((flag_sanitize
 			  & (SANITIZE_NULL | SANITIZE_ALIGNMENT)) == 0)
-			replace = true;
+			{
+			  /* A .UBSAN_NULL carrying a non-IMPLICIT_UB_NONE
+			     P3100 reaction on operand 3 (null) or operand 6
+			     (alignment) is a contract check, not a plain
+			     -fsanitize= check.  It must survive LTO stream-in
+			     even when the null/alignment sanitizers are off, so
+			     its configured reaction still fires.  Only NOP the
+			     pure-sanitizer case (both reactions
+			     IMPLICIT_UB_NONE, i.e. 0).  */
+			  if (gimple_call_num_args (stmt) < UBSAN_NULL_NUM_OPS
+			      || (tree_to_shwi
+				    (gimple_call_arg (stmt, UBSAN_NULL_REACTION))
+				    == IMPLICIT_UB_NONE
+				  && tree_to_shwi
+				       (gimple_call_arg (stmt,
+							 UBSAN_NULL_ALIGN_REACTION))
+				       == IMPLICIT_UB_NONE))
+			    replace = true;
+			  else
+			    /* A contract null-check survives to LTRANS, but
+			       -fcontracts-p3100 is a front-end language flag
+			       that is not streamed into the LTO options
+			       section, so it is off here.  pass_sanopt gates on
+			       it to lower IFN_UBSAN_NULL; without the flag the
+			       call would reach RTL expansion and ICE in
+			       expand_UBSAN_NULL.  Re-arm the flag so the pass
+			       runs and expands the surviving contract check.  */
+			    flag_contracts_p3100 = 1;
+			}
 		      break;
 		    case IFN_UBSAN_BOUNDS:
 		      if ((flag_sanitize & SANITIZE_BOUNDS) == 0)
