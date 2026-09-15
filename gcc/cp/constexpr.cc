@@ -1141,6 +1141,11 @@ struct GTY((for_user)) constexpr_call {
   constexpr_fundef *fundef = nullptr;
   /* Parameter bindings environment.  A TREE_VEC of arguments.  */
   tree bindings = NULL_TREE;
+  /* The (remapped) RESULT_DECL of this call's body copy.  A named-result
+     postcondition refers to a synthetic result variable that is not a
+     function parameter; the evaluator binds it to this decl's value (the
+     return value) so the postcondition predicate can be evaluated.  */
+  tree result_decl = NULL_TREE;
   /* Result of the call, indexed by the value of
      constexpr_ctx::manifestly_const_eval.
        unknown_type_node means the call is being evaluated.
@@ -4960,6 +4965,11 @@ cxx_eval_call_expression (const constexpr_ctx *ctx, tree t,
 	  body = TREE_PURPOSE (copy);
 	  parms = TREE_VALUE (copy);
 	  res = TREE_TYPE (copy);
+
+	  /* Make the call's result decl reachable so a named-result
+	     postcondition can bind its result variable to the return value
+	     during evaluation.  */
+	  new_call.result_decl = res;
 
 	  /* Associate the bindings with the remapped parms.  */
 	  tree bound = new_call.bindings;
@@ -11189,6 +11199,17 @@ cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
 	if (*non_constant_p || ctx->global->contract_statement
 	    || contract_ignored_p (t))
 	  break;
+
+	/* A named-result postcondition refers to a synthetic result variable
+	   that is not one of the function's parameters, so it is not otherwise
+	   bound in the value map.  Bind it to the current return value (held
+	   by the call's RESULT_DECL) so the predicate can be evaluated.  */
+	if (TREE_CODE (t) == POSTCONDITION_STMT
+	    && ctx->call && ctx->call->result_decl)
+	  if (tree result = POSTCONDITION_IDENTIFIER (t))
+	    if (DECL_P (result))
+	      if (tree rv = ctx->global->get_value (ctx->call->result_decl))
+		ctx->global->put_value (result, rv);
 
 	tree cond = CONTRACT_CONDITION (t);
  	if (!potential_rvalue_constant_expression (cond))
