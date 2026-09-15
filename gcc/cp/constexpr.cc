@@ -1296,8 +1296,30 @@ public:
   }
   void put_value (tree t, tree v)
   {
-    bool already_in_map = values.put (t, v);
-    if (!already_in_map && modifiable)
+    /* An object whose lifetime has ended stays in the map, marked by
+       destroy_value below with void_node when its storage is still alive
+       and void_list_node when it is past the end of that storage.  Both
+       mean dead, and every other reader in this class tests for both;
+       so must this one.  Giving such an object a value again begins a new
+       object, so as far as modifiable_tracker is concerned it belongs to
+       the subexpression being tracked, exactly as a never-before-seen one
+       does.  Treating it instead as pre-existing means a constexpr
+       function called inside the tracked subexpression cannot initialize
+       its own RESULT_DECL, if that same function was already called, and
+       returned, outside it -- the store is rejected as a modification from
+       outside the current evaluation.  Only an object that is currently
+       alive was genuinely created outside.
+
+       The lookup is done only when a tracker is active, which is rare, so
+       the common path still costs a single hash operation.  */
+    bool track = false;
+    if (modifiable)
+      {
+	tree *slot = values.get (t);
+	track = !slot || *slot == void_node || *slot == void_list_node;
+      }
+    values.put (t, v);
+    if (track)
       modifiable->add (t);
   }
   void destroy_value (tree t, bool past_storage_end = true)
