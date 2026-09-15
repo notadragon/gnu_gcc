@@ -169,7 +169,7 @@ extern void update_contract_arguments		(tree, tree);
 
 extern tree make_postcondition_variable		(cp_expr);
 extern tree make_postcondition_variable		(cp_expr, tree);
-extern void check_param_in_postcondition	(tree, location_t);
+extern void check_postcondition_param_odr_uses	(tree, tree, location_t);
 extern void check_postconditions_in_redecl	(tree, tree);
 extern void maybe_update_postconditions		(tree);
 extern void rebuild_postconditions		(tree);
