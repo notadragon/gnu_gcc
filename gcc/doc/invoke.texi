@@ -3468,6 +3468,20 @@ diagnosed.
 @opindex Wcontract-invalid-label-facet
 @opindex Wno-contract-invalid-label-facet
 @item -Wcontract-invalid-label-facet
+Warn when an assertion-control object has a member that appears to have been
+intended as a facet but does not provide one, because the member is
+inaccessible or is not @code{const}.  Such a member is not a diagnosable
+error: the facet is simply absent, so the contract assertion compiles and the
+member is never called.  Enabled by default.
+
+A member is reported only when making it accessible, or making the object
+non-@code{const}, would by itself make the call valid.  A member that merely
+shares a facet's name -- an overload taking different arguments, as used for
+tag dispatch -- is not reported.
+
+@opindex fcontracts-allow-assume
+@opindex fno-contracts-allow-assume
+@item -fcontracts-allow-assume
 Enable all of the contracts extension papers listed below.  Equivalent to
 giving each @option{-fcontracts-p@var{nnnn}} option individually.
 
@@ -3475,10 +3489,12 @@ giving each @option{-fcontracts-p@var{nnnn}} option individually.
 @opindex fcontracts-p3098
 @opindex fcontracts-p3099
 @opindex fcontracts-p3290
+@opindex fcontracts-p3400
 @item -fcontracts-p3097
 @itemx -fcontracts-p3098
 @itemx -fcontracts-p3099
 @itemx -fcontracts-p3290
+@itemx -fcontracts-p3400
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines
