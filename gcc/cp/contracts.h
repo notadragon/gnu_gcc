@@ -305,6 +305,14 @@ extern tree build_implicit_float_cast_check
    whose value may be outside the target enumeration ENUMTYPE's value range, for
    a non-fixed-underlying-type enum, for semantic SEM
    ({expr.static.cast.enum.outside.range}).  */
+extern tree build_implicit_pure_virtual_terminus (tree);
+extern bool contract_constexpr_ignored_p (const_tree);
+extern bool contract_constexpr_terminating_p (const_tree);
+
+/* In pt.cc.  Substitute a template instantiation's contracts on demand, for a
+   reader other than its own definition -- a P3097 wrapper or a P3595
+   caller-side check.  A function that is never defined would otherwise never
+   have them substituted at all.  */
 extern void maybe_instantiate_contracts (tree);
 
 /* Will this contract be ignored.  */
