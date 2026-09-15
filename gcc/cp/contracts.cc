@@ -548,6 +548,17 @@ get_constexpr_evaluation_semantic (const_tree contract)
    the (flag-independent) label restriction with this set, so "assume" can
    never be present -- from a label or otherwise -- when the flag is off.  */
 
+static inline uint16_t
+contract_base_allowed_mask ()
+{
+  uint16_t mask = CES_ALL_ALLOWED;
+  if (flag_contracts_allow_assume)
+    mask |= (1 << CES_ASSUME);
+  if (flag_contracts_p4298)
+    mask |= (1 << CES_NOEXCEPT_ENFORCE) | (1 << CES_NOEXCEPT_OBSERVE);
+  return mask;
+}
+
 static contract_query
 make_contract_query (tree contract, tree fndecl)
 {
