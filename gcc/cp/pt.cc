@@ -18116,9 +18116,25 @@ tsubst (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 	--c_inhibit_evaluation_warnings;
 
 	if (DECLTYPE_FOR_LAMBDA_CAPTURE (t))
-	  type = lambda_capture_field_type (type,
-					    false /*explicit_init*/,
-					    DECLTYPE_FOR_REF_CAPTURE (t));
+	  {
+	    type = lambda_capture_field_type (type,
+					      false /*explicit_init*/,
+					      DECLTYPE_FOR_REF_CAPTURE (t));
+	    /* P2900: a by-reference capture of an entity that is const within
+	       a contract predicate has a const-qualified referent.  For a
+	       dependent capture this could not be applied at parse time; do it
+	       now that the referent type is known.  */
+	    if (DECLTYPE_FOR_CONST_REF_CAPTURE (t)
+		&& TREE_CODE (type) == REFERENCE_TYPE
+		&& !CP_TYPE_CONST_P (TREE_TYPE (type)))
+	      {
+		tree referent
+		  = cp_build_qualified_type (TREE_TYPE (type),
+					     cp_type_quals (TREE_TYPE (type))
+					     | TYPE_QUAL_CONST);
+		type = build_reference_type (referent);
+	      }
+	  }
 	else if (DECLTYPE_FOR_LAMBDA_PROXY (t))
 	  type = lambda_proxy_type (type);
 	else

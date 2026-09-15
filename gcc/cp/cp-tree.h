@@ -485,6 +485,7 @@ extern GTY(()) tree cp_global_trees[CPTI_MAX];
       LAMBDA_EXPR_CONST_QUAL_P (in LAMBDA_EXPR)
       SPLICE_EXPR_MEMBER_ACCESS_P (in SPLICE_EXPR)
       PACK_INDEX_PARENTHESIZED_P (in PACK_INDEX_*)
+      DECLTYPE_FOR_CONST_REF_CAPTURE (in DECLTYPE_TYPE)
    2: IDENTIFIER_KIND_BIT_2 (in IDENTIFIER_NODE)
       ICS_THIS_FLAG (in _CONV)
       DECL_INITIALIZED_BY_CONSTANT_EXPRESSION_P (in VAR_DECL)
@@ -1605,6 +1606,15 @@ enum cp_lambda_default_capture_mode_type {
 /* Predicate tracking whether the lambda was declared 'static'.  */
 #define LAMBDA_EXPR_STATIC_P(NODE) \
   TREE_LANG_FLAG_3 (LAMBDA_EXPR_CHECK (NODE))
+
+/* True if this lambda-expression appears lexically within the predicate of
+   a contract assertion.  Set at parse time (when the introducer is parsed
+   in a contract-condition scope) and propagated to nested lambdas.  Used to
+   const-qualify by-reference captures of entities that are declared outside
+   the predicate, since such entities are const within the predicate
+   (P2900).  */
+#define LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P(NODE) \
+  TREE_LANG_FLAG_4 (LAMBDA_EXPR_CHECK (NODE))
 
 /* True if this TREE_LIST in LAMBDA_EXPR_CAPTURE_LIST is for an explicit
    capture.  */
@@ -5361,6 +5371,13 @@ get_vec_init_expr (tree t)
   TREE_LANG_FLAG_2 (DECLTYPE_TYPE_CHECK (NODE))
 #define DECLTYPE_FOR_REF_CAPTURE(NODE) \
   TREE_LANG_FLAG_3 (DECLTYPE_TYPE_CHECK (NODE))
+/* Nonzero for a DECLTYPE_FOR_REF_CAPTURE lambda-capture DECLTYPE that
+   captures, from within a contract predicate, an entity that is const there
+   (P2900); the referent must be const-qualified when the type is resolved at
+   template instantiation.  Only used for dependent (implicit [&]) captures;
+   non-dependent captures are const-qualified eagerly in add_capture.  */
+#define DECLTYPE_FOR_CONST_REF_CAPTURE(NODE) \
+  TREE_LANG_FLAG_1 (DECLTYPE_TYPE_CHECK (NODE))
 
 /* Nonzero for VAR_DECL and FUNCTION_DECL node means that `extern' was
    specified in its declaration.  This can also be set for an
