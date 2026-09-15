@@ -228,6 +228,20 @@ contract_violation::is_terminating() const noexcept
       || __s == evaluation_semantic::quick_enforce
 }
 
+void*
+contract_violation::query_control_object(const void* __key,
+					 std::size_t __index) const
+{
+  using namespace __cxxabiv1;
+  auto __query_fn = __cxa_find_field_value<__cxa_query_fn_t>(
+      _M_chain, CXA_FIELD_QUERY_FUNCTION, nullptr);
+  auto __label_ptr = __cxa_find_field_value<const void*>(
+      _M_chain, CXA_FIELD_LABEL_PTR, nullptr);
+  if (__query_fn && __label_ptr)
+    return __query_fn(__label_ptr, __key, __index);
+  return nullptr;
+}
+
 void
 invoke_default_contract_violation_handler
 (const std::contracts::contract_violation& violation) noexcept
