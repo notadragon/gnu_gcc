@@ -184,6 +184,19 @@ proc libstdc++_init { testfile } {
     }
     v3track libatomicdir 3
 
+    # Locate libcontracts.  libstdc++exp bundles the C++26 contracts runtime,
+    # which links against the pure-C libcontracts, so any -lstdc++exp execution
+    # test needs libcontracts on the runtime path.
+    set v3-libcontracts 0
+    set libcontractsdir [lookfor_file $blddir/../libcontracts .libs/libcontracts.$shlib_ext]
+    if {$libcontractsdir != ""} {
+	set v3-libcontracts 1
+	set libcontractsdir [file dirname $libcontractsdir]
+	append ld_library_path_tmp ":${libcontractsdir}"
+	verbose -log "libcontracts support detected"
+    }
+    v3track libcontractsdir 3
+
     # Locate libgomp. This is only required for parallel mode.
     set v3-libgomp 0
     set libgompdir [lookfor_file $blddir/../libgomp .libs/libgomp.$shlib_ext]

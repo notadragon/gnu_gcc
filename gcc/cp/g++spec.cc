@@ -167,6 +167,37 @@ lang_specific_driver (struct cl_decoded_option **in_decoded_options,
       switch (decoded_options[i].opt_index)
 	{
 	case OPT_fcontracts:
+	case OPT_std_c__26:
+	case OPT_std_gnu__26:
+	case OPT_std_c__29:
+	case OPT_std_gnu__29:
+	  /* Any use of C++ contracts needs the experimental runtime (libstdc++exp,
+	     which hosts the contracts C++ runtime) and the contracts ABI core
+	     (libcontracts).  This is triggered by the base -fcontracts flag, by any
+	     per-paper C++ sub-flag (each of which implies -fcontracts in the front
+	     end via LangEnabledBy in c.opt), or by C++26 mode (which enables
+	     -fcontracts).  These implications run in cc1plus and are not visible to
+	     this driver spec, so the whole set is enumerated here.  The C-only
+	     -fcontracts-p4299 is deliberately excluded: it does not use the C++
+	     runtime and links just libcontracts via the LINK spec in gcc.cc.
+	     (-std=c++2c / -std=gnu++2c are aliases decoded to OPT_std_*__26, and
+	     -std=c++2d / -std=gnu++2d to OPT_std_*__29.)
+
+	     THIS LIST DUPLICATES THE ONE IN c.opt, AND THE TWO DRIFT SILENTLY.
+	     A per-paper flag named in c.opt's LangEnabledBy list and omitted
+	     here turns contracts on and then links neither libstdc++exp nor
+	     libcontracts -- an undefined reference to
+	     __cxa_contract_violation_pre_enforce_pf at -std=c++23.  Adding a
+	     per-paper flag means editing BOTH lists.
+	     g++.dg/contracts/cpp26/contract-runtime-link-p4301.C pins that for
+	     -fcontracts-p4301; it must use -std=c++23, because at C++26 the
+	     -std= case below sets need_experimental anyway and hides the
+	     defect.  The other per-paper flags are not covered the same way.
+
+	     EVERY standard AT OR ABOVE C++26 has to be listed, not just C++26:
+	     the front end enables contracts for those too, so leaving C++29 out
+	     emits contract calls and then fails to link them.  Add the next
+	     one here when it is introduced.  */
 	  need_experimental = true;
 	  break;
 
@@ -307,8 +338,10 @@ lang_specific_driver (struct cl_decoded_option **in_decoded_options,
   shared_libgcc = 0;
 #endif
 
-  /* Add one for shared_libgcc or extra static library.  */
-  num_args = (argc + added + need_math + need_experimental
+  /* Add one for shared_libgcc or extra static library.  Experimental support
+     appends four arguments (two -u <sym>, -lstdc++exp and -lcontracts), hence
+     4 *.  */
+  num_args = (argc + added + need_math + 4 * need_experimental
 	      + (std_module * 5)
 	      + (library > 0) * 4 + 1);
   /* For libc++, on most platforms, the ABI library (usually called libc++abi)
@@ -414,7 +447,34 @@ lang_specific_driver (struct cl_decoded_option **in_decoded_options,
     {
       if (need_experimental && which_library == USE_LIBSTDCXX)
 	{
+	  /* Force the contracts C++ runtime object to be pulled from the
+	     static libstdc++exp archive.  libcontracts only *weakly* refers to
+	     the default handler (__contract_invoke_default_handler and the
+	     weak __handle_contract_violation), and weak references do not pull
+	     members from a static archive; without this explicit undefined
+	     reference the default violation handler would be missing and
+	     dispatch would fall back to the pure-C libc-only handler.  The -u
+	     must precede -lstdc++exp so the member is pulled when the archive
+	     is scanned.  */
+	  generate_option (OPT_u, "__contract_invoke_default_handler", 1,
+			   CL_DRIVER, &new_decoded_options[j++]);
+	  /* Likewise force in the noexcept terminate-on-throw barrier used by
+	     the sanitizer-report routing path (P3100 Group C under the D4298
+	     noexcept semantics).  libcontracts's __cxa_contract_violation_sanitizer
+	     only *weakly* refers to __contract_dispatch_core_noexcept, which lives
+	     in a different libstdc++exp member (contracts_abi.o) than the default
+	     handler above; without this -u a translation unit that uses *only*
+	     sanitizer-routed checks would not pull that member, the weak reference
+	     would stay null, and a throwing handler would escape the noexcept
+	     report path instead of terminating.  */
+	  generate_option (OPT_u, "__contract_dispatch_core_noexcept", 1,
+			   CL_DRIVER, &new_decoded_options[j++]);
+	  /* -lstdc++exp before -lcontracts: the C++ contracts runtime in
+	     libstdc++exp depends on the pure-C core in libcontracts.  */
 	  generate_option (OPT_l, "stdc++exp", 1, CL_DRIVER,
+			   &new_decoded_options[j++]);
+	  ++added_libraries;
+	  generate_option (OPT_l, "contracts", 1, CL_DRIVER,
 			   &new_decoded_options[j++]);
 	  ++added_libraries;
 	}

@@ -2918,6 +2918,7 @@ target_libraries="target-libgcc \
 		target-newlib \
 		target-libgomp \
 		target-libatomic \
+		target-libcontracts \
 		target-libitm \
 		target-libstdc++-v3 \
 		target-libsanitizer \
@@ -3406,6 +3407,25 @@ $as_echo_n "checking for libatomic support... " >&6; }
 	    { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
 $as_echo "no" >&6; }
 	    noconfigdirs="$noconfigdirs target-libatomic"
+	else
+	    { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+$as_echo "yes" >&6; }
+	fi
+    fi
+fi
+
+# Disable libcontracts on unsupported systems.
+if test -d ${srcdir}/libcontracts; then
+    if test x$enable_libcontracts = x; then
+	{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for libcontracts support" >&5
+$as_echo_n "checking for libcontracts support... " >&6; }
+	if (srcdir=${srcdir}/libcontracts; \
+		. ${srcdir}/configure.tgt; \
+		test -n "$UNSUPPORTED")
+	then
+	    { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
+$as_echo "no" >&6; }
+	    noconfigdirs="$noconfigdirs target-libcontracts"
 	else
 	    { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
 $as_echo "yes" >&6; }
