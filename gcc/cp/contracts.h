@@ -278,6 +278,11 @@ extern contract_evaluation_semantic resolve_implicit_contract_semantic
 /* P3100: build the GENERIC reaction to append at a value-returning function's
    fall-off point for the resolved semantic SEM (NULL_TREE for assume /
    none).  */
+extern tree build_implicit_flow_off_check
+  (tree, location_t, contract_evaluation_semantic);
+/* P3100: reaction for control flowing off the end of a coroutine with no
+   return_void ({stmt.return.coroutine.flow.off}); NULL_TREE for
+   assume/ignore.  */
 extern tree build_implicit_divide_check
   (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
 /* P3100: build the guarded replacement for an integer shift SHIFT_RESULT (OP0
