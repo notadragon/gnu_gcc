@@ -419,29 +419,6 @@ retain_decl (tree decl, copy_body_data *)
   return decl;
 }
 
-/* Lookup a name in std::, or inject it.  */
-
-static tree
-lookup_std_type (tree name_id)
-{
-  tree res_type = lookup_qualified_name
-    (std_node, name_id, LOOK_want::TYPE | LOOK_want::HIDDEN_FRIEND);
-
-  if (TREE_CODE (res_type) == TYPE_DECL)
-    res_type = TREE_TYPE (res_type);
-  else
-    {
-      push_nested_namespace (std_node);
-      res_type = make_class_type (RECORD_TYPE);
-      create_implicit_typedef (name_id, res_type);
-      DECL_SOURCE_LOCATION (TYPE_NAME (res_type)) = BUILTINS_LOCATION;
-      DECL_CONTEXT (TYPE_NAME (res_type)) = current_namespace;
-      pushdecl_namespace_level (TYPE_NAME (res_type), /*hidden*/true);
-      pop_nested_namespace (std_node);
-    }
-  return res_type;
-}
-
 /* Get constract_assertion_kind of the specified contract. Used when building
   contract_violation object.  */
 
@@ -2187,7 +2164,7 @@ build_contract_wrapper_function (tree fndecl)
    creating it (and recording TUPLE) if it does not yet exist.  */
 
 static tree
-get_or_create_contract_wrapper_function (tree fndecl)
+get_or_create_contract_wrapper_function (tree fndecl, tree tuple)
 {
   tree wrapdecl = find_wrapper_for_tuple (fndecl, tuple);
   if (!wrapdecl)
@@ -4038,8 +4015,7 @@ static GTY(()) tree tu_quick_enforce_wrapper = NULL_TREE;
 /* Declare a noipa wrapper around the quick_enforce trap.  */
 
 static tree
-declare_one_violation_handler_wrapper (tree fn_name, tree fn_type,
-				       tree p1_type, tree p2_type)
+declare_quick_enforce_wrapper ()
 {
   if (tu_quick_enforce_wrapper)
     return tu_quick_enforce_wrapper;
@@ -4074,7 +4050,7 @@ declare_one_violation_handler_wrapper (tree fn_name, tree fn_type,
 /* Define the noipa wrapper: it just traps.  */
 
 static void
-build_terminate_wrapper ()
+build_quick_enforce_wrapper ()
 {
   /* We should not be trying to build this if we never used it.  */
   gcc_checking_assert (tu_quick_enforce_wrapper);
@@ -4213,7 +4189,7 @@ check_handle_contract_violation (tree fndecl)
    ::handle_contract_violation, if defined in this TU.  */
 
 static void
-build_contract_handler_call (tree violation)
+maybe_emit_hcv_alias ()
 {
   if (!TARGET_SUPPORTS_ALIASES)
     return;
@@ -4261,10 +4237,14 @@ void
 init_contracts ()
 {
   init_terminate_fn ();
-  init_builtin_contract_violation_type ();
 }
 
-static GTY(()) tree contracts_source_location_impl_type;
+/* A label's facet trampolines are generated at the point the label is
+   grokked, which can be in the middle of parsing something else entirely:
+   inside a class body, inside a function body (for contract_assert), or
+   during template instantiation.  Defining a function there disturbs parse
+   state the enclosing construct is still using, and every piece of it has
+   to be saved:
 
      - cfun and the statement-list stack, or the add_stmt that appends a
        contract_assert to the enclosing body finds an empty stmt_list_stack;
@@ -4287,102 +4267,118 @@ namespace {
 
 struct trampoline_scope
 {
-  if (contracts_source_location_impl_type)
-     return contracts_source_location_impl_type;
-
-  /* First see if we have a declaration that we can use.  */
-  tree contracts_source_location_type
-    = lookup_std_type (get_identifier ("source_location"));
-
-  if (contracts_source_location_type
-      && contracts_source_location_type != error_mark_node
-      && TYPE_FIELDS (contracts_source_location_type))
-    {
-      contracts_source_location_impl_type = get_source_location_impl_type ();
-      return contracts_source_location_impl_type;
-    }
-
-  /* We do not, so build the __impl layout equivalent type, which must
-     match <source_location>:
-     struct __impl
-      {
-	  const char* _M_file_name;
-	  const char* _M_function_name;
-	  unsigned _M_line;
-	  unsigned _M_column;
-      }; */
-  const tree types[] = { const_string_type_node,
-			const_string_type_node,
-			uint_least32_type_node,
-			uint_least32_type_node };
-
- const char *names[] = { "_M_file_name",
-			 "_M_function_name",
-			 "_M_line",
-			 "_M_column",
-			};
-  tree fields = NULL_TREE;
-  unsigned n = 0;
-  for (tree type : types)
+  trampoline_scope ()
   {
-    /* finish_builtin_struct wants fields chained in reverse.  */
-    tree next = build_decl (BUILTINS_LOCATION, FIELD_DECL,
-			    get_identifier (names[n++]), type);
-    DECL_CHAIN (next) = fields;
-    fields = next;
+    /* Outside a function, keep function_depth nonzero so that we do not
+       garbage-collect in the middle of an expression; within one,
+       push_to_top_level's push_function_context already covers us.  */
+    m_nested = (cfun != NULL);
+    if (!m_nested)
+      ++function_depth;
+    push_to_top_level ();
   }
 
-  iloc_sentinel ils (input_location);
-  input_location = BUILTINS_LOCATION;
-  contracts_source_location_impl_type = cxx_make_type (RECORD_TYPE);
-  finish_builtin_struct (contracts_source_location_impl_type,
-			 "__impl", fields, NULL_TREE);
-  DECL_CONTEXT (TYPE_NAME (contracts_source_location_impl_type)) = context;
-  DECL_ARTIFICIAL (TYPE_NAME (contracts_source_location_impl_type)) = true;
-  TYPE_ARTIFICIAL (contracts_source_location_impl_type) = true;
-  contracts_source_location_impl_type
-    = cp_build_qualified_type (contracts_source_location_impl_type,
-			       TYPE_QUAL_CONST);
+  ~trampoline_scope ()
+  {
+    pop_from_top_level ();
+    if (!m_nested)
+      --function_depth;
+  }
 
-  return contracts_source_location_impl_type;
-}
+private:
+  bool m_nested;
+};
+
+} // anon namespace
+
+/* Declare an artificial TU-local trampoline named NAME_PREFIX_<n>, of type
+   FN_TYPE, taking the PARM_TYPES parameters, and open its body.
+
+   Both P3400 trampolines -- the local violation handler and the queryable_label
+   query -- are the same function shell around a two-or-three line body: same
+   artificial FUNCTION_DECL setup, same parameter treatment, same internal
+   linkage, same prologue.  Writing that out twice let the two drift, which they
+   did.  The caller supplies the type and the body; everything structural is
+   here.
+
+   Returns the FUNCTION_DECL with its body open: the caller must emit statements
+   and then finish with finish_contract_trampoline (or abandon it with
+   abandon_contract_trampoline).  *BODY_OUT and *COMPOUND_OUT carry the state
+   those two need.  */
 
 static tree
-get_src_loc_impl_ptr (location_t loc)
+begin_contract_trampoline (const char *name_prefix, int &counter,
+			   tree fn_type, array_slice<tree> parm_types,
+			   tree *body_out, tree *compound_out)
 {
-  if (!contracts_source_location_impl_type)
-    get_contracts_source_location_impl_type ();
+  char name[64];
+  snprintf (name, sizeof (name), "%s_%d", name_prefix, counter++);
 
-  tree fndecl = current_function_decl;
-  /* We might be an outlined function.  */
-  if (DECL_IS_PRE_FN_P (fndecl) || DECL_IS_POST_FN_P (fndecl))
-    fndecl = get_orig_for_outlined (fndecl);
-  /* We might be a wrapper.  */
-  if (DECL_IS_WRAPPER_FN_P (fndecl))
-    fndecl = get_orig_func_for_wrapper (fndecl);
+  location_t loc = BUILTINS_LOCATION;
+  tree fn_decl = build_lang_decl_loc (loc, FUNCTION_DECL,
+				      get_identifier (name), fn_type);
+  DECL_CONTEXT (fn_decl) = FROB_CONTEXT (global_namespace);
+  DECL_ARTIFICIAL (fn_decl) = true;
+  DECL_INITIAL (fn_decl) = error_mark_node;
+  DECL_RESULT (fn_decl) = NULL_TREE;
 
-  gcc_checking_assert (fndecl);
-  tree impl__
-    = build_source_location_impl (loc, fndecl,
-				  contracts_source_location_impl_type);
-  tree p = build_pointer_type (contracts_source_location_impl_type);
-  return build_fold_addr_expr_with_type_loc (loc, impl__, p);
+  tree first = NULL_TREE, prev = NULL_TREE;
+  for (tree pt : parm_types)
+    {
+      tree p = cp_build_parm_decl (fn_decl, NULL_TREE, pt);
+      TREE_USED (p) = true;
+      DECL_READ_P (p) = true;
+      if (prev)
+	DECL_CHAIN (prev) = p;
+      else
+	first = p;
+      prev = p;
+    }
+  DECL_ARGUMENTS (fn_decl) = first;
+
+  TREE_PUBLIC (fn_decl) = false;
+  DECL_EXTERNAL (fn_decl) = false;
+  DECL_WEAK (fn_decl) = false;
+
+  start_preparsed_function (fn_decl, NULL_TREE, SF_DEFAULT | SF_PRE_PARSED);
+  *body_out = begin_function_body ();
+  *compound_out = begin_compound_stmt (BCS_FN_BODY);
+  return fn_decl;
 }
 
-/* Build a contract_violation layout compatible object. */
-
-/* Constructor.  At present, this should always be constant. */
+/* Close a trampoline opened by begin_contract_trampoline and emit it.  */
 
 static tree
-build_contract_violation_ctor (tree contract)
+finish_contract_trampoline (tree body, tree compound_stmt)
 {
   bool can_be_const = true;
   uint16_t version = 1;
   /* Default CDM_PREDICATE_FALSE. */
   uint16_t detection_mode = CDM_PREDICATE_FALSE;
 
-  tree assertion_kind = CONTRACT_ASSERTION_KIND (contract);
-  if (!assertion_kind || really_constant_p (assertion_kind))
+/* Close a trampoline whose body could not be built, and emit nothing.  */
+
+static void
+abandon_contract_trampoline (tree body, tree compound_stmt)
+{
+  finish_compound_stmt (compound_stmt);
+  finish_function_body (body);
+  finish_function (false);
+}
+
+/* Build a trampoline function for local violation handlers (P3400).
+   The generated function has signature:
+     int __trampoline(const void* label_ptr, const void* violation_ptr)
+   It casts label_ptr to LABEL_TYPE, casts violation_ptr to
+   const contract_violation&, calls handle_contract_violation on the label,
+   and returns 0 (not_handled) if void, or the int value of the result.
+
+   HCV_FN is the result of the member lookup, which may still be an overload
+   set; *RESOLVED_FN_OUT is set to the FUNCTION_DECL overload resolution
+   actually picked, or NULL_TREE if that cannot be determined (a virtual
+   handler, for instance).  The rethrow analysis needs the resolved callee, not
+   the overload set.  */
+
     {
       contract_assertion_kind kind = get_contract_assertion_kind (contract);
       assertion_kind = build_int_cst (uint16_type_node, kind);
@@ -4444,27 +4440,10 @@ contracts_tu_local_named_var (location_t loc, const char *name, tree type)
   TREE_PUBLIC (var_) = false;
   DECL_EXTERNAL (var_) = false;
   TREE_STATIC (var_) = true;
-  /* Compiler-generated.  */
   DECL_ARTIFICIAL (var_) = true;
   TREE_CONSTANT (var_) = true;
   layout_decl (var_, 0);
   return var_;
-}
-
-/* Create a read-only violation object.  */
-
-static tree
-build_contract_violation_constant (tree ctor, tree contract)
-{
-  tree viol_ = contracts_tu_local_named_var
-    (EXPR_LOCATION (contract), "Lcontract_violation",
-     builtin_contract_violation_type);
-
-  TREE_CONSTANT (viol_) = true;
-  DECL_INITIAL (viol_) = ctor;
-  varpool_node::finalize_decl (viol_);
-
-  return viol_;
 }
 
 /* Helper to replace references to dummy this parameters with references to
