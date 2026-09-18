@@ -297,7 +297,8 @@ inline bool
 contract_terminating_p (const_tree contract)
 {
   return (get_evaluation_semantic (contract) == CES_ENFORCE
-	  || get_evaluation_semantic (contract) == CES_QUICK);
+	  || get_evaluation_semantic (contract) == CES_QUICK
+	  || get_evaluation_semantic (contract) == CES_NOEXCEPT_ENFORCE);
 }
 
 /* Contract data-block ABI constants.

@@ -394,6 +394,67 @@ contract_semantic_emits_no_check (unsigned sem)
    point.  Used to decide whether a compiler-synthesized wrapper function
    (P3097, P3098) can be marked noexcept.  */
 
+static inline bool
+contract_semantic_is_nonthrowing (unsigned sem)
+{
+  return sem == CES_IGNORE || sem == CES_QUICK || sem == CES_ASSUME
+	 || sem == CES_NOEXCEPT_ENFORCE || sem == CES_NOEXCEPT_OBSERVE;
+}
+
+/* True if every contract in CONTRACTS -- the TREE_VEC of contract-specifier
+   *_STMT nodes returned by get_fn_contract_specifiers -- has a
+   statically fixed, nonthrowing evaluation semantic: no P3595 dynamic
+   descriptor (CONTRACT_DYNAMIC) and no assertion-control label
+   (CONTRACT_LABEL) that could select a different (possibly throwing)
+   semantic at runtime.  FNDECL is the context passed through to
+   ensure_evaluation_semantic, matching how every other caller in this file
+   resolves a contract's callee-side semantic.
+
+   If ONLY_KIND is PRECONDITION_STMT or POSTCONDITION_STMT, contracts of the
+   other kind are skipped -- used by build_contract_condition_function,
+   whose outlined pre/post functions each only check one kind (see
+   remap_and_emit_conditions).  ERROR_MARK (the default) means "every
+   contract in the list", matching a wrapper's already-scoped contract
+   list (see copy_and_remap_contracts's cmk_all/cmk_pre selection).
+
+   ensure_evaluation_semantic must be called (to force resolution) before
+   CONTRACT_DYNAMIC is inspected: that field is populated as a side effect
+   of resolution (see contract_active_p above), so reading it beforehand
+   would silently miss dynamic contracts whose semantic has not yet been
+   resolved on this path.  In practice, by the time this is called from
+   build_contract_condition_function or the wrapper builder, every contract
+   here has already gone through contract_active_p (via
+   contract_any_active_p), so this is a cache hit; the explicit call keeps
+   the function correct even if that invariant ever changes.
+
+   Conservatively returns false for anything it can't prove.  */
+
+static bool
+all_contracts_statically_nonthrowing (tree contracts, tree fndecl,
+				      tree_code only_kind = ERROR_MARK)
+{
+  if (!contracts)
+    return true;
+
+  for (tree contract : tree_vec_range (contracts))
+    {
+      if (only_kind != ERROR_MARK && TREE_CODE (contract) != only_kind)
+	continue;
+      contract_evaluation_semantic sem
+	= ensure_evaluation_semantic (contract, fndecl, /*in_ce=*/false);
+      if (CONTRACT_DYNAMIC (contract) || CONTRACT_LABEL (contract))
+	return false;
+      if (!contract_semantic_is_nonthrowing (sem))
+	return false;
+    }
+  return true;
+}
+
+/* Return true if CONTRACT is checked or assumed under the current build
+   configuration.  Returns true if EITHER the runtime or the constexpr
+   evaluation semantic is non-ignore, since either can require the
+   contract to be present in the function body.  */
+
 static bool
 contract_active_p (tree contract, tree fndecl)
 {
@@ -8271,6 +8332,8 @@ emit_check_for_semantic (tree contract, contract_evaluation_semantic semantic,
       return void_node;
     case CES_ENFORCE:
     case CES_OBSERVE:
+    case CES_NOEXCEPT_ENFORCE:
+    case CES_NOEXCEPT_OBSERVE:
       calls_handler = true;
       break;
     case CES_QUICK:
@@ -8304,6 +8367,9 @@ emit_check_for_semantic (tree contract, contract_evaluation_semantic semantic,
 
   bool check_might_throw = (flag_exceptions
 			    && !expr_noexcept_p (condition, tf_none));
+  bool is_noexcept = (semantic == CES_NOEXCEPT_ENFORCE
+		      || semantic == CES_NOEXCEPT_OBSERVE);
+
   /* If the label's local violation handler answers an evaluation_exception by
      rethrowing, catching the predicate's exception only to hand it to that
      handler is pure overhead -- let it propagate instead.  */

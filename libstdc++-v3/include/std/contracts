@@ -73,6 +73,9 @@ namespace contracts
     observe = 2,
     enforce = 3,
     quick_enforce = 4,
+    assume = 5, // P3100 "assume" evaluation semantic
+    noexcept_observe = 6, // D4298
+    noexcept_enforce = 7, // D4298
 
     /* Implementation-defined values should have a minimum value of 1000.  */
   };

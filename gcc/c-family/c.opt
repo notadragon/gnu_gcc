@@ -1941,6 +1941,11 @@ Enum(contract_semantic) String(enforce) Value(3)
 EnumValue
 Enum(contract_semantic) String(quick_enforce) Value(4)
 
+Enum(contract_semantic) String(noexcept_observe) Value(6)
+
+EnumValue
+Enum(contract_semantic) String(noexcept_enforce) Value(7)
+
 fcontract-evaluation-semantic=
 C++ ObjC++ Joined RejectNegative Enum(contract_semantic) Var(flag_contract_evaluation_semantic) Init(3)
 -fcontract-evaluation-semantic=[ignore|observe|enforce|quick_enforce]	Select the contract evaluation semantic (defaults to enforce).
@@ -2033,6 +2038,10 @@ Enable P3097 contract assertions on virtual functions.
 fcontracts-p4283
 C++ ObjC++ Var(flag_contracts_p4283) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P4283 requires clauses on contract assertions.
+
+fcontracts-p4298
+C++ ObjC++ Var(flag_contracts_p4298) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P4298 noexcept_enforce and noexcept_observe evaluation semantics.
 
 fcoroutines
 C++ ObjC++ LTO Var(flag_coroutines)
