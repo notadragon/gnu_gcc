@@ -8867,6 +8867,68 @@ build_implicit_pure_virtual_terminus (tree fn_original)
    appends the optimizer "assume" hint for the enforcing family (COND then
    provably holds).  Runs during parsing/instantiation, so it builds GENERIC.  */
 
+tree
+cp_build_assume_check (location_t loc, tree cond,
+		       contract_evaluation_semantic sem)
+{
+  gcc_checking_assert (sem != CES_ASSUME && sem != CES_IGNORE);
+
+  tree reaction;
+  if (sem == CES_QUICK)
+    reaction = build_quick_enforce_reaction (loc);
+  else
+    {
+      bool is_noexcept = (sem == CES_NOEXCEPT_ENFORCE
+			  || sem == CES_NOEXCEPT_OBSERVE);
+      tree contract = make_node (ASSERTION_STMT);
+      TREE_TYPE (contract) = void_type_node;
+      SET_EXPR_LOCATION (contract, loc);
+      CONTRACT_COMMENT (contract)
+	= build_string_literal ("assumed condition is false");
+
+      tree block_type;
+      tree ctor = build_contract_data_block_ctor (contract, &block_type);
+      tree data_var = build_contract_data_block_constant (ctor, block_type,
+							  contract);
+      tree data_addr = build_address (data_var);
+
+      tree entry = declare_cxa_entry_point (CAK_IMPLICIT, sem,
+					    CDM_PREDICATE_FALSE, is_noexcept);
+      reaction = build_call_n (entry, 1, data_addr);
+      SET_EXPR_LOCATION (reaction, loc);
+      /* enforce / noexcept_enforce: the entry point is noreturn.
+	 observe / noexcept_observe: it returns and execution continues (with
+	 COND possibly false, so the caller adds no "assume" hint).  */
+    }
+
+  /* if (!cond) reaction;  ==  cond ? (void) 0 : reaction.  */
+  tree guard = build3 (COND_EXPR, void_type_node, cond, void_node, reaction);
+  SET_EXPR_LOCATION (guard, loc);
+  return guard;
+}
+
+/* LANG_HOOKS_BUILD_IMPLICIT_UB_HANDLER: build the pieces the middle end needs to
+   call the contract-violation handler for an implicit UB assertion whose site
+   (FNDECL + LOC) resolves to a *non-throwing* handler semantic
+   (noexcept_enforce / noexcept_observe) for GROUP.  REACTION is the resolved
+   enum implicit_ub_reaction carried from pass_ubsan (pre-inline, where the
+   enclosing-function/namespace context was correct); we use it directly to pick
+   the specific semantic instead of re-resolving against FNDECL, which after
+   inlining is the caller and would no longer match the config -- the very bug
+   that carrying the reaction operand exists to avoid.  On success returns true
+   and sets *ENTRY_OUT to the __cxa_contract_violation entry-point FUNCTION_DECL
+   and *DATA_ADDR_OUT to the address of a freshly-built static contract_violation
+   data block for this site; the caller emits `entry (data_addr)` as a GIMPLE
+   call.  The entry decl encodes noreturn for enforce and returns for observe,
+   and is nothrow, so the call needs no EH region.  Returns false when REACTION
+   is not a non-throwing handler reaction (the caller then handles it).  LOC (the
+   inline-stable spelling location) supplies the data-block location; GROUP
+   supplies the comment.
+
+   This runs from the middle end, i.e. after free_lang_data; it only builds new
+   trees (like the sanitizer's own ubsan_create_data) and reads GC-rooted
+   descriptor tables, so it touches no freed language data.  */
+
 bool
 cp_build_implicit_ub_handler (tree fndecl, location_t loc, const char *group,
 			      int reaction, tree *entry_out, tree *data_addr_out)

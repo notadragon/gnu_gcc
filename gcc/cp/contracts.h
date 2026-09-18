@@ -287,6 +287,12 @@ extern tree build_implicit_coroutine_flow_off_check
   (tree, location_t, contract_evaluation_semantic);
 /* P3100: build `if (!cond) <reaction>` for a configurable [[assume (cond)]]
    whose site resolves to a checking semantic (see build_assume_call).  */
+extern tree cp_build_assume_check
+  (location_t, tree, contract_evaluation_semantic);
+/* P3100: build the guarded replacement for an integer division/remainder
+   DIV_RESULT (dividend OP0, divisor OP1) for the resolved semantic SEM (not
+   assume): on OP1 == 0 produce the reaction value without executing the
+   trapping division.  */
 extern tree build_implicit_divide_check
   (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
 /* P3100: build the guarded replacement for an integer shift SHIFT_RESULT (OP0
