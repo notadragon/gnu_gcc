@@ -33846,7 +33846,7 @@ cp_parser_late_contract_condition (cp_parser *parser, tree fn, tree contract)
     }
   cp_expr parsed_condition = cp_parser_conditional_expression (parser);
   /* Commit to changes.  */
-  update_late_contract (contract, result, parsed_condition);
+  update_late_contract (contract, fn, result, parsed_condition);
   if (undeduced_result_type_p)
     --processing_template_decl;
 
