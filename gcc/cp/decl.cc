@@ -14174,6 +14174,56 @@ classify_non_function_declarator (bool typedef_p,
   return nfd_is_function;
 }
 
+static const char *
+non_function_declarator_name (enum non_function_declarator kind)
+{
+  switch (kind)
+    {
+    case nfd_typedef:		return G_("a typedef");
+    case nfd_type_id:		return G_("a type-id");
+    case nfd_parameter:		return G_("a parameter");
+    case nfd_bit_field:		return G_("a bit-field");
+    case nfd_non_function_type:	return G_("a declaration of non-function type");
+    default:			gcc_unreachable ();
+    }
+}
+
+/* Diagnose CONTRACTS written on a declarator that will not become a
+   function, and return true when it did.  The caller then clears them, so
+   nothing downstream sees a contract that can never be applied.
+
+   [dcl.contract.func]/1 makes a function-contract-specifier-seq part of a
+   function declarator.  The parser cannot enforce that: it parses a contract
+   after any parameter list, where it can see neither the decl-specifiers
+   (so not `typedef`) nor whether it sits in a parameter-declaration-clause,
+   and it builds declarators inside-out, so an enclosing pointer declarator
+   has not been seen yet.  grokdeclarator knows all three.
+
+   What makes this worth diagnosing rather than ignoring is that the
+   alternative is silence in both directions: the contract is dropped, so the
+   user writes a precondition, gets no diagnostic, and gets no check at any
+   call.  The requires-clause travels in the same declarator slot and is
+   already refused at these same points -- "requires-clause on typedef",
+   "on type-id", "on declaration of non-function type" -- so this brings
+   contracts alongside a rule the front end already applies.  */
+static bool
+contract_on_non_function_p (tree contracts,
+			    enum non_function_declarator kind)
+{
+  if (!flag_contracts || !contracts || contracts == error_mark_node)
+    return false;
+  if (kind == nfd_is_function)
+    return false;
+
+  /* The first contract's location, so the caret lands on the `pre` or
+     `post` the user wrote rather than on the declarator-id.  */
+  gcc_checking_assert (TREE_VEC_LENGTH (contracts) > 0);
+  error_at (EXPR_LOCATION (TREE_VEC_ELT (contracts, 0)),
+	    "a function-contract-specifier cannot appear on %s",
+	    non_function_declarator_name (kind));
+  return true;
+}
+
 tree
 grokdeclarator (const cp_declarator *declarator,
 		cp_decl_specifier_seq *declspecs,
@@ -15810,10 +15860,28 @@ grokdeclarator (const cp_declarator *declarator,
 
 	    /* Actually apply the contract specifiers to the declaration.  */
 	    if (flag_contracts)
-	      contract_specifiers
-		= contract_specifiers_concat
-		    (contract_specifiers,
-		     declarator->u.function.contract_specifiers);
+	      {
+		/* Anything accumulated already came from an ENCLOSING
+		   function declarator, which for this one is the return
+		   type -- `int (*f (int)) (int) pre (true)`.  The contract
+		   there belongs to no function that is being declared, so
+		   drop it rather than letting the concatenation below carry
+		   it onto the function this declarator does declare.  This
+		   is the rule, and the place, of "requires-clause on return
+		   type" above.  */
+		if (contract_specifiers)
+		  {
+		    error_at (EXPR_LOCATION (TREE_VEC_ELT (contract_specifiers,
+							   0)),
+			      "a function-contract-specifier cannot appear "
+			      "on a return type");
+		    contract_specifiers = NULL_TREE;
+		  }
+		contract_specifiers
+		  = contract_specifiers_concat
+		      (contract_specifiers,
+		       declarator->u.function.contract_specifiers);
+	      }
 
 	    if (attrs)
 	      /* [dcl.fct]/2:
@@ -16124,6 +16192,18 @@ grokdeclarator (const cp_declarator *declarator,
     ctype = current_class_type;
 
   /* Now TYPE has the actual type.  */
+
+  /* Refuse a contract on a declarator that will not become a function, here
+     rather than at each of the exits that would otherwise drop it: TYPE,
+     TYPEDEF_P and DECL_CONTEXT are all final at this point and every such
+     exit -- the typedef return, the type-id return, the non-function-type
+     case and the PARM branch -- is still downstream.  */
+  enum non_function_declarator nf_kind
+    = classify_non_function_declarator (typedef_p, decl_context, type);
+
+  if (contract_specifiers
+      && contract_on_non_function_p (contract_specifiers, nf_kind))
+    contract_specifiers = NULL_TREE;
 
   /* A requires-clause is refused in the same places, and for the same
      reason, but only the PARAMETER position is handled here: the typedef,
