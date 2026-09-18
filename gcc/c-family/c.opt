@@ -2046,6 +2046,10 @@ fcontracts-p4298
 C++ ObjC++ Var(flag_contracts_p4298) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P4298 noexcept_enforce and noexcept_observe evaluation semantics.
 
+fcontracts-p4301
+C++ ObjC++ Var(flag_contracts_p4301) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable D4301 contract_violation::report() ASan/UBSan diagnostic accessor.
+
 fcoroutines
 C++ ObjC++ LTO Var(flag_coroutines)
 Enable C++ coroutines (experimental).
