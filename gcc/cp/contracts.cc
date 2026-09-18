@@ -3884,9 +3884,76 @@ build_comment (cp_expr condition)
 
 /* Build a contract statement.  */
 
+static tree lookup_std_contracts_type (tree);
+static tree build_local_violation_trampoline (tree, tree, tree *);
+static tree build_query_trampoline (tree);
+static tree contracts_tu_local_named_var (location_t, const char *, tree);
+
+/* Normalize a just-parsed contract diagnostic message (P3099) into a bare
+   STRING_CST (or NULL_TREE), then apply the compute_message facet (P3400),
+   storing the result in CONTRACT_MESSAGE (CONTRACT) and returning it.
+
+   String literals arrive from the parser inside a location wrapper, and
+   non-literal expressions need cexpr_str validation + constant-folding to
+   extract the string.  Extraction is only possible once CONDITION is no longer
+   a DEFERRED_PARSE; for a deferred (late-parsed member-function) contract the
+   caller invokes this again from the late-parse path once the condition is
+   available, so the message ends up a bare STRING_CST for every contract --
+   the invariant every CONTRACT_MESSAGE consumer relies on.  */
+
 tree
-grok_contract (tree contract_spec, tree mode, tree result, cp_expr condition,
-	       location_t loc)
+finish_contract_message (tree contract, tree message, tree condition,
+			 location_t loc)
+{
+  if (message)
+    message = tree_strip_any_location_wrapper (message);
+  if (message && TREE_CODE (message) != STRING_CST)
+    {
+      cexpr_str cstr (message);
+      if (!cstr.type_check (loc))
+	message = NULL_TREE;
+      else if (TREE_CODE (condition) != DEFERRED_PARSE)
+	{
+	  const char *msg;
+	  int len;
+	  if (cstr.extract (loc, msg, len))
+	    {
+	      char *buf = XNEWVEC (char, len + 1);
+	      memcpy (buf, msg, len);
+	      buf[len] = '\0';
+	      message = build_string (len + 1, buf);
+	      XDELETEVEC (buf);
+	    }
+	  else
+	    message = NULL_TREE;
+	}
+    }
+  CONTRACT_MESSAGE (contract) = message;
+
+  /* Apply compute_message facet (P3400) if present.  */
+  CONTRACT_MESSAGE (contract)
+    = apply_label_string_facet (CONTRACT_LABEL (contract), "compute_message",
+				CONTRACT_MESSAGE (contract), loc);
+  return CONTRACT_MESSAGE (contract);
+}
+
+/* After a template-dependent LABEL has been substituted to a concrete
+   value, discard the label-derived state CONTRACT inherited from the
+   pattern and recompute what only the label can supply.
+
+   Two things are stale at that point.  The lazily-cached slots -- groups
+   and the two evaluation semantics and the dynamic descriptor -- may
+   already have been filled against the *pattern*, because caller-side
+   resolution runs at the call site, before the definition is
+   instantiated.  ensure_contract_groups in particular writes
+   error_mark_node when it sees a still-dependent label, and copy_node
+   then carries that onto the instantiation, where it makes every later
+   group lookup early-out -- so a templated contract silently lost its
+   group_names.  And the string facets are only ever applied at parse
+   time, where the label was dependent and they were skipped outright, so
+   compute_comment and compute_message never ran for a templated contract
+   at all.  */
+
 {
   if (condition == error_mark_node)
     return error_mark_node;
