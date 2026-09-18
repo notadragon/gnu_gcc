@@ -1995,6 +1995,10 @@ fcontract-configuration-file=
 C C++ ObjC ObjC++ Joined RejectNegative
 -fcontract-configuration-file=<path>	Load contract configuration from a JSON file.
 
+fcontracts-p3850
+C++ ObjC++ Var(flag_contracts_p3850) Init(0)
+Enable all P3850 contract extensions for C++29.
+
 fcoroutines
 C++ ObjC++ LTO Var(flag_coroutines)
 Enable C++ coroutines (experimental).
