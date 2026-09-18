@@ -697,7 +697,97 @@ resolve_implicit_contract_semantic (tree fndecl, location_t loc,
    dereference has no defined lvalue (ignore = raw operation).  COMMENT is the
    contract_violation comment for the reported violation.  */
 
+static void
+ensure_contract_groups (tree contract)
+{
+  if (CONTRACT_GROUPS (contract) != NULL_TREE)
+    return;
+
+  tree label = CONTRACT_LABEL (contract);
+  if (!label || label == error_mark_node
+      || !TREE_TYPE (label)
+      || !CLASS_TYPE_P (TREE_TYPE (label)))
+    {
+      CONTRACT_GROUPS (contract) = error_mark_node;
+      return;
     }
+
+  tree label_type = TREE_TYPE (label);
+  tree gn_member = lookup_member (label_type,
+				  get_identifier ("group_names"),
+				  /*protect=*/0, /*want_type=*/false,
+				  tf_none);
+  /* The concept requires `__is_const (decltype (t.group_names))'.  A
+     `static constexpr' member is const-qualified already, and so is an array
+     of const elements; a non-const member is not a facet.  D3400R5 requires
+     const so that nothing implies a label's group membership could change at
+     run time and have an effect -- nothing reads it after translation.  */
+  tree gn_decl = (gn_member && gn_member != error_mark_node
+		  && BASELINK_P (gn_member)
+		  ? BASELINK_FUNCTIONS (gn_member) : gn_member);
+  if (!gn_member || gn_member == error_mark_node
+      || !label_facet_accessible_p (label_type, gn_member)
+      || !gn_decl || !DECL_P (gn_decl)
+      || !CP_TYPE_CONST_P (TREE_TYPE (gn_decl)))
+    {
+      CONTRACT_GROUPS (contract) = error_mark_node;
+      return;
+    }
+
+  tree gn_val = finish_class_member_access_expr
+    (label, get_identifier ("group_names"), false, tf_none);
+  if (!gn_val || gn_val == error_mark_node)
+    {
+      CONTRACT_GROUPS (contract) = error_mark_node;
+      return;
+    }
+
+  tree gn_folded = cxx_constant_value (gn_val, NULL_TREE, tf_none);
+  if (!gn_folded || gn_folded == error_mark_node
+      || TREE_CODE (gn_folded) != CONSTRUCTOR)
+    {
+      CONTRACT_GROUPS (contract) = error_mark_node;
+      return;
+    }
+
+  tree groups_list = NULL_TREE;
+  unsigned ix;
+  tree val;
+  FOR_EACH_CONSTRUCTOR_VALUE (CONSTRUCTOR_ELTS (gn_folded), ix, val)
+    {
+      const char *str = NULL;
+      char *buf = NULL;
+      if (TREE_CODE (val) == STRING_CST)
+	str = TREE_STRING_POINTER (val);
+      else if (TREE_CODE (val) == CONSTRUCTOR)
+	{
+	  unsigned len = CONSTRUCTOR_NELTS (val);
+	  buf = XNEWVEC (char, len + 1);
+	  unsigned k;
+	  tree ch;
+	  FOR_EACH_CONSTRUCTOR_VALUE (CONSTRUCTOR_ELTS (val), k, ch)
+	    {
+	      if (TREE_CODE (ch) == INTEGER_CST)
+		buf[k] = (char) tree_to_uhwi (ch);
+	      else
+		buf[k] = '\0';
+	    }
+	  buf[len] = '\0';
+	  str = buf;
+	}
+      if (str && str[0] != '\0')
+	{
+	  size_t slen = strlen (str);
+	  groups_list = tree_cons (NULL_TREE,
+				   build_string (slen + 1, str),
+				   groups_list);
+	}
+      XDELETEVEC (buf);
+    }
+
+  CONTRACT_GROUPS (contract) = groups_list
+    ? nreverse (groups_list) : error_mark_node;
+}
 
 /* Populate the groups vec from the contract's cached group names.  */
 
@@ -930,7 +1020,6 @@ contract_constexpr_terminating_p (const_tree contract)
 {
   contract_evaluation_semantic s = get_constexpr_evaluation_semantic (contract);
   return s == CES_ENFORCE || s == CES_QUICK || s == CES_NOEXCEPT_ENFORCE;
-  gcc_unreachable ();
 }
 
 /* Get location of the last contract in CONTRACTS.  */
