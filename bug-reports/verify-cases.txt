@@ -1,0 +1,90 @@
+# One row per reproducer measurement: id | file | mode | flags
+#
+# Modes:  syntax   -fsyntax-only
+#         compile  -c            (needed when the defect is past the front end
+#                                 -- GCC-33's ICE is in codegen and -fsyntax-only
+#                                 does not reach it)
+#         link     -o a.out      (GCC-21 is a driver/link-model gap)
+#         run      -o a.out, then execute; the runtime output is part of the
+#                  measurement, because the wrong-code bugs compile clean
+#
+# Flags are the ones the reproducer's own header comment records, and must
+# never include a branch-only option: stock has to be able to run the same
+# command, or the comparison means nothing.
+#
+# Where one bug needs more than one invocation to show itself, it gets one row
+# per invocation with a lettered id (GCC-15a is the control, GCC-15b the bug).
+#
+# GCC-17 is one row per -DCASE, and its counterpart in the companion Clang
+# fork (CLANG-8) is split the same way: the bug is that the explicit-object
+# half of [expr.prim.this]/3 is unenforced while the static half is enforced,
+# and a whole-file measurement averages the two halves into one word.  Measured as a single row it reported only the "#error define CASE"
+# from the selector, which is a measurement of nothing.
+#
+# GCC-49 is why _classify treats "confused by earlier errors, bailing out" as
+# an ICE.  Its defect is an assertion failure reachable only after an error has
+# been emitted, and on a compiler built without checking -- which our Release
+# branch compiler is, and the stock nightly is not -- that spelling is what an
+# ICE comes out as.  Classified as a mere `error`, the row read `error` both
+# before and after the fix and could never have shown the repair.
+#
+# A -dH row was tried first and was worthless: -dH aborts on ANY error, so it
+# reported an abort whether or not the bug was present.  A row that says the
+# same thing about a fixed and an unfixed compiler measures nothing.
+
+GCC-1a  | gcc-01/gcc-01a-contract-pack-empty-ice.cpp              | compile | -std=c++26 -fcontracts
+GCC-1b  | gcc-01/gcc-01b-contract-pack-tail-ice.cpp               | compile | -std=c++26 -fcontracts
+GCC-1c  | gcc-01/gcc-01c-contract-pack-tail-misattributed.cpp     | compile | -std=c++26 -fcontracts
+GCC-2   | gcc-02/gcc-02-constexpr-vbase-before-ctor.cpp           | syntax  | -std=c++26
+GCC-3   | gcc-03/gcc-03-constexpr-repeat-call.C                   | compile | -std=c++26 -fcontracts
+GCC-5a  | gcc-05/gcc-05-calendar-gimplify-ice.cpp                 | compile | -std=c++26 -fcontracts
+GCC-5b  | gcc-05/gcc-05b-contract-retval-double-destroy.cpp       | run     | -std=c++26 -fcontracts
+GCC-10  | gcc-10/lambda-this-capture-in-contract.cpp              | run     | -std=c++26 -fcontracts
+GCC-11a | gcc-11/lambda-in-postcondition-result-name.cpp          | compile | -std=c++26 -fcontracts
+GCC-11b | gcc-11/gcc-11-lambda-in-postcondition-testcases.C       | run     | -std=c++26 -fcontracts
+GCC-12  | gcc-12/gcc-12-result-binding-denotes-two-objects.cpp    | run     | -std=c++26 -fcontracts
+GCC-13  | gcc-13/contract-lambda-in-template-ice.cpp                 | compile | -std=c++26 -fcontracts
+GCC-14  | gcc-14/gcc-14-contract-capture-note-garbage-location.cpp | syntax  | -std=c++26 -fcontracts
+GCC-15a | gcc-15/outlined-checks-lose-by-value-mutations.cpp      | run     | -std=c++26 -fcontracts
+GCC-15b | gcc-15/outlined-checks-lose-by-value-mutations.cpp      | run     | -std=c++26 -fcontracts -fcontract-checks-outlined
+GCC-16  | gcc-16/gcc-16-lambda-capture-contract-in-template.C     | compile | -std=c++26 -fcontracts
+GCC-17-1 | gcc-17/gcc-17-this-in-xobj-declaration.cpp             | syntax  | -std=c++23 -DCASE=1
+GCC-17-2 | gcc-17/gcc-17-this-in-xobj-declaration.cpp             | syntax  | -std=c++23 -DCASE=2
+GCC-17-3 | gcc-17/gcc-17-this-in-xobj-declaration.cpp             | syntax  | -std=c++23 -DCASE=3
+GCC-17-4 | gcc-17/gcc-17-this-in-xobj-declaration.cpp             | syntax  | -std=c++23 -DCASE=4
+GCC-17-5 | gcc-17/gcc-17-this-in-xobj-declaration.cpp             | syntax  | -std=c++23 -DCASE=5
+GCC-17-6 | gcc-17/gcc-17-this-in-xobj-declaration.cpp             | syntax  | -std=c++23 -DCASE=6
+GCC-17-7 | gcc-17/gcc-17-this-in-xobj-declaration.cpp             | syntax  | -std=c++23 -DCASE=7
+GCC-17-8 | gcc-17/gcc-17-this-in-xobj-declaration.cpp             | syntax  | -std=c++23 -DCASE=8
+GCC-17-9 | gcc-17/gcc-17-this-in-xobj-declaration.cpp             | syntax  | -std=c++23 -DCASE=9
+GCC-17-10| gcc-17/gcc-17-this-in-xobj-declaration.cpp             | syntax  | -std=c++23 -DCASE=10
+GCC-17-11| gcc-17/gcc-17-this-in-xobj-declaration.cpp             | syntax  | -std=c++23 -DCASE=11
+GCC-18  | gcc-18/lambda-in-predicate-global-not-constified.cpp    | syntax  | -std=c++26 -fcontracts
+GCC-19  | gcc-19/gcc-19-postcondition-comma-odr-use.C             | compile | -std=c++26 -fcontracts
+GCC-21  | gcc-21/gcc-21-cpp26-missing-experimental-link.cpp       | link    | -std=c++26
+GCC-22  | gcc-22/gcc-22-pack-reference-constification.C           | compile | -std=c++26 -fcontracts
+GCC-23a | gcc-23/gcc-23-contract-on-deleted-or-defaulted.C        | compile | -std=c++26 -fcontracts
+GCC-23b | gcc-23/gcc-23-contract-on-deleted-or-defaulted-accepted.C | compile | -std=c++26 -fcontracts
+GCC-24  | gcc-24/gcc-24-noexcept-body-wrapper-assumption.C        | compile | -std=c++26 -fcontracts -fno-enforce-eh-specs
+GCC-25  | gcc-25/gcc-25-postcondition-result-name-attribute.C     | compile | -std=c++26 -fcontracts
+GCC-26  | gcc-26/gcc-26-postcondition-redecl-dependent-param.C    | compile | -std=c++26 -fcontracts
+GCC-27  | gcc-27/deferred-friend-contract-mismatch.C              | compile | -std=c++26 -fcontracts
+GCC-28  | gcc-28/xobj-member-in-predicate-ctor-message.cpp        | syntax  | -std=c++26 -fcontracts
+GCC-29  | gcc-29/contract-assert-alt-spelling-ice.cpp             | syntax  | -std=c++26 -fcontracts
+GCC-30  | gcc-30/coroutine-postcondition-const-param.cpp          | syntax  | -std=c++26 -fcontracts
+GCC-31  | gcc-31/gcc-31-lambda-capture-in-contract-predicate.cpp  | syntax  | -std=c++26 -fcontracts
+GCC-33  | gcc-33/gcc-33-class-result-binding-by-reference.cpp     | compile | -std=c++26 -fcontracts
+GCC-36b | gcc-36/postcondition-const-nontemplate.C                | syntax  | -std=c++26 -fcontracts
+GCC-37a | gcc-37/gcc-37a-source-location-alias-ice.cpp            | syntax  | -std=c++26 -fcontracts
+GCC-37b | gcc-37/gcc-37b-source-location-union-ice.cpp            | syntax  | -std=c++26 -fcontracts
+GCC-38  | gcc-38/gcc-38-files/main.cpp                                   | syntax  | -std=c++26 -fcontracts
+GCC-39  | gcc-39/gcc-39-explicit-inst-pack-cv.cpp                 | syntax  | -std=c++11
+GCC-42a | gcc-42/contract-side-effect-rejected.cpp                | syntax  | -std=c++26 -fcontracts
+GCC-42b | gcc-42/contract-side-effect-rejected.cpp                | run     | -std=c++26 -fcontracts
+GCC-43a | gcc-43/assume-operand-contract-rejected.cpp             | syntax  | -std=c++26 -fcontracts
+GCC-43b | gcc-43/assume-operand-contract-rejected.cpp             | run     | -std=c++26 -fcontracts -fcontract-evaluation-semantic=observe
+GCC-44  | gcc-44/postcondition-throw-leaks-retval.cpp             | run     | -std=c++26 -fcontracts -fcontract-evaluation-semantic=enforce
+GCC-45  | gcc-45/contract-on-typedef-declaration.cpp              | syntax  | -std=c++26 -fcontracts
+GCC-46  | gcc-46/contract-on-function-typed-parameter.cpp         | syntax  | -std=c++26 -fcontracts
+GCC-47  | gcc-47/requires-clause-on-parameter.cpp                 | syntax  | -std=c++20
+GCC-49  | gcc-49/postcondition-undeduced-result-ice.cpp           | syntax  | -std=c++26 -fcontracts
