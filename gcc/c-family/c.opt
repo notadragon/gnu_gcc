@@ -2007,6 +2007,10 @@ fcontracts-p3290
 C++ ObjC++ Var(flag_contracts_p3290) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P3290 contract violation trigger API and assert integration.
 
+fcontracts-p3098
+C++ ObjC++ Var(flag_contracts_p3098) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3098 postcondition captures on contract assertions.
+
 fcontracts-p3097
 C++ ObjC++ Var(flag_contracts_p3097) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P3097 contract assertions on virtual functions.

@@ -12420,8 +12420,7 @@ tsubst_contract (tree decl, tree t, tree args, tsubst_flags_t complain,
      ("the label has nothing to do with the return type"), but for the
      condition itself.  */
   begin_scope (sk_contract, decl);
-  bool old_pc = processing_postcondition;
-  processing_postcondition = POSTCONDITION_P (t);
+  bool old_pc = processing_postcondition_predicate;
   const bool undeduced_result_type_p = auto_p && newvar;
   if (undeduced_result_type_p)
     ++processing_template_decl;
@@ -12457,7 +12456,7 @@ tsubst_contract (tree decl, tree t, tree args, tsubst_flags_t complain,
 
   if (undeduced_result_type_p)
     --processing_template_decl;
-  processing_postcondition = old_pc;
+  processing_postcondition_predicate = old_pc;
   gcc_checking_assert (scope_chain && scope_chain->bindings
 		       && scope_chain->bindings->kind == sk_contract);
   pop_bindings_and_leave_scope ();
@@ -14393,6 +14392,14 @@ tsubst_pack_expansion (tree t, tree args, tsubst_flags_t complain,
       else if (TREE_CODE (parm_pack) == FIELD_DECL)
 	/* For reconstruct_lambda_capture_pack.  */
 	arg_pack = retrieve_local_specialization (parm_pack);
+      else if (VAR_P (parm_pack) && DECL_ARTIFICIAL (parm_pack)
+	       && DECL_PACK_P (parm_pack))
+	{
+	  /* P3098: postcondition capture pack VAR_DECL.  */
+	  arg_pack = retrieve_local_specialization (parm_pack);
+	  if (arg_pack && DECL_PACK_P (arg_pack))
+	    arg_pack = NULL_TREE;
+	}
       else if (DECL_DECOMPOSITION_P (parm_pack))
 	{
 	  orig_arg = retrieve_local_specialization (parm_pack);
