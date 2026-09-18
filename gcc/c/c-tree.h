@@ -930,6 +930,8 @@ extern tree c_finish_stmt_expr (location_t, tree);
 extern tree c_process_expr_stmt (location_t, tree);
 extern tree c_finish_expr_stmt (location_t, tree);
 extern tree c_finish_return (location_t, tree, tree, bool = false);
+extern void c_maybe_check_postconditions (location_t, tree);
+extern bool c_has_active_postconditions (void);
 extern tree c_finish_bc_stmt (location_t, tree, bool, tree);
 extern tree c_finish_goto_label (location_t, tree);
 extern tree c_finish_goto_ptr (location_t, c_expr val);
