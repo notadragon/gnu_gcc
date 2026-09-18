@@ -1141,7 +1141,9 @@ c_cpp_builtins (cpp_reader *pfile)
 	}
       else if (cxx_dialect >= cxx20)
 	cpp_warn (pfile, "__cpp_concepts");
-      if (flag_contracts)
+      if (flag_contracts && flag_contracts_p3097)
+	cpp_define (pfile, "__cpp_contracts=202606L");
+      else if (flag_contracts)
 	cpp_define (pfile, "__cpp_contracts=202502L");
       else if (cxx_dialect >= cxx26)
 	cpp_warn (pfile, "__cpp_contracts");

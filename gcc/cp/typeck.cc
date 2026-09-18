@@ -4640,7 +4640,11 @@ cp_comp_parm_types (tree wanted_type, tree actual_type)
 
 /* Build a function call using a vector of arguments.
    If FUNCTION is the result of resolving an overloaded target built-in,
-   ORIG_FNDECL is the original function decl, otherwise it is null.
+   ORIG_FNDECL is the original function decl, otherwise it is null.  (It
+   is also used to carry the callee of a virtual dispatch through to
+   build_cxx_call for P3097; see the note there.  No in-tree caller passes
+   it in either sense -- the parameter is defaulted and every call site
+   omits it.)
    PARAMS may be NULL if there are no parameters.  This changes the
    contents of PARAMS.  */
 

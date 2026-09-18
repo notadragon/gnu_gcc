@@ -222,7 +222,8 @@ extern void maybe_apply_function_contracts	(tree);
 extern void finish_function_outlined_contracts	(tree);
 extern void set_contract_functions		(tree, tree, tree);
 
-extern tree maybe_contract_wrap_call		(tree, tree);
+extern tree maybe_contract_wrap_call		(tree, tree,
+						 bool = false);
 extern bool emit_contract_wrapper_func		(bool);
 extern void maybe_emit_violation_handler_wrappers (void);
 

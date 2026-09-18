@@ -3471,6 +3471,8 @@ diagnosed.
 Enable all of the contracts extension papers listed below.  Equivalent to
 giving each @option{-fcontracts-p@var{nnnn}} option individually.
 
+@opindex fcontracts-p3097
+@item -fcontracts-p3097
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines
