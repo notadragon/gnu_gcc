@@ -8800,6 +8800,36 @@ build_implicit_shift_check (tree fndecl, location_t loc,
    array-ref walk so the C++ reaction can be built without linking to cc1.  */
 
 tree
+cp_build_implicit_bounds_check (tree fndecl, location_t loc, tree index,
+				tree bound)
+{
+  if (!flag_contracts_p3100 || fndecl == NULL_TREE)
+    return NULL_TREE;
+
+  contract_evaluation_semantic sem
+    = resolve_implicit_contract_semantic (fndecl, loc,
+					  "ub:expr.add.out.of.bounds.known");
+  if (sem == CES_ASSUME)
+    return NULL_TREE;
+
+  /* Evaluate the index once and test it against the bound as unsigned, so a
+     negative index (which wraps to a large value) is caught as well.  */
+  tree i = save_expr (index);
+  tree utype = unsigned_type_for (TREE_TYPE (i));
+  tree cond = build2_loc (loc, GE_EXPR, boolean_type_node,
+			  fold_convert (utype, i), fold_convert (utype, bound));
+  return build_implicit_op_guard (loc, sem, i, cond, i,
+				  "array subscript out of bounds");
+}
+
+/* P3100: guard a floating-point-to-integer conversion CONVERTED (the FIX_TRUNC
+   of the floating value EXPR) whose truncated value may not be representable in
+   the destination integer type -- core-language UB ({conv.fpint}).  EXPR must
+   already be a single-evaluation form (SAVE_EXPR) shared with CONVERTED.
+   Returns `expr, (out_of_range ? <reaction> : converted)`; if the conversion
+   can never be out of range the CONVERTED value is returned unchanged.  */
+
+tree
 build_implicit_float_cast_check (tree fndecl, location_t loc,
 				 contract_evaluation_semantic sem,
 				 tree expr, tree converted)

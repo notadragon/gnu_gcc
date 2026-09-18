@@ -866,11 +866,13 @@ ubsan_maybe_instrument_array_ref (tree *expr_p, bool ignore_off_by_one)
   tree factor = NULL_TREE;
   int index_n = 0;  /* the operand position of INDEX in the parent tree.  */
 
+  bool do_sanitize
+    = sanitize_flags_p (SANITIZE_BOUNDS | SANITIZE_BOUNDS_STRICT);
   if (!ubsan_array_ref_instrumented_p (*expr_p)
-      && sanitize_flags_p (SANITIZE_BOUNDS | SANITIZE_BOUNDS_STRICT)
+      && (do_sanitize || flag_contracts_p3100)
       && current_function_decl != NULL_TREE)
     {
-      if (TREE_CODE (*expr_p) == ARRAY_REF)
+      if (TREE_CODE (*expr_p) == ARRAY_REF && do_sanitize)
 	{
 	  op0 = TREE_OPERAND (*expr_p, 0);
 	  op1 = TREE_OPERAND (*expr_p, 1);
@@ -881,9 +883,45 @@ ubsan_maybe_instrument_array_ref (tree *expr_p, bool ignore_off_by_one)
 	    TREE_OPERAND (*expr_p, 1)
 	      = build2 (COMPOUND_EXPR, TREE_TYPE (op1), e, op1);
 	}
-      else if (is_instrumentable_pointer_array_address (*expr_p, &op0, &op1,
-							&index_p, &index_n,
-							&factor))
+      else if (TREE_CODE (*expr_p) == ARRAY_REF && flag_contracts_p3100)
+	{
+	  /* P3100 implicit array-bounds contract assertion, when the sanitizer
+	     is off.  Only the statically-known-bound case is handled: the array
+	     operand has an ARRAY_TYPE with a constant upper domain bound.  The
+	     C++ langhook resolves the per-site semantic and builds a guarded
+	     index (out-of-range -> the defined valid index 0) that REPLACES the
+	     original index outright.  */
+	  op0 = TREE_OPERAND (*expr_p, 0);
+	  op1 = TREE_OPERAND (*expr_p, 1);
+	  tree atype = TREE_TYPE (op0);
+	  tree domain = (TREE_CODE (atype) == ARRAY_TYPE
+			 ? TYPE_DOMAIN (atype) : NULL_TREE);
+	  tree maxv = domain ? TYPE_MAX_VALUE (domain) : NULL_TREE;
+	  if (maxv != NULL_TREE && TREE_CODE (maxv) == INTEGER_CST)
+	    {
+	      /* First out-of-range index = max + 1 (+ 1 more when a one-past
+		 address is being formed rather than an element accessed).  */
+	      tree bound
+		= fold_build2 (PLUS_EXPR, TREE_TYPE (maxv), maxv,
+			       build_int_cst (TREE_TYPE (maxv),
+					      1 + ignore_off_by_one));
+	      /* Skip a constant index that is provably in range.  */
+	      if (!(TREE_CODE (op1) == INTEGER_CST
+		    && tree_int_cst_sgn (op1) >= 0
+		    && tree_int_cst_lt (op1, bound)))
+		{
+		  tree g = lang_hooks.build_implicit_bounds_check
+			     (current_function_decl, EXPR_LOCATION (*expr_p),
+			      op1, bound);
+		  if (g != NULL_TREE)
+		    TREE_OPERAND (*expr_p, 1) = g;
+		}
+	    }
+	}
+      else if (do_sanitize
+	       && is_instrumentable_pointer_array_address (*expr_p, &op0, &op1,
+							   &index_p, &index_n,
+							   &factor))
 	{
 	  tree e
 	    = ubsan_instrument_bounds_pointer_address (EXPR_LOCATION (*expr_p),
