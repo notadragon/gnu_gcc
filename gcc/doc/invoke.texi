@@ -228,6 +228,8 @@ in the following sections.
 -fcontract-disable-optimized-checks
 -fcontracts-client-check=@r{[}none@r{|}pre@r{|}all@r{]}
 -fcontracts-definition-check=@r{[}on@r{|}off@r{]}
+-fcontract-group-evaluation-semantic=@var{group}:@var{semantic}
+-fcontract-configuration=@var{json}  -fcontract-configuration-file=@var{file}
 -fcoroutines  -fdiagnostics-all-candidates
 -fno-elide-constructors
 -fno-enforce-eh-specs
@@ -3420,6 +3422,37 @@ which are otherwise enabled by default when the contracts feature is active.
 
 The variable @var{mode} has the values '@code{on}' and '@code{off}'.
 
+@opindex fcontract-group-evaluation-semantic
+@item -fcontract-group-evaluation-semantic=@var{group}:@var{semantic}
+Set the evaluation semantic for contract assertions belonging to the
+identification group @var{group}, overriding
+@option{-fcontract-evaluation-semantic} for those assertions.  May be given
+more than once.  Groups are attached to an assertion by an
+assertion-control label.
+
+@opindex fcontract-configuration
+@item -fcontract-configuration=@var{json}
+@opindex fcontract-configuration-file
+@item -fcontract-configuration-file=@var{file}
+Supply a JSON contract configuration, either inline or from @var{file}.
+A configuration is an array of entries, each pairing a @code{match} object
+against a contract assertion with an @code{output} object giving the
+evaluation semantic to use.  Entries are considered in the order written
+and the first match wins, interleaved with any
+@option{-fcontract-evaluation-semantic} and
+@option{-fcontract-group-evaluation-semantic} options according to their
+position on the command line.
+
+@opindex Wcontract-configuration
+@opindex Wno-contract-configuration
+@item -Wcontract-configuration
+Warn about a contract configuration that is accepted but suspect, such as
+an entry that can never match.  Malformed configuration is an error rather
+than a warning and is reported regardless.
+
+@opindex Wcontract-constexpr-side-effect
+@opindex Wno-contract-constexpr-side-effect
+@item -Wcontract-constexpr-side-effect
 Warn when the predicate of a contract assertion, evaluated during constant
 evaluation, modifies an object of the enclosing evaluation.  Such a program
 is well formed, and the modification is performed, but its meaning depends
