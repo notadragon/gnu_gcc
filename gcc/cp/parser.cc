@@ -3162,8 +3162,17 @@ static void cp_parser_pre_parsed_nested_name_specifier
   (cp_parser *);
 static bool cp_parser_cache_group
   (cp_parser *, enum cpp_ttype, unsigned);
+/* What kind of token range cp_parser_cache_defarg is collecting.  The three
+   modes share the depth-tracking + Core-issue-325 (`<' might start a
+   template-argument-list) disambiguation loop and differ only in how a
+   depth-0 comma is resolved.  */
+enum cp_defarg_cache_mode {
+  cp_defarg_cache_defarg,   /* A default argument; a parameter list follows.  */
+  cp_defarg_cache_nsdmi,    /* An NSDMI; a declarator list follows.  */
+  cp_defarg_cache_capture   /* A postcondition init-capture; a capture follows.  */
+};
 static tree cp_parser_cache_defarg
-  (cp_parser *parser, bool nsdmi);
+  (cp_parser *parser, cp_defarg_cache_mode mode);
 static void cp_parser_parse_tentatively
   (cp_parser *);
 static void cp_parser_commit_to_tentative_parse
@@ -28877,7 +28886,7 @@ cp_parser_parameter_declaration (cp_parser *parser,
       if (!template_parm_p && at_class_scope_p ()
 	  && TYPE_BEING_DEFINED (current_class_type)
 	  && !LAMBDA_TYPE_P (current_class_type))
-	default_argument = cp_parser_cache_defarg (parser, /*nsdmi=*/false);
+	default_argument = cp_parser_cache_defarg (parser, cp_defarg_cache_defarg);
 
       /* A constrained-type-specifier may declare a type
 	 template-parameter.  */
@@ -37139,7 +37148,7 @@ cp_parser_save_member_function_body (cp_parser* parser,
 static tree
 cp_parser_save_nsdmi (cp_parser* parser)
 {
-  return cp_parser_cache_defarg (parser, /*nsdmi=*/true);
+  return cp_parser_cache_defarg (parser, cp_defarg_cache_nsdmi);
 }
 
 /* Parse a template-argument-list, as well as the trailing ">" (but
@@ -39187,8 +39196,9 @@ cp_parser_cache_group (cp_parser *parser,
    NSDMI).  If that succeeds, then we stop caching.  */
 
 static tree
-cp_parser_cache_defarg (cp_parser *parser, bool nsdmi)
+cp_parser_cache_defarg (cp_parser *parser, cp_defarg_cache_mode mode)
 {
+  const bool nsdmi = (mode == cp_defarg_cache_nsdmi);
   unsigned depth = 0;
   int maybe_template_id = 0;
   cp_token *first_token;
