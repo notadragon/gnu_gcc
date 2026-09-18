@@ -1352,12 +1352,34 @@ maybe_splice_retval_cleanup (tree compound_stmt, bool is_try)
       tree_stmt_iterator iter = tsi_start (compound_stmt);
       tree retval = DECL_RESULT (current_function_decl);
 
-      if (function_body)
+      if (function_body && !cp_function_chain->retval_sentinel_declared)
 	{
-	  /* Add a DECL_EXPR for current_retval_sentinel.  */
+	  /* Add a DECL_EXPR for current_retval_sentinel.  Exactly once: a
+	     function with contracts reaches sk_function_parms twice, once for
+	     the body and once for the artificial block holding the contract
+	     checks, and a second DECL_EXPR for the same temporary trips
+	     gimple_add_tmp_var (PR c++/127281).  */
 	  tree decl_expr = build_stmt (loc, DECL_EXPR, current_retval_sentinel);
 	  tsi_link_before (&iter, decl_expr, TSI_SAME_STMT);
+	  cp_function_chain->retval_sentinel_declared = true;
 	}
+
+      if (function_body && cp_function_chain->defer_retval_cleanup)
+	/* The contracts block encloses this one and will be closed next; the
+	   cleanup belongs around it, so that it covers the postcondition
+	   checks as well as the body.  Splicing here too would destroy the
+	   returned object twice.  Only the function-body splice defers -- a
+	   function try block's own cleanup is unaffected.  See
+	   maybe_apply_function_contracts.  */
+	return;
+
+      if (function_body && cp_function_chain->retval_cleanup_spliced)
+	/* Already done, and this is the contracts block being closed on a
+	   function that did NOT defer -- preconditions only, or
+	   postconditions that cannot throw.  The body carries the cleanup; a
+	   second one here would destroy the returned object twice, which is
+	   the non-ICE half of PR c++/127281.  */
+	return;
 
       if (!cp_function_chain->throwing_cleanup)
 	/* We're only using the sentinel for an NRV.  */
@@ -1394,6 +1416,8 @@ maybe_splice_retval_cleanup (tree compound_stmt, bool is_try)
 				 stmts, cond, retval);
       CLEANUP_EH_ONLY (cleanup) = true;
       append_to_statement_list_force (cleanup, &compound_stmt);
+      if (function_body)
+	cp_function_chain->retval_cleanup_spliced = true;
     }
 }
 

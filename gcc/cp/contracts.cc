@@ -308,6 +308,34 @@ has_active_postconditions (tree fndecl)
   return has_active_contract_condition (fndecl, POSTCONDITION_STMT);
 }
 
+/* True if evaluating FNDECL's postconditions could exit via an exception, so
+   the returned object -- which exists by the time they run -- has to be
+   destroyed on that path.
+
+   Only "observe" and "enforce" let an exception out of a handler call:
+   "ignore" and "assume" never evaluate the predicate, "quick_enforce"
+   terminates without calling the handler at all, and the P4298 "noexcept_"
+   variants call it under noexcept, so a throw there terminates rather than
+   propagating.  all_contracts_statically_nonthrowing already draws exactly
+   that line, and is conservative about the two ways the semantic can change
+   under us at runtime: a P3595 dynamic selector (CONTRACT_DYNAMIC) or an
+   assertion-control label (CONTRACT_LABEL).
+
+   Upstream has no per-assertion semantics to consult -- one global
+   -fcontract-evaluation-semantic and no noexcept_ variants -- so it can only
+   answer this for the whole translation unit.  */
+
+static bool
+postconditions_may_throw_p (tree fndecl)
+{
+  if (!flag_exceptions || !has_active_postconditions (fndecl))
+    return false;
+
+  return !all_contracts_statically_nonthrowing (get_fn_contract_specifiers
+						(fndecl), fndecl,
+						POSTCONDITION_STMT);
+}
+
 /* Return true if any contract in CONTRACTS is not yet parsed.  */
 
 bool
@@ -1759,6 +1787,27 @@ start_function_contracts (tree fndecl)
 	      }
 	  }
 
+  /* A postcondition check runs after the returned object has been
+     initialized, and a violation handler that throws unwinds straight
+     through it.  Record that as what it is -- a cleanup that might throw --
+     so maybe_set_retval_sentinel builds the sentinel even for a function
+     whose body has no throwing cleanup of its own, and so the one cleanup
+     that results is spliced around the contracts block rather than the body.
+     Without this the returned object leaks (PR c++/127414), and the two
+     splices the contracts block used to provoke double-destroyed it
+     (PR c++/127281).
+
+     A coroutine needs no special case here even though its ramp cannot use
+     the sentinel: the coroutine transform clears throwing_cleanup itself
+     (see coroutines.cc) before contracts are applied, so no sentinel is ever
+     created and maybe_apply_function_contracts falls back to wrapping the
+     checks directly.  */
+  if (postconditions_may_throw_p (fndecl))
+    {
+      cp_function_chain->throwing_cleanup = true;
+      cp_function_chain->defer_retval_cleanup = true;
+    }
+
   /* If we are expanding contract assertions inline then no need to declare
      the outline function decls.  */
   if (!flag_contract_checks_outlined)
@@ -2210,6 +2259,63 @@ apply_postconditions (tree fndecl)
 				DECL_RESULT (fndecl), *tmp));
 }
 
+/* Wrap STMTS -- the postcondition checks of FNDECL -- in a cleanup that
+   destroys the returned object if evaluating them exits via an exception,
+   which a violation handler that throws will do.
+
+   By the time the checks run the returned object has been initialized:
+   [stmt.return]/5 sequences postcondition evaluation after the copy-
+   initialization of the result and after the destruction of local variables.
+   Unwinding past it without running its destructor leaks an object the
+   program can no longer reach.
+
+   This is the FALLBACK, not the usual path.  An ordinary function gets one
+   sentinel-guarded cleanup spliced around the whole contracts block, covering
+   the body and the checks together (see maybe_apply_function_contracts and
+   maybe_splice_retval_cleanup); this wrapper is for the case that cleanup
+   cannot reach -- a coroutine ramp, whose transform clears throwing_cleanup
+   because it manages its own cleanups, so no sentinel is ever built.  The
+   caller picks between them, and only one of the two is ever emitted, which
+   is what keeps the object from being destroyed twice.
+
+   No sentinel guard here, unlike maybe_splice_retval_cleanup: this region is
+   reached only on the normal-completion path of the body, where the returned
+   object necessarily exists, so there is nothing to test.
+
+   NOTE this is deliberately more than the standard currently requires.
+   [except.ctor]/2 destroys the returned object only for an exception thrown
+   "during the destruction of temporaries or local variables for a return
+   statement", and does not mention contract assertions; [basic.contract.eval]
+   says a throwing handler behaves "as if the function body exits via that
+   same exception", which describes a state where the result object was never
+   initialized -- not the state we are actually in.  So nothing obliges us to
+   run the destructor here.  Leaking is not a defensible answer; a core issue
+   is owed, and this should not be "corrected" back to a leak on the strength
+   of the wording alone.  */
+
+static tree
+wrap_postconditions_in_retval_cleanup (tree fndecl, tree stmts)
+{
+  if (!flag_exceptions || !stmts)
+    return stmts;
+
+  tree retval = DECL_RESULT (fndecl);
+  if (!retval
+      || VOID_TYPE_P (TREE_TYPE (retval))
+      || !TYPE_HAS_NONTRIVIAL_DESTRUCTOR (TREE_TYPE (retval)))
+    return stmts;
+
+  tree dtor = build_cleanup (retval);
+  if (!dtor || dtor == error_mark_node)
+    return stmts;
+
+  tree cleanup = build_stmt (UNKNOWN_LOCATION, CLEANUP_STMT,
+			     stmts, dtor, retval);
+  CLEANUP_EH_ONLY (cleanup) = true;
+
+  tree list = NULL_TREE;
+  append_to_statement_list_force (cleanup, &list);
+  return list;
 }
 
 /* Add contract handling to the function in FNDECL.
@@ -2274,6 +2380,51 @@ maybe_apply_function_contracts (tree fndecl)
 
   /* Now add the pre and post conditions to the existing function body.
      This copies the approach used for function try blocks.  */
+
+  /* We are called from finish_function with the sk_function_parms level
+     current, so do_poplevel sees that same level again when it finishes the
+     artificial block below -- exactly the test maybe_splice_retval_cleanup
+     uses to recognise the function body.  That second visit is not a problem
+     to be suppressed but the one we want: start_function_contracts asked for
+     the body's splice to be deferred, so the single return-value cleanup is
+     spliced here instead, around the body AND the postcondition checks.  A
+     check that throws then destroys the returned object exactly once, by the
+     same sentinel-guarded cleanup that covers the body.
+
+     UNIFIED_RETVAL_CLEANUP is false when there is no sentinel to splice: a
+     coroutine ramp, whose transform clears throwing_cleanup because it
+     manages its own cleanups, and any function whose postconditions cannot
+     throw.  Those fall back to wrapping the checks directly, below.
+
+     The constructor/destructor exclusions are not redundant:
+     current_retval_sentinel is #defined to current_vtt_parm, so for a cdtor
+     it reads a genuine VTT parameter and would answer "yes" to a question
+     about a sentinel that does not exist.  maybe_splice_retval_cleanup bails
+     on cdtors for the same reason, and the two must agree or we would emit
+     neither cleanup.
+
+     The throwing_cleanup test is what keeps coroutines on the fallback: the
+     coroutine transform runs before us and clears it, so the splice below
+     would take its "only using the sentinel for an NRV" exit and emit
+     nothing.  Claiming the unified path there would skip the wrapper too and
+     leave the ramp's return object with no cleanup at all.  Every condition
+     maybe_splice_retval_cleanup will apply has to be mirrored here, or the
+     two disagree and we emit either none or both.  */
+  const bool unified_retval_cleanup
+    = (cp_function_chain->defer_retval_cleanup
+       && cp_function_chain->throwing_cleanup
+       && !DECL_CONSTRUCTOR_P (fndecl)
+       && !DECL_DESTRUCTOR_P (fndecl)
+       && current_retval_sentinel);
+
+  /* The fallback, for the cases the unified cleanup does not reach.  Gated on
+     the same question the unified path was gated on, so postconditions that
+     cannot throw -- every one of them ignore, assume, quick_enforce or a
+     P4298 noexcept_ variant -- now carry no cleanup at all, where before they
+     carried one that could never run.  */
+  const bool wrap_checks_directly
+    = !unified_retval_cleanup && postconditions_may_throw_p (fndecl);
+
   tree compound_stmt = begin_compound_stmt (0);
   current_binding_level->artificial = true;
 
@@ -2312,6 +2463,11 @@ maybe_apply_function_contracts (tree fndecl)
   else
     apply_postconditions (fndecl);
   TREE_OPERAND (try_fin, 1) = pop_stmt_list (TREE_OPERAND (try_fin, 1));
+
+  /* Hand the splice back to do_poplevel: everything the cleanup must cover is
+     now in this block, so closing it is what puts the cleanup in the right
+     place.  */
+  cp_function_chain->defer_retval_cleanup = false;
   finish_compound_stmt (compound_stmt);
   /* The DECL_SAVED_TREE stmt list will be popped by our caller.  */
 }
