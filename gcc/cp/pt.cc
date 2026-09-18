@@ -14695,7 +14695,9 @@ tsubst_pack_index (tree t, tree args, tsubst_flags_t complain, tree in_decl)
   if (error_operand_p (index))
     return error_mark_node;
   if (!value_dependent_expression_p (index) && TREE_CODE (pack) == TREE_VEC)
-    r = pack_index_element (index, pack, parenthesized_p, complain);
+    {
+      r = pack_index_element (index, pack, parenthesized_p, complain);
+    }
   else
     r = make_pack_index (pack, index);
   if (TREE_CODE (t) == PACK_INDEX_TYPE)

@@ -33866,8 +33866,6 @@ cp_parser_late_contract_condition (cp_parser *parser, tree fn, tree contract)
      it const when processing the contract condition.  */
   current_class_ref = view_as_const (current_class_ref);
 
-  /* Parse the condition, ensuring that parameters or the return variable
-     aren't flagged for use outside the body of a function.  */
   begin_scope (sk_contract, fn);
   bool old_pc = processing_postcondition;
   processing_postcondition = POSTCONDITION_P (contract);
@@ -34171,7 +34169,6 @@ cp_parser_function_contract_specifier (cp_parser *parser)
       /* Defer the parsing of pre/post contracts inside class definitions.  */
       cp_token *first = cp_lexer_peek_token (parser->lexer);
 
-      /* Skip until we reach a closing token ).  */
       cp_parser_skip_to_closing_parenthesis (parser,
 					     /*recovering=*/false,
 					     /*or_comma=*/false,
@@ -34183,12 +34180,10 @@ cp_parser_function_contract_specifier (cp_parser *parser)
 
       parens.require_close (parser);
 
-      /* Build a deferred-parse node.  */
       tree condition = make_node (DEFERRED_PARSE);
       DEFPARSE_TOKENS (condition) = cp_token_cache_new (first, last);
       DEFPARSE_INSTANTIATIONS (condition) = NULL;
 
-      /* And its corresponding contract.  */
       if (identifier)
 	identifier.maybe_add_location_wrapper ();
       contract = grok_contract (contract_name, /*mode*/NULL_TREE, identifier,
@@ -34199,20 +34194,15 @@ cp_parser_function_contract_specifier (cp_parser *parser)
       /* Enable location wrappers when parsing contracts.  */
       auto suppression = make_temp_override (suppress_location_wrappers, 0);
 
-      /* If we have a current class object, see if we need to consider
-       it const when processing the contract condition.  */
       tree current_class_ref_copy = current_class_ref;
       current_class_ref = view_as_const (current_class_ref);
 
-      /* Parse the condition, ensuring that parameters or the return variable
-       aren't flagged for use outside the body of a function.  */
       begin_scope (sk_contract, current_function_decl);
       bool old_pc = processing_postcondition;
       processing_postcondition = postcondition_p;
       tree result = NULL_TREE;
       if (identifier)
 	{
-	  /* Build a fake variable for the result identifier.  */
 	  result = make_postcondition_variable (identifier);
 	  if (result_attrs && result != error_mark_node)
 	    cplus_decl_attributes (&result, result_attrs, 0);
@@ -34229,7 +34219,6 @@ cp_parser_function_contract_specifier (cp_parser *parser)
 			   && scope_chain->bindings->kind == sk_contract);
       pop_bindings_and_leave_scope ();
 
-      /* Revert (any) constification of the current class object.  */
       current_class_ref = current_class_ref_copy;
 
       if (contract != error_mark_node)
