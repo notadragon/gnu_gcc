@@ -878,6 +878,15 @@ implicit_overflow_reaction (location_t loc)
    instrumented so an out-of-range bool/enum value is replaced by a defined
    valid value (0).  */
 
+static int
+implicit_invalid_value_reaction (location_t loc)
+{
+  if (!flag_contracts_p3100)
+    return IMPLICIT_UB_NONE;
+  return lang_hooks.resolve_implicit_ub_semantic
+	   (cfun->decl, loc, "ub:conv.lval.valid.representation.bool.enum");
+}
+
 /* Expand UBSAN_NULL internal call.  The type is kept on the ckind
    argument which is a constant, because the middle-end treats pointer
    conversions as useless and therefore the type of the first argument
@@ -2127,6 +2136,196 @@ instrument_si_overflow (gimple_stmt_iterator *gsi)
     default:
       break;
     }
+}
+
+/* P3100: lower an implicit invalid-value-load contract assertion at the
+   (non-bitfield) bool/enum load STMT points to.  REACTION is the reaction
+   already resolved once, here in pass_ubsan, with the correct enclosing-function
+   context.  Reuses the sanitizer's raw-bits load + range test
+   (instrument_bool_enum_load), but instead of "report then continue with the
+   raw value" it *substitutes a defined valid value* (0 -- false for bool, an
+   in-range value for enum) whenever the stored value is out of range.  The
+   substitution is unconditional -- LHS = (out_of_range ? 0 : raw) -- so the
+   defined value is produced without a PHI (like instrument_si_overflow_contract
+   for overflow); for a checking reaction an extra very-unlikely branch runs the
+   trap / nothrow handler for its side effect only.  ignore
+   (IMPLICIT_UB_DEFINED) is just the substitution, no branch.  On return *GSI
+   points at the (new) statement defining LHS, in the original block.  */
+
+static void
+instrument_bool_enum_load_contract (gimple_stmt_iterator *gsi, int reaction)
+{
+  gimple *stmt = gsi_stmt (*gsi);
+  tree rhs = gimple_assign_rhs1 (stmt);
+  tree type = TREE_TYPE (rhs);
+  tree lhs = gimple_assign_lhs (stmt);
+  tree minv = NULL_TREE, maxv = NULL_TREE;
+
+  if (TREE_CODE (type) == BOOLEAN_TYPE)
+    {
+      minv = boolean_false_node;
+      maxv = boolean_true_node;
+    }
+  else if (TREE_CODE (type) == ENUMERAL_TYPE
+	   && TREE_TYPE (type) != NULL_TREE
+	   && TREE_CODE (TREE_TYPE (type)) == INTEGER_TYPE
+	   && (TYPE_PRECISION (TREE_TYPE (type))
+	       < GET_MODE_PRECISION (SCALAR_INT_TYPE_MODE (type))))
+    {
+      minv = TYPE_MIN_VALUE (TREE_TYPE (type));
+      maxv = TYPE_MAX_VALUE (TREE_TYPE (type));
+    }
+  else
+    return;
+
+  int modebitsize = GET_MODE_BITSIZE (SCALAR_INT_TYPE_MODE (type));
+  poly_int64 bitsize, bitpos;
+  tree offset;
+  machine_mode mode;
+  int volatilep = 0, reversep, unsignedp = 0;
+  tree base = get_inner_reference (rhs, &bitsize, &bitpos, &offset, &mode,
+				   &unsignedp, &reversep, &volatilep);
+  tree utype = build_nonstandard_integer_type (modebitsize, 1);
+
+  /* Same eligibility as the sanitizer.  */
+  if ((VAR_P (base) && DECL_HARD_REGISTER (base))
+      || !multiple_p (bitpos, modebitsize)
+      || maybe_ne (bitsize, modebitsize)
+      || GET_MODE_BITSIZE (SCALAR_INT_TYPE_MODE (utype)) != modebitsize
+      || TREE_CODE (lhs) != SSA_NAME)
+    return;
+
+  /* A load that ends its block -- it can throw, which under
+     -fnon-call-exceptions is the case for any load in an EH region, and an
+     EH region is created by something as ordinary as a local with a
+     destructor.  We can neither insert after it nor replace it, so
+     retarget the load itself to produce the raw bits and build the check
+     and the value substitution on the fallthrough edge, exactly as the
+     stock instrument_bool_enum_load does.  Bailing here instead would
+     leave the raw load in place -- that is, behave as assume -- whatever
+     semantic was actually configured, including the value substitution
+     that ignore requires.  */
+  bool ends_bb = stmt_ends_bb_p (stmt);
+
+  addr_space_t as = TYPE_ADDR_SPACE (TREE_TYPE (rhs));
+  if (as != TYPE_ADDR_SPACE (utype))
+    utype = build_qualified_type (utype, TYPE_QUALS (utype)
+					 | ENCODE_QUAL_ADDR_SPACE (as));
+  location_t loc = gimple_location (stmt);
+
+  /* Load the raw storage bits as an unsigned integer, so an out-of-range value
+     is visible (a plain bool/enum load would already be assumed in range).  */
+  tree ptype = build_pointer_type (TREE_TYPE (rhs));
+  tree atype = reference_alias_ptr_type (rhs);
+  gimple *g = gimple_build_assign (make_ssa_name (ptype),
+				   build_fold_addr_expr (rhs));
+  gimple_set_location (g, loc);
+  gsi_insert_before (gsi, g, GSI_SAME_STMT);
+  tree mem = build2 (MEM_REF, utype, gimple_assign_lhs (g),
+		     build_int_cst (atype, 0));
+  tree urhs = make_ssa_name (utype);
+
+  /* INS is where the check and the substitution get built.  RAWVAL is the
+     raw value reinterpreted as the bool/enum type, used only on the
+     in-range path; it doubles as the anchor statement on the fallthrough
+     edge in the ends_bb case.  */
+  gimple_stmt_iterator ins;
+  tree rawval = make_ssa_name (type);
+  if (ends_bb)
+    {
+      gimple_assign_set_lhs (stmt, urhs);
+      gimple_assign_set_rhs_from_tree (gsi, mem);
+      update_stmt (stmt);
+      edge e = find_fallthru_edge (gimple_bb (stmt)->succs);
+      gcc_assert (e != NULL);
+      g = gimple_build_assign (rawval, NOP_EXPR, urhs);
+      gimple_set_location (g, loc);
+      gsi_insert_on_edge_immediate (e, g);
+      ins = gsi_for_stmt (g);
+    }
+  else
+    {
+      g = gimple_build_assign (urhs, mem);
+      gimple_set_location (g, loc);
+      gsi_insert_before (gsi, g, GSI_SAME_STMT);
+      ins = gsi_for_stmt (g);
+      g = gimple_build_assign (rawval, NOP_EXPR, urhs);
+      gimple_set_location (g, loc);
+      gsi_insert_after (&ins, g, GSI_NEW_STMT);
+    }
+
+  /* Normalize to [0, maxv-minv] and form the out-of-range test, exactly as the
+     sanitizer does.  */
+  tree umin = fold_convert (utype, minv);
+  tree umax = fold_convert (utype, maxv);
+  tree norm = urhs;
+  if (!integer_zerop (umin))
+    {
+      norm = make_ssa_name (utype);
+      g = gimple_build_assign (norm, MINUS_EXPR, urhs, umin);
+      gimple_set_location (g, loc);
+      gsi_insert_after (&ins, g, GSI_NEW_STMT);
+    }
+  tree bound = int_const_binop (MINUS_EXPR, umax, umin);
+
+  /* out_of_range = norm > bound.  A GIMPLE COND_EXPR select requires a bare
+     boolean condition (not a comparison), so materialize it into an SSA name;
+     it is reused for the reaction branch below.  */
+  tree ovf = make_ssa_name (boolean_type_node);
+  g = gimple_build_assign (ovf, GT_EXPR, norm, bound);
+  gimple_set_location (g, loc);
+  gsi_insert_after (&ins, g, GSI_NEW_STMT);
+
+  /* LHS = out_of_range ? 0 : rawval -- the defined valid value, produced
+     unconditionally.  It replaces the original load, or on the ends_bb path
+     defines LHS on the fallthrough edge, the load itself having been
+     retargeted to produce the raw bits.  */
+  gassign *sel = gimple_build_assign (lhs, COND_EXPR, ovf,
+				      build_zero_cst (type), rawval);
+  gimple_set_location (sel, loc);
+  if (ends_bb)
+    gsi_insert_after (&ins, sel, GSI_NEW_STMT);
+  else
+    gsi_replace (gsi, sel, true);
+
+  if (reaction == IMPLICIT_UB_DEFINED)
+    /* ignore: just the substitution, no handler and no branch.  */
+    return;
+
+  /* Checking semantic: add a very-unlikely branch on the out-of-range test to
+     run the reaction; LHS is already 0 on that path.  */
+  basic_block then_bb, fallthru_bb;
+  gimple_stmt_iterator sel_gsi = gsi_for_stmt (sel);
+  gimple_stmt_iterator cond_gsi
+    = create_cond_insert_point (&sel_gsi, /*before_p=*/false,
+				/*then_more_likely_p=*/false,
+				/*create_then_fallthru_edge=*/true,
+				&then_bb, &fallthru_bb);
+  gcond *cond = gimple_build_cond (NE_EXPR, ovf, boolean_false_node,
+				   NULL_TREE, NULL_TREE);
+  gimple_set_location (cond, loc);
+  gsi_insert_after (&cond_gsi, cond, GSI_NEW_STMT);
+
+  gimple *r;
+  if (reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE
+      || reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE)
+    {
+      tree entry = NULL_TREE, data_addr = NULL_TREE;
+      if (lang_hooks.build_implicit_ub_handler
+	    (cfun->decl, loc, "ub:conv.lval.valid.representation.bool.enum",
+	     reaction, &entry, &data_addr))
+	r = gimple_build_call (entry, 1, data_addr);
+      else
+	r = gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
+    }
+  else
+    /* IMPLICIT_UB_TRAP (quick_enforce).  */
+    r = gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
+  gimple_stmt_iterator then_gsi = gsi_after_labels (then_bb);
+  gimple_set_location (r, loc);
+  gsi_insert_before (&then_gsi, r, GSI_SAME_STMT);
+
+  *gsi = gsi_for_stmt (sel);
 }
 
 /* Instrument loads from (non-bitfield) bool and C++ enum values
