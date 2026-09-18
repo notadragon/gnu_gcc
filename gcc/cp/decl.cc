@@ -14122,6 +14122,51 @@ complain_about_incompatible_declspecs (const char *name_a, location_t loc_a,
    declarator, in cases like "struct S;"), or the ERROR_MARK_NODE if an
    error occurs. */
 
+
+/* What kind of thing a declarator declares, when it is not going to become a
+   function.  Shared by the two specifiers that may only appear on a function
+   declarator -- a function-contract-specifier-seq and a requires-clause --
+   because they fail in the same places for the same reason, and having asked
+   the question once is what keeps their answers from drifting apart.  */
+
+enum non_function_declarator
+{
+  nfd_is_function,
+  nfd_typedef,
+  nfd_type_id,
+  nfd_parameter,
+  nfd_bit_field,
+  nfd_non_function_type
+};
+
+static enum non_function_declarator
+classify_non_function_declarator (bool typedef_p,
+				  enum decl_context decl_context, tree type)
+{
+  /* Say nothing about a declarator that is already ill-formed.  */
+  if (type == error_mark_node)
+    return nfd_is_function;
+
+  if (typedef_p)
+    return nfd_typedef;
+  if (decl_context == TYPENAME || decl_context == TEMPLATE_TYPE_ARG)
+    return nfd_type_id;
+  /* PARM is tested here rather than through TYPE.  A parameter of function
+     type is adjusted to a pointer to function ([dcl.fct]/5), but that
+     adjustment happens LATER in grokdeclarator than every caller of this
+     function, so the parameter still looks like a FUNCTION_TYPE.  That
+     ordering is exactly why the requires-clause check further down, which
+     keys on the type alone, lets the parameter case through.  */
+  if (decl_context == PARM || decl_context == CATCHPARM)
+    return nfd_parameter;
+  if (decl_context == BITFIELD)
+    return nfd_bit_field;
+  if (!FUNC_OR_METHOD_TYPE_P (type))
+    return nfd_non_function_type;
+
+  return nfd_is_function;
+}
+
 tree
 grokdeclarator (const cp_declarator *declarator,
 		cp_decl_specifier_seq *declspecs,
@@ -16072,6 +16117,20 @@ grokdeclarator (const cp_declarator *declarator,
     ctype = current_class_type;
 
   /* Now TYPE has the actual type.  */
+
+  /* A requires-clause is refused in the same places, and for the same
+     reason, but only the PARAMETER position is handled here: the typedef,
+     type-id and non-function-type positions are already diagnosed further
+     down, and those messages are left exactly as they are rather than
+     re-worded through this path.  A parameter is the one position the
+     existing checks miss, because the one that would catch it is guarded on
+     !FUNC_OR_METHOD_TYPE_P and runs before the function-to-pointer
+     adjustment that would make its guard true.  */
+  if (reqs && nf_kind == nfd_parameter)
+    {
+      error_at (location_of (reqs), "requires-clause on parameter");
+      reqs = NULL_TREE;
+    }
 
   if (returned_attrs)
     {
