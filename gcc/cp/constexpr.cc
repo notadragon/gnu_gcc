@@ -1210,6 +1210,13 @@ public:
   /* If non-null, only allow modification of existing values of the variables
      in this set.  Set by modifiable_tracker, below.  */
   hash_set<tree> *modifiable;
+  /* Set when MODIFIABLE actually refused a modification, so a caller can tell
+     "this subexpression modifies something outside itself" apart from "this
+     subexpression is not constant".  Reset by modifiable_tracker.  */
+  bool modifiable_rejected;
+  /* The object of the first such refusal, for diagnostics; NULL_TREE if none
+     or if it was not a declaration we can name.  */
+  tree modifiable_rejected_obj;
   /* If cxx_eval_outermost_constant_expr is called on the consteval block
      operator (), this is the FUNCTION_DECL of that operator ().  */
   tree consteval_block;
@@ -1241,6 +1248,7 @@ public:
   /* Constructor.  */
   constexpr_global_ctx ()
     : constexpr_ops_count (0), cleanups (NULL), modifiable (nullptr),
+      modifiable_rejected (false), modifiable_rejected_obj (NULL_TREE),
       consteval_block (NULL_TREE), heap_dealloc_count (0),
       uncaught_exceptions (0), contract_statement (NULL_TREE),
       contract_condition_non_const (false), state_dependent (false) {}
@@ -1266,7 +1274,14 @@ public:
   tree *get_value_ptr (tree t, bool initializing)
   {
     if (modifiable && !modifiable->contains (t))
-      return nullptr;
+      {
+	if (!modifiable_rejected)
+	  {
+	    modifiable_rejected = true;
+	    modifiable_rejected_obj = DECL_P (t) ? t : NULL_TREE;
+	  }
+	return nullptr;
+      }
     if (tree *p = values.get (t))
       {
 	if (*p != void_node && *p != void_list_node)
@@ -1316,17 +1331,29 @@ class modifiable_tracker
   hash_set<tree> set;
   constexpr_global_ctx *global;
   hash_set<tree> *previous_set;
+  bool previous_rejected;
+  tree previous_rejected_obj;
 public:
   modifiable_tracker (constexpr_global_ctx *g)
     : global (g), previous_set (g->modifiable)
   {
     global->modifiable = &set;
+    previous_rejected = global->modifiable_rejected;
+    previous_rejected_obj = global->modifiable_rejected_obj;
+    global->modifiable_rejected = false;
+    global->modifiable_rejected_obj = NULL_TREE;
   }
+  /* Whether a modification was refused while this tracker was active, and
+     the object of the first refusal.  Query these before destruction.  */
+  bool rejected () const { return global->modifiable_rejected; }
+  tree rejected_obj () const { return global->modifiable_rejected_obj; }
   ~modifiable_tracker ()
   {
     for (tree t: set)
       global->clear_value (t);
     global->modifiable = previous_set;
+    global->modifiable_rejected = previous_rejected;
+    global->modifiable_rejected_obj = previous_rejected_obj;
   }
 };
 
@@ -11225,14 +11252,79 @@ cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
 	bool ctrct_non_const_p = false;
 	bool ctrct_overflow_p = false;
 	tree jmp_target = NULL_TREE;
-	constexpr_ctx new_ctx = *ctx;
-	new_ctx.quiet = true;
-	/* Avoid modification of existing values.  */
-	modifiable_tracker ms (new_ctx.global);
-	tree eval =
-	  cxx_eval_constant_expression (&new_ctx, cond, vc_prvalue,
-					&ctrct_non_const_p,
-					&ctrct_overflow_p, &jmp_target);
+	tree eval;
+	bool modifies_outside = false;
+	tree modified_obj = NULL_TREE;
+	{
+	  constexpr_ctx new_ctx = *ctx;
+	  new_ctx.quiet = true;
+	  /* [basic.contract.eval] permits, but does not require, an
+	     alternative evaluation that yields the predicate's value without
+	     its side effects; prefer that, so a predicate that happens to
+	     modify something leaves the enclosing evaluation alone.  */
+	  modifiable_tracker ms (new_ctx.global);
+	  eval = cxx_eval_constant_expression (&new_ctx, cond, vc_prvalue,
+					       &ctrct_non_const_p,
+					       &ctrct_overflow_p, &jmp_target);
+	  modifies_outside = ms.rejected ();
+	  modified_obj = ms.rejected_obj ();
+	}
+	if (ctrct_non_const_p && modifies_outside)
+	  {
+	    /* No such side-effect-free evaluation exists: the predicate
+	       modifies an object of the enclosing evaluation.  That is
+	       permitted in a core constant expression, so evaluating it is
+	       still required to succeed -- reporting it as non-constant would
+	       reject a well-formed program.  The tracker rolled its attempt
+	       back, so redo it for real and let the modification stand.  */
+	    ctrct_non_const_p = false;
+	    ctrct_overflow_p = false;
+	    jmp_target = NULL_TREE;
+	    constexpr_ctx new_ctx = *ctx;
+	    new_ctx.quiet = true;
+	    eval = cxx_eval_constant_expression (&new_ctx, cond, vc_prvalue,
+						 &ctrct_non_const_p,
+						 &ctrct_overflow_p, &jmp_target);
+
+	    /* The modification stood, so the meaning of the program now
+	       depends on which evaluation semantic was chosen: under ignore
+	       the predicate is not evaluated at all.  Say so, unless the
+	       retry failed too, in which case the non-constant diagnostic
+	       below is the thing to report.
+
+	       Deliberately not gated on CTX->QUIET or on manifestly-constant
+	       evaluation: a constant evaluation that *succeeds* is performed
+	       quietly and with mce_unknown, so either test would silence the
+	       warning on exactly the code worth warning about.  Warning
+	       straight from the evaluator and deduplicating is what
+	       -Winterference-size does here too.  Once per location, since a
+	       contract in a compile-time loop or in a template reaches this
+	       repeatedly.  */
+	    if (warn_contract_constexpr_side_effect && !ctrct_non_const_p)
+	      {
+		static hash_set<int_hash<location_t, UNKNOWN_LOCATION>> warned;
+		location_t wloc = EXPR_LOCATION (t);
+		if (!warned.add (wloc))
+		  {
+		    auto_diagnostic_group d;
+		    bool w;
+		    if (modified_obj)
+		      w = warning_at (wloc, OPT_Wcontract_constexpr_side_effect,
+				      "contract predicate modifies %qD, an "
+				      "object of the enclosing constant "
+				      "evaluation", modified_obj);
+		    else
+		      w = warning_at (wloc, OPT_Wcontract_constexpr_side_effect,
+				      "contract predicate modifies an object "
+				      "of the enclosing constant evaluation");
+		    if (w)
+		      inform (wloc, "the predicate is not evaluated under the "
+			      "%<ignore%> semantic, so the modification "
+			      "depends on the evaluation semantic");
+		  }
+	      }
+	  }
+
 	/* Not a constant.  */
 	if (ctrct_non_const_p)
  	  {
