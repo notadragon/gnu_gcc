@@ -6016,6 +6016,19 @@ cxx_builtin_function (tree decl)
        unless they are __builtin_*_chk.  */
     hiding = true;
 
+  /* Builtins are namespace-scope entities, but the middle end may create one
+     lazily from within a function body -- e.g. the sanitizer/P3100 contract
+     instrumentation passes call add_builtin_function while a
+     current_function_decl is in scope.  In that case pushdecl would route the
+     FUNCTION_DECL through set_decl_context_in_fn as a block-scope local and
+     ICE.  Escape to the top level so the builtin is entered at namespace
+     scope, just as when it is created during front-end initialization.
+     Guarded on current_function_decl so the common (init-time) path is
+     unaffected.  */
+  bool pushed_top_level = current_function_decl != NULL_TREE;
+  if (pushed_top_level)
+    push_to_top_level ();
+
   /* All builtins that don't begin with an '_' should additionally
      go in the 'std' namespace.  */
   if (name[0] != '_')
@@ -6030,6 +6043,9 @@ cxx_builtin_function (tree decl)
 
   DECL_CONTEXT (decl) = FROB_CONTEXT (current_namespace);
   decl = pushdecl (decl, hiding);
+
+  if (pushed_top_level)
+    pop_from_top_level ();
 
   return decl;
 }

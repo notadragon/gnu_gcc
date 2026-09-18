@@ -890,6 +890,25 @@ default_handle_c_option (size_t code ATTRIBUTE_UNUSED,
 bool
 c_common_post_options (const char **pfilename)
 {
+  /* P3100: -fsanitize-semantic= only means anything when sanitizer checks
+     are routed to the contract-violation handler.  Without
+     -fcontracts-p3100 it is accepted and then does nothing whatever, which
+     reads as an ordinary sanitizer option that quietly failed.
+
+     This lives in the front end rather than in the common option
+     finalization because -fcontracts-p3100 is C++-only and is not streamed
+     into the LTO options section, while -fsanitize-semantic= is a Common
+     option and is: checking there made lto1 warn on every routed LTO link,
+     where routing is in fact perfectly well in effect.  */
+  if (!flag_contracts_p3100)
+    for (unsigned bit = 0; bit < SANITIZE_CODE_TYPE_BITS; bit++)
+      if (flag_sanitize_semantic[bit] != CES_INVALID)
+	{
+	  warning (0, "%<-fsanitize-semantic=%> has no effect without "
+		      "%<-fcontracts-p3100%>");
+	  break;
+	}
+
   /* Canonicalize the input and output filenames.  */
   if (in_fnames == NULL)
     {

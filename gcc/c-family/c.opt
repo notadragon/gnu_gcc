@@ -1941,6 +1941,10 @@ Enum(contract_semantic) String(enforce) Value(3)
 EnumValue
 Enum(contract_semantic) String(quick_enforce) Value(4)
 
+EnumValue
+Enum(contract_semantic) String(assume) Value(5)
+
+EnumValue
 Enum(contract_semantic) String(noexcept_observe) Value(6)
 
 EnumValue
@@ -2042,6 +2046,10 @@ fcontracts-p4299
 C ObjC Var(flag_contracts_p4299) Init(0)
 Enable C contracts support (D4299).
 
+fcontracts-p3100
+C++ ObjC++ Var(flag_contracts_p3100) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3100 implicit contract assertions and the assume evaluation semantic.
+
 fcontracts-p4298
 C++ ObjC++ Var(flag_contracts_p4298) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P4298 noexcept_enforce and noexcept_observe evaluation semantics.
@@ -2049,6 +2057,10 @@ Enable P4298 noexcept_enforce and noexcept_observe evaluation semantics.
 fcontracts-p4301
 C++ ObjC++ Var(flag_contracts_p4301) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable D4301 contract_violation::report() ASan/UBSan diagnostic accessor.
+
+fcontracts-allow-assume
+C C++ ObjC ObjC++ Var(flag_contracts_allow_assume) Init(0)
+Allow the assume contract evaluation semantic to be used; a resolved assume is otherwise treated as ignore.
 
 fcoroutines
 C++ ObjC++ LTO Var(flag_coroutines)

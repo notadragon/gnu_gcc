@@ -230,6 +230,8 @@ in the following sections.
 -fcontracts-definition-check=@r{[}on@r{|}off@r{]}
 -fcontract-group-evaluation-semantic=@var{group}:@var{semantic}
 -fcontract-configuration=@var{json}  -fcontract-configuration-file=@var{file}
+-fsanitize-semantic=@var{check}:@var{semantic}
+-fsanitize-noncontract-callbacks
 -fcoroutines  -fdiagnostics-all-candidates
 -fno-elide-constructors
 -fno-enforce-eh-specs
@@ -3380,6 +3382,11 @@ fails, the execution is terminated immediately (without calling any handler).
 At compile-time there is no difference in behaviour between this option and
 the @code{enforce} case, since no handler is invoked at compile time.
 
+'@code{assume}' The predicate is not evaluated and the compiler may assume it
+holds, eliding code on the assumption that a violation cannot occur.  A
+violated predicate is therefore undefined behaviour.  For a contract written
+in the source this requires @option{-fcontracts-allow-assume}.
+
 '@code{noexcept_enforce}' As @code{enforce}, except that the handler is
 invoked in a non-throwing context: a handler that exits by throwing
 terminates rather than propagating.  Requires @option{-fcontracts-p4298}.
@@ -3489,12 +3496,20 @@ tag dispatch -- is not reported.
 @opindex fcontracts-allow-assume
 @opindex fno-contracts-allow-assume
 @item -fcontracts-allow-assume
+Permit the @code{assume} evaluation semantic to be selected for contract
+assertions written in the source.  Because @code{assume} makes a violated
+predicate undefined behaviour rather than a diagnosed error, it must be
+opted into explicitly.
+
+@opindex fcontracts-p3850
+@item -fcontracts-p3850
 Enable all of the contracts extension papers listed below.  Equivalent to
 giving each @option{-fcontracts-p@var{nnnn}} option individually.
 
 @opindex fcontracts-p3097
 @opindex fcontracts-p3098
 @opindex fcontracts-p3099
+@opindex fcontracts-p3100
 @opindex fcontracts-p3290
 @opindex fcontracts-p3400
 @opindex fcontracts-p4283
@@ -3504,12 +3519,28 @@ giving each @option{-fcontracts-p@var{nnnn}} option individually.
 @item -fcontracts-p3097
 @itemx -fcontracts-p3098
 @itemx -fcontracts-p3099
+@itemx -fcontracts-p3100
 @itemx -fcontracts-p3290
 @itemx -fcontracts-p3400
 @itemx -fcontracts-p4283
 @itemx -fcontracts-p4298
 @itemx -fcontracts-p4299
 @itemx -fcontracts-p4301
+@opindex fsanitize-semantic
+@item -fsanitize-semantic=@var{check}:@var{semantic}
+Route the sanitizer check @var{check} to the contract-violation handler
+with the given evaluation semantic, instead of reporting it through the
+sanitizer runtime.  Requires @option{-fcontracts-p3100}; without it the
+option has no effect and a warning is issued.  May be given more than
+once.
+
+@opindex fsanitize-noncontract-callbacks
+@opindex fno-sanitize-noncontract-callbacks
+@item -fsanitize-noncontract-callbacks
+Suppress routing of sanitizer checks to the contract-violation handler
+even under @option{-fcontracts-p3100}, restoring the ordinary sanitizer
+reporting path.
+
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines

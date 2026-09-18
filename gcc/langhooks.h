@@ -694,6 +694,44 @@ struct lang_hooks
      languages.  */
   const char *(*get_sarif_source_language) (const char *filename);
 
+  /* P3100 implicit contract assertions.  Given the function FNDECL that
+     contains a core-language UB site, the site LOCATION, and the UB's
+     configuration GROUP (e.g. "ub:expr.unary.dereference.nullptr"), resolve the
+     evaluation semantic from the contract configuration and return the
+     language-neutral reaction the middle end should emit (an
+     enum implicit_ub_reaction value; see gcc/ubsan.h).  The default returns
+     IMPLICIT_UB_NONE.  This lets a middle-end pass (ubsan) query the C++
+     front end's P3595 resolution per site without linking to it.  */
+  int (*resolve_implicit_ub_semantic) (tree fndecl, location_t loc,
+				       const char *group);
+
+  /* P3100 implicit contract assertions.  For a site (FNDECL + LOC) that
+     resolves to a non-throwing handler semantic for GROUP, build the pieces
+     needed to call the contract-violation handler from the middle end: set
+     *ENTRY_OUT to the entry-point FUNCTION_DECL and *DATA_ADDR_OUT to the
+     address of a freshly-built static contract_violation data block, and
+     return true.  REACTION is the already-resolved enum implicit_ub_reaction
+     carried from pass_ubsan (pre-inline); the hook uses it to pick the noreturn
+     (enforce) vs returning (observe) entry point and the data-block semantic,
+     so it must NOT re-resolve against the post-inline FNDECL.  Return false
+     otherwise.  Lets the ubsan pass emit the handler call without linking to
+     the front end.  Default returns false.  */
+  bool (*build_implicit_ub_handler) (tree fndecl, location_t loc,
+				     const char *group, int reaction,
+				     tree *entry_out, tree *data_addr_out);
+
+  /* P3100 implicit array-bounds contract assertion
+     (ub:expr.add.out.of.bounds.known).  For a subscript at site (FNDECL + LOC)
+     with a statically-known array size, INDEX the (integer) subscript and BOUND
+     the first out-of-range index value, resolve the evaluation semantic and
+     return a replacement index expression that yields a defined valid index (0)
+     when INDEX is out of range, running the configured reaction, or the raw
+     index when it is in range.  Returns NULL_TREE when the site resolves to
+     assume (no guard).  Lets the c-family array-ref walk build the C++ reaction
+     without linking to the front end.  Default returns NULL_TREE.  */
+  tree (*build_implicit_bounds_check) (tree fndecl, location_t loc, tree index,
+				       tree bound);
+
   /* Whenever you add entries here, make sure you adjust langhooks-def.h
      and langhooks.cc accordingly.  */
 };

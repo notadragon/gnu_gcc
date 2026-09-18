@@ -979,6 +979,36 @@ lhd_get_sarif_source_language (const char *)
   return NULL;
 }
 
+/* Default implementation of LANG_HOOKS_RESOLVE_IMPLICIT_UB_SEMANTIC: a
+   language with no P3100 implicit contract assertions requests no
+   instrumentation.  Returns IMPLICIT_UB_NONE (see gcc/ubsan.h).  */
+
+int
+lhd_resolve_implicit_ub_semantic (tree, location_t, const char *)
+{
+  return 0 /* IMPLICIT_UB_NONE */;
+}
+
+/* Default implementation of LANG_HOOKS_BUILD_IMPLICIT_UB_HANDLER: a language
+   with no P3100 implicit contract assertions never resolves a site to a
+   handler semantic, so there is nothing to build.  */
+
+bool
+lhd_build_implicit_ub_handler (tree, location_t, const char *, int, tree *,
+			       tree *)
+{
+  return false;
+}
+
+/* Default implementation of LANG_HOOKS_BUILD_IMPLICIT_BOUNDS_CHECK: a language
+   with no P3100 implicit contract assertions emits no bounds guard.  */
+
+tree
+lhd_build_implicit_bounds_check (tree, location_t, tree, tree)
+{
+  return NULL_TREE;
+}
+
 /* Returns true if the current lang_hooks represents the GNU C frontend.  */
 
 bool
