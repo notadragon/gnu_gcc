@@ -34382,6 +34382,21 @@ cp_parser_contract_assert (cp_parser *parser, cp_token *token)
   token = cp_lexer_consume_token (parser->lexer);
   location_t loc = token->location;
 
+  /* Parse optional assertion-control-specifier: < constant-expression >  */
+  tree label = cp_parser_assertion_control_specifier (parser);
+
+  /* Parse optional requires-clause (P4283).  */
+  tree requires_clause = cp_parser_contract_requires_clause (parser);
+
+  /* If the requires-clause was ill-formed, skip to end of statement to
+     avoid cascading errors from the missing predicate.  */
+  if (requires_clause == error_mark_node)
+    {
+      cp_parser_skip_to_end_of_statement (parser);
+      cp_parser_consume_semicolon_at_end_of_statement (parser);
+      return error_mark_node;
+    }
+
   location_t attrs_loc = cp_lexer_peek_token (parser->lexer)->location;
   tree std_attrs = cp_parser_std_attribute_spec_seq (parser);
   if (std_attrs)
@@ -34483,6 +34498,39 @@ cp_function_contract_specifier_intro (cp_parser *parser)
   return contract_name;
 }
 
+/* Starting at token N, which must be an opening (, [ or {, return the
+   index just past the matching close, or 0 if there is none before EOF.
+   Used by cp_maybe_function_contract_specifier so that a bracketed group
+   can be stepped over atomically.  */
+
+static size_t
+cp_skip_balanced_group (cp_parser *parser, size_t n)
+{
+  cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, n);
+  enum cpp_ttype open = tok->type, close;
+
+  switch (open)
+    {
+    case CPP_OPEN_PAREN:   close = CPP_CLOSE_PAREN;  break;
+    case CPP_OPEN_SQUARE:  close = CPP_CLOSE_SQUARE; break;
+    case CPP_OPEN_BRACE:   close = CPP_CLOSE_BRACE;  break;
+    default:               return n;
+    }
+
+  unsigned depth = 0;
+  for (;;)
+    {
+      tok = cp_lexer_peek_nth_token (parser->lexer, n);
+      if (tok->type == CPP_EOF)
+	return 0;
+      if (tok->type == open)
+	++depth;
+      else if (tok->type == close && --depth == 0)
+	return n + 1;
+      ++n;
+    }
+}
+
 /* Look ahead to see if this might introduce a function contract specifier.
    If not return NULL_TREE, if successful return the name (pre or post).  */
 
@@ -34494,6 +34542,94 @@ cp_maybe_function_contract_specifier (cp_parser *parser)
     return NULL_TREE;
 
   size_t n = 2;
+  /* Skip optional assertion-control-specifier: < constant-expression >
+
+     The constant-expression may itself contain <, > or ; inside a
+     bracketed group -- a relational operator in a parenthesized
+     subexpression, say, or a statement in a lambda body.  Step over any
+     such group atomically so that only the angle brackets that actually
+     delimit the specifier are counted.  */
+  if (cp_lexer_nth_token_is (parser->lexer, n, CPP_LESS))
+    {
+      unsigned depth = 1;
+      ++n;
+      while (depth > 0)
+	{
+	  cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, n);
+	  if (tok->type == CPP_OPEN_PAREN
+	      || tok->type == CPP_OPEN_SQUARE
+	      || tok->type == CPP_OPEN_BRACE)
+	    {
+	      n = cp_skip_balanced_group (parser, n);
+	      if (n == 0)
+		return NULL_TREE;
+	      continue;
+	    }
+	  if (tok->type == CPP_LESS)
+	    ++depth;
+	  else if (tok->type == CPP_GREATER)
+	    --depth;
+	  else if (tok->type == CPP_RSHIFT && cxx_dialect != cxx98)
+	    {
+	      if (depth >= 2)
+		depth -= 2;
+	      else
+		--depth;
+	    }
+	  else if (tok->type == CPP_EOF || tok->type == CPP_SEMICOLON)
+	    return NULL_TREE;
+	  ++n;
+	}
+    }
+  /* Skip optional requires-clause (P4283).  The constraint need not be
+     parenthesized -- "pre requires Foo<T> (x > 0)" is a legitimate
+     constraint-logical-or-expression -- so skip forward over whatever
+     follows, stepping atomically over bracketed groups, until the token
+     that opens the predicate.  Stop at anything that cannot appear inside
+     a constraint, so a malformed clause falls through to the tentative
+     parse rather than running away.  */
+  if (cp_lexer_nth_token_is_keyword (parser->lexer, n, RID_REQUIRES))
+    {
+      ++n;
+      for (;;)
+	{
+	  cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, n);
+	  if (tok->type == CPP_EOF || tok->type == CPP_SEMICOLON
+	      || tok->type == CPP_CLOSE_PAREN || tok->type == CPP_COMMA)
+	    return NULL_TREE;
+	  if (tok->type == CPP_OPEN_BRACE || tok->type == CPP_OPEN_SQUARE)
+	    {
+	      /* A requires-expression body, or a lambda introducer inside
+		 the constraint.  */
+	      n = cp_skip_balanced_group (parser, n);
+	      if (n == 0)
+		return NULL_TREE;
+	      continue;
+	    }
+	  if (tok->type == CPP_OPEN_PAREN)
+	    {
+	      /* Either a parenthesized piece of the constraint or the
+		 predicate itself.  It is the predicate exactly when
+		 nothing constraint-like follows it.  */
+	      size_t after = cp_skip_balanced_group (parser, n);
+	      if (after == 0)
+		return NULL_TREE;
+	      cp_token *next = cp_lexer_peek_nth_token (parser->lexer, after);
+	      if (next->type == CPP_OPEN_PAREN
+		  || next->type == CPP_NAME
+		  || next->type == CPP_AND_AND
+		  || next->type == CPP_OR_OR
+		  || next->type == CPP_NOT
+		  || next->type == CPP_SCOPE)
+		{
+		  n = after;
+		  continue;
+		}
+	      break;
+	    }
+	  ++n;
+	}
+    }
   if (cp_nth_tokens_can_be_std_attribute_p (parser, n))
     n = cp_parser_skip_std_attribute_spec_seq (parser, n);
   /* Skip optional postcondition capture list: [ ... ] */
@@ -34544,6 +34680,22 @@ cp_parser_function_contract_specifier (cp_parser *parser)
   cp_lexer_consume_token (parser->lexer);
   location_t loc = token->location;
   bool postcondition_p = id_equal (contract_name, "post");
+
+  /* Parse optional assertion-control-specifier: < constant-expression >  */
+  tree label = cp_parser_assertion_control_specifier (parser);
+
+  /* Parse optional requires-clause (P4283).  */
+  tree requires_clause = cp_parser_contract_requires_clause (parser);
+
+  /* If the requires-clause was ill-formed, skip to the end of the contract
+     specifier (consuming the predicate paren group if present) to avoid
+     cascading errors.  */
+  if (requires_clause == error_mark_node)
+    {
+      if (cp_lexer_next_token_is (parser->lexer, CPP_OPEN_PAREN))
+	cp_parser_skip_to_closing_parenthesis (parser, true, false, true);
+      return error_mark_node;
+    }
 
   location_t attrs_loc = cp_lexer_peek_token (parser->lexer)->location;
   tree std_attrs = cp_parser_std_attribute_spec_seq (parser);
