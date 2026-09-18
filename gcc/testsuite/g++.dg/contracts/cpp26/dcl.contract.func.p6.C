@@ -1,8 +1,7 @@
 // N5008:
 // dcl.contract.func/p6
-// A virtual function (11.7.3),
-// TODO : a deleted function (9.6.3), or a function defaulted on its first declaration (9.6.2)
-// shall not have a function-contract-specifier-seq.
+// A virtual function shall not have a function-contract-specifier-seq
+// (unless -fcontracts-p3097 is enabled).
 // { dg-do compile { target c++23 } }
 // { dg-additional-options "-fcontracts" }
 
@@ -17,5 +16,3 @@ struct Child : Base
   int f2() pre(true); // { dg-error "contracts cannot be added to virtual functions" }
 
 };
-
-
