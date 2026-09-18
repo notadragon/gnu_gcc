@@ -2482,6 +2482,15 @@ ftms = {
 };
 
 ftms = {
+  name = contracts_labels;
+  values = {
+    v = 202606;
+    cxxmin = 26;
+    extra_cond = "defined(__cpp_contracts_labels)";
+  };
+};
+
+ftms = {
   name = replaceable_contract_violation_handler;
   values = {
     v = 202603;

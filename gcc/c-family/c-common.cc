@@ -523,6 +523,7 @@ const struct c_common_resword c_common_reswords[] =
   { "const_cast",	RID_CONSTCAST,	D_CXXONLY | D_CXXWARN },
   { "continue",		RID_CONTINUE,	0 },
   { "contract_assert",	RID_CONTASSERT,	D_CXXONLY | D_CXXWARN | D_CXX26 },
+  { "contract_control",	RID_CONTRACT_CONTROL, D_CXXONLY | D_CXX_CONTRACTS_P3400 },
   { "decltype",         RID_DECLTYPE,   D_CXXONLY | D_CXX11 | D_CXXWARN },
   { "default",		RID_DEFAULT,	0 },
   { "delete",		RID_DELETE,	D_CXXONLY | D_CXXWARN },

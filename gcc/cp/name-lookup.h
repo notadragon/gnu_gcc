@@ -23,6 +23,10 @@ along with GCC; see the file COPYING3.  If not see
 
 #include "c-family/c-common.h"
 
+/* True when parsing an assertion-control expression or contract_control(expr).
+   When set, name lookup also consults contract_control_usings.  */
+extern bool in_assertion_control_expression_p;
+
 
 /* The datatype used to implement C++ scope.  */
 struct cp_binding_level;
@@ -297,6 +301,10 @@ struct GTY(()) cp_binding_level {
   /* Using directives.  */
   vec<tree, va_gc> *using_directives;
 
+  /* Contract-control using directives (P3400).  Names from these namespaces
+     are visible only within assertion-control expressions.  */
+  vec<tree, va_gc> *contract_control_usings;
+
   /* For the binding level corresponding to a class, the entities
       declared in the class or its base classes.  */
   vec<cp_class_binding, va_gc> *class_shadowed;
@@ -507,6 +515,7 @@ extern void cp_emit_debug_info_for_using (tree, tree);
 
 extern void finish_nonmember_using_decl (tree scope, tree name);
 extern void finish_using_directive (tree target, tree attribs);
+extern void finish_contract_control_using_directive (tree target);
 void push_local_extern_decl_alias (tree decl);
 extern tree pushdecl (tree, bool hiding = false);
 extern tree pushdecl_outermost_localscope (tree);
@@ -540,6 +549,7 @@ extern bool set_module_binding (tree ctx, tree name, unsigned mod,
 				tree internal);
 extern void add_module_namespace_decl (tree ns, tree decl);
 extern void add_imported_using_namespace (tree, tree);
+extern void add_imported_contract_control_using_namespace (tree, tree);
 
 enum WMB_Flags
 {

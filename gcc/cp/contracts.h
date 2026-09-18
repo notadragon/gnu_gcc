@@ -184,6 +184,8 @@ extern void init_contracts			(void);
 extern tree grok_contract			(tree, tree, tree, cp_expr, location_t);
 extern tree build_contract_specifiers		(vec<tree, va_gc> *);
 extern tree contract_specifiers_concat		(tree, tree);
+extern void resolve_contract_label		(tree, tree, location_t);
+extern void reresolve_contract_label_facets (tree, tree, location_t);
 extern tree finish_contract_condition		(cp_expr);
 extern void update_late_contract		(tree, tree, cp_expr);
 extern void check_redecl_contract		(tree, tree);

@@ -2737,6 +2737,8 @@ static bool cp_parser_using_declaration
   (cp_parser *, bool);
 static void cp_parser_using_directive
   (cp_parser *);
+static void cp_parser_contract_control_using_directive
+  (cp_parser *);
 static void cp_parser_using_enum
   (cp_parser *);
 static tree cp_parser_alias_declaration
@@ -8565,6 +8567,22 @@ cp_parser_postfix_expression (cp_parser *parser, bool address_p, bool cast_p,
 	  }
       }
       break;
+
+    case RID_CONTRACT_CONTROL:
+      {
+	cp_lexer_consume_token (parser->lexer);
+	matching_parens parens;
+	parens.require_open (parser);
+
+	auto aco_override
+	  = make_temp_override (in_assertion_control_expression_p, true);
+
+	postfix_expression
+	  = cp_parser_constant_expression (parser, NIC_NONE, NULL);
+
+	parens.require_close (parser);
+	break;
+      }
 
     case RID_TYPEID:
       {
@@ -18019,6 +18037,8 @@ cp_parser_block_declaration (cp_parser *parser,
       token2 = cp_lexer_peek_nth_token (parser->lexer, 2);
       if (token2->keyword == RID_NAMESPACE)
 	cp_parser_using_directive (parser);
+      else if (token2->keyword == RID_CONTRACT_CONTROL)
+	cp_parser_contract_control_using_directive (parser);
       else if (token2->keyword == RID_ENUM)
 	cp_parser_using_enum (parser);
       /* If the second token after 'using' is '=', then we have an
@@ -25183,6 +25203,42 @@ cp_parser_using_directive (cp_parser* parser)
   cp_parser_require (parser, CPP_SEMICOLON, RT_SEMICOLON);
 }
 
+/* Parse a contract-control using directive:
+     using contract_control namespace_opt nested-name-specifier_opt
+       namespace-name ;
+   Names from the specified namespace become visible only within
+   assertion-control expressions in the enclosing scope.  */
+
+static void
+cp_parser_contract_control_using_directive (cp_parser* parser)
+{
+  /* Consume `using'.  */
+  cp_parser_require_keyword (parser, RID_USING, RT_USING);
+  /* Consume `contract_control'.  */
+  cp_lexer_consume_token (parser->lexer);
+  /* Optionally consume `namespace'.  */
+  if (cp_lexer_next_token_is_keyword (parser->lexer, RID_NAMESPACE))
+    cp_lexer_consume_token (parser->lexer);
+
+  tree namespace_decl;
+  /* Look for the optional `::' operator.  */
+  cp_parser_global_scope_opt (parser, /*current_scope_valid_p=*/false);
+  /* And the optional nested-name-specifier.  */
+  cp_parser_nested_name_specifier_opt (parser,
+				       /*typename_keyword_p=*/false,
+				       /*check_dependency_p=*/true,
+				       /*type_p=*/false,
+				       /*is_declaration=*/true);
+  /* Get the namespace being used.  */
+  namespace_decl = cp_parser_namespace_name (parser);
+
+  if (namespace_decl && namespace_decl != error_mark_node)
+    finish_contract_control_using_directive (namespace_decl);
+
+  /* Look for the final `;'.  */
+  cp_parser_require (parser, CPP_SEMICOLON, RT_SEMICOLON);
+}
+
 /* Parse a string literal or constant expression yielding a string.
    The constant expression uses extra parens to avoid ambiguity with "x" (expr).
 
@@ -27976,19 +28032,29 @@ cp_parser_type_id_1 (cp_parser *parser, cp_parser_flags flags,
   if (type_specifier_seq.type == error_mark_node)
     return error_mark_node;
 
-  /* There might or might not be an abstract declarator.  */
-  cp_parser_parse_tentatively (parser);
-  /* Look for the declarator.  */
-  abstract_declarator
-    = cp_parser_declarator (parser, CP_PARSER_DECLARATOR_ABSTRACT,
-			    CP_PARSER_FLAGS_NONE, NULL,
-			    /*parenthesized_p=*/NULL,
-			    /*member_p=*/false,
-			    /*friend_p=*/false,
-			    /*static_p=*/false);
-  /* Check to see if there really was a declarator.  */
-  if (!cp_parser_parse_definitely (parser))
+  /* There might or might not be an abstract declarator.  In a trailing return
+     type, a function contract specifier (pre/post, P3400) can follow the type;
+     a labelled contract such as post<label>(...) otherwise looks like a
+     template-id and is consumed here as an abstract-declarator, dropping the
+     contract.  So do not attempt an abstract-declarator when a contract
+     introducer follows.  */
+  if (is_trailing_return && cp_maybe_function_contract_specifier (parser))
     abstract_declarator = nullptr;
+  else
+    {
+      cp_parser_parse_tentatively (parser);
+      /* Look for the declarator.  */
+      abstract_declarator
+	= cp_parser_declarator (parser, CP_PARSER_DECLARATOR_ABSTRACT,
+				CP_PARSER_FLAGS_NONE, NULL,
+				/*parenthesized_p=*/NULL,
+				/*member_p=*/false,
+				/*friend_p=*/false,
+				/*static_p=*/false);
+      /* Check to see if there really was a declarator.  */
+      if (!cp_parser_parse_definitely (parser))
+	abstract_declarator = nullptr;
+    }
 
   /* If we found * or & and similar after the type-specifier, it's not
      a type alias.  */
@@ -34105,6 +34171,77 @@ cp_parser_contract_message (cp_parser *parser)
    Returns the parsed expression tree or NULL_TREE if no label present.
    The < must be the next token; > is handled eagerly (as for template args).
    Requires -fcontracts-p3400; without it, diagnoses and returns NULL_TREE.  */
+
+static tree
+cp_parser_assertion_control_specifier (cp_parser *parser)
+{
+  if (!cp_lexer_next_token_is (parser->lexer, CPP_LESS))
+    return NULL_TREE;
+
+  if (!flag_contracts_p3400)
+    {
+      error_at (cp_lexer_peek_token (parser->lexer)->location,
+		"assertion-control labels require %<-fcontracts-p3400%>");
+      /* Skip over the <...> to recover.  */
+      unsigned depth = 1;
+      cp_lexer_consume_token (parser->lexer);
+      while (depth > 0)
+	{
+	  cp_token *tok = cp_lexer_peek_token (parser->lexer);
+	  if (tok->type == CPP_GREATER)
+	    --depth;
+	  else if (tok->type == CPP_LESS)
+	    ++depth;
+	  else if (tok->type == CPP_RSHIFT)
+	    depth = depth >= 2 ? depth - 2 : 0;
+	  else if (tok->type == CPP_EOF)
+	    break;
+	  cp_lexer_consume_token (parser->lexer);
+	}
+      return NULL_TREE;
+    }
+
+  /* Consume the <.  */
+  cp_lexer_consume_token (parser->lexer);
+
+  /* Treat > eagerly, as in template argument lists.  */
+  bool saved_greater_than_is_operator_p
+    = parser->greater_than_is_operator_p;
+  parser->greater_than_is_operator_p = false;
+
+  /* Enable contract-control name lookup so that names from
+     using contract_control namespace directives are visible.  */
+  auto aco_override
+    = make_temp_override (in_assertion_control_expression_p, true);
+
+  /* Parse the constant-expression.  */
+  cp_expr label_expr
+    = cp_parser_constant_expression (parser, NIC_NONE, NULL);
+
+  parser->greater_than_is_operator_p = saved_greater_than_is_operator_p;
+
+  /* Handle >>, which is two > tokens in this context.  */
+  if (cp_lexer_next_token_is (parser->lexer, CPP_RSHIFT))
+    {
+      cp_token *token = cp_lexer_peek_token (parser->lexer);
+      token->type = CPP_GREATER;
+    }
+  else if (!cp_parser_require (parser, CPP_GREATER, RT_GREATER))
+    return error_mark_node;
+  else
+    { /* '>' consumed by require.  */ }
+
+  if (label_expr == error_mark_node)
+    return error_mark_node;
+
+  return label_expr;
+}
+
+/* Parse an optional requires-clause on a contract assertion (P4283).
+
+   If the next token is `requires', parse the constraint expression and
+   return it.  Otherwise return NULL_TREE.  Diagnoses errors if the flag
+   is not enabled or the function is not templated.  */
 
 static cp_expr
 cp_parser_contract_result_name (cp_parser *parser, bool postcondition_p,
