@@ -3008,6 +3008,12 @@ static tree cp_parser_yield_expression
 
 /* Contracts */
 
+static tree cp_parser_diagnostic_message
+  (cp_parser *parser, bool *non_string_p = nullptr);
+static tree cp_parser_contract_message
+  (cp_parser *parser);
+static cp_expr cp_parser_contract_result_name
+  (cp_parser *parser, bool postcondition_p, tree *attrs = NULL);
 static tree cp_parser_contract_assert
   (cp_parser *parser, cp_token *token);
 
@@ -19396,36 +19402,14 @@ cp_parser_static_assert (cp_parser *parser, bool member_p)
       /* Parse the separating `,'.  */
       cp_parser_require (parser, CPP_COMMA, RT_COMMA);
 
-      /* Parse the message expression.  */
-      bool string_lit = true;
-      for (unsigned int i = 1; ; ++i)
-	{
-	  cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, i);
-	  if (cp_parser_is_pure_string_literal (tok))
-	    continue;
-	  else if (tok->type == CPP_CLOSE_PAREN)
-	    break;
-	  string_lit = false;
-	  break;
-	}
-      if (!string_lit)
-	{
-	  location_t loc = cp_lexer_peek_token (parser->lexer)->location;
-	  if (cxx_dialect < cxx26)
-	    pedwarn (loc, OPT_Wc__26_extensions,
-		     "%<static_assert%> with non-string message only "
-		     "available with %<-std=c++2c%> or %<-std=gnu++2c%>");
-
-	  message = cp_parser_conditional_expression (parser);
-	  if (TREE_CODE (message) == STRING_CST)
-	    message = build1_loc (loc, PAREN_EXPR, TREE_TYPE (message),
-				  message);
-	}
-      else if (cxx_dialect >= cxx26)
-	message = cp_parser_unevaluated_string_literal (parser);
-      else
-	message = cp_parser_string_literal (parser, /*translate=*/false,
-					    /*wide_ok=*/true);
+      /* Parse the diagnostic-message.  */
+      bool non_string = false;
+      location_t msg_loc = cp_lexer_peek_token (parser->lexer)->location;
+      message = cp_parser_diagnostic_message (parser, &non_string);
+      if (non_string && cxx_dialect < cxx26)
+	pedwarn (msg_loc, OPT_Wc__26_extensions,
+		 "%<static_assert%> with non-string message only "
+		 "available with %<-std=c++2c%> or %<-std=gnu++2c%>");
 
       /* A `)' completes the static assertion.  */
       if (!parens.require_close (parser))
@@ -33938,6 +33922,57 @@ cp_parser_late_contracts (cp_parser *parser, tree fndecl)
 
   update_fn_contract_specifiers (fndecl, contracts);
 }
+
+/* Parse a diagnostic-message: either an unevaluated-string or a
+   constant-expression with .size() and .data() members.
+   Used by both static_assert and contract assertions (P3099).
+
+   The caller has already consumed the comma before the message.
+   The closing paren is NOT consumed.
+
+   If NON_STRING_P is non-null, *NON_STRING_P is set to true when the
+   message was parsed as a non-string-literal expression (the caller may
+   want to issue a pedwarn for pre-C++26 modes).  */
+
+static tree
+cp_parser_diagnostic_message (cp_parser *parser, bool *non_string_p)
+{
+  if (non_string_p)
+    *non_string_p = false;
+
+  /* Look ahead to determine if the message is a pure string literal.  */
+  bool string_lit = true;
+  for (unsigned int i = 1; ; ++i)
+    {
+      cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, i);
+      if (cp_parser_is_pure_string_literal (tok))
+	continue;
+      else if (tok->type == CPP_CLOSE_PAREN)
+	break;
+      string_lit = false;
+      break;
+    }
+
+  if (!string_lit)
+    {
+      if (non_string_p)
+	*non_string_p = true;
+      location_t loc = cp_lexer_peek_token (parser->lexer)->location;
+      tree message = cp_parser_conditional_expression (parser);
+      if (TREE_CODE (message) == STRING_CST)
+	message = build1_loc (loc, PAREN_EXPR, TREE_TYPE (message), message);
+      return message;
+    }
+  else if (cxx_dialect >= cxx26)
+    return cp_parser_unevaluated_string_literal (parser);
+  else
+    return cp_parser_string_literal (parser, /*translate=*/false,
+				     /*wide_ok=*/true);
+}
+
+/* Parse an optional diagnostic-message for a contract assertion (P3099).
+   Returns the parsed message tree, or NULL_TREE if no comma follows or
+   -fcontracts-p3099 is not active.  */
 
 static cp_expr
 cp_parser_contract_result_name (cp_parser *parser, bool postcondition_p,
