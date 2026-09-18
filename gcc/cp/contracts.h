@@ -293,6 +293,13 @@ extern tree build_implicit_divide_overflow_check
    conversion CONVERTED (of the single-evaluation floating value EXPR) whose
    truncated value may not be representable in the destination integer type, for
    semantic SEM ({conv.fpint}).  */
+extern tree build_implicit_float_cast_check
+  (tree, location_t, contract_evaluation_semantic, tree, tree);
+/* P3100: build the guarded replacement for an integer/enumeration ->
+   enumeration conversion CONVERTED (of the single-evaluation source value EXPR)
+   whose value may be outside the target enumeration ENUMTYPE's value range, for
+   a non-fixed-underlying-type enum, for semantic SEM
+   ({expr.static.cast.enum.outside.range}).  */
 extern void maybe_instantiate_contracts (tree);
 
 /* Will this contract be ignored.  */

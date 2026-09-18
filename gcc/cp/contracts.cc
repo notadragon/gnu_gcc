@@ -8799,6 +8799,32 @@ build_implicit_shift_check (tree fndecl, location_t loc,
    the assume semantic (no guard, raw subscript).  Called from the c-family
    array-ref walk so the C++ reaction can be built without linking to cc1.  */
 
+tree
+build_implicit_float_cast_check (tree fndecl, location_t loc,
+				 contract_evaluation_semantic sem,
+				 tree expr, tree converted)
+{
+  gcc_checking_assert (sem != CES_ASSUME);
+  (void) fndecl;
+
+  tree cond = ubsan_float_cast_overflow_predicate (TREE_TYPE (converted), expr);
+  if (cond == NULL_TREE)
+    return converted;
+  return build_implicit_op_guard (loc, sem, expr, cond, converted,
+				  "floating-point to integer conversion "
+				  "out of range");
+}
+
+/* P3100: guard an integer/enumeration -> enumeration conversion CONVERTED (of
+   the source value EXPR) whose value may be outside ENUMTYPE's value range --
+   core-language UB for a non-fixed-underlying-type enum
+   ({expr.static.cast.enum.outside.range}: [expr.static.cast]/8).  EXPR must be
+   a single-evaluation form (SAVE_EXPR) shared with CONVERTED.  Returns
+   `expr, (out_of_range ? <reaction / 0> : converted)`; the substituted value 0
+   is always within an enumeration's value range.  When ENUMTYPE's value range
+   spans its whole storage mode there are no invalid values, so CONVERTED is
+   returned unchanged (mirrors instrument_bool_enum_load's precision guard).  */
+
 static const char *
 contract_dynamic_name (const_tree contract)
 {
