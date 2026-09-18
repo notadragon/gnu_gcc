@@ -45,7 +45,7 @@ foo ()
 
   bool y = true;
   auto f7 = [=]
-    pre([=]{ return y; }()) {}; // TODO : 
+    pre([=]{ return y; }()) {};  // OK, the inner lambda captures nothing.
 
   int x = 4;
   auto f8 = [&] 
