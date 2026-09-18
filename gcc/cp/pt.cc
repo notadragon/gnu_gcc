@@ -19914,9 +19914,9 @@ tsubst_stmt (tree t, tree args, tsubst_flags_t complain, tree in_decl)
     case ASSERTION_STMT:
       {
 	r = tsubst_contract (NULL_TREE, t, args, complain, in_decl);
-	if (r != error_mark_node)
+	if (r && r != error_mark_node)
 	  add_stmt (r);
-	RETURN (r);
+	RETURN (r ? r : void_node);
       }
       break;
 
