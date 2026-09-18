@@ -278,11 +278,21 @@ extern contract_evaluation_semantic resolve_implicit_contract_semantic
 /* P3100: build the GENERIC reaction to append at a value-returning function's
    fall-off point for the resolved semantic SEM (NULL_TREE for assume /
    none).  */
+extern tree build_implicit_divide_check
+  (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
+/* P3100: build the guarded replacement for an integer shift SHIFT_RESULT (OP0
+   shifted by OP1) whose shift amount may be out of range, for semantic SEM.  */
 extern tree build_implicit_shift_check
   (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
 /* P3100: build the guarded replacement for a signed division/remainder
    DIV_RESULT whose quotient (OP0 / OP1) is not representable (OP0 == MIN,
    OP1 == -1), for semantic SEM.  */
+extern tree build_implicit_divide_overflow_check
+  (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
+/* P3100: build the guarded replacement for a floating-point-to-integer
+   conversion CONVERTED (of the single-evaluation floating value EXPR) whose
+   truncated value may not be representable in the destination integer type, for
+   semantic SEM ({conv.fpint}).  */
 extern void maybe_instantiate_contracts (tree);
 
 /* Will this contract be ignored.  */
