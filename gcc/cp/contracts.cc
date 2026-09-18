@@ -7354,6 +7354,669 @@ declare_cxa_entry_point (contract_assertion_kind kind,
    through the emitter.
    ------------------------------------------------------------------------ */
 
+namespace {
+
+/* An abstract value tracked while walking a handler body.  */
+
+enum aval_kind
+{
+  AV_UNKNOWN,		/* Nothing known.  */
+  AV_CONST,		/* A known integer, enumeration or boolean value.  */
+  AV_CURRENT_EXCEPTION	/* The result of std::current_exception ().  */
+};
+
+struct aval
+{
+  aval_kind kind;
+  HOST_WIDE_INT val;
+};
+
+static inline aval
+av_unknown ()
+{
+  aval a = { AV_UNKNOWN, 0 };
+  return a;
+}
+
+static inline aval
+av_const (HOST_WIDE_INT v)
+{
+  aval a = { AV_CONST, v };
+  return a;
+}
+
+static inline aval
+av_current_exception ()
+{
+  aval a = { AV_CURRENT_EXCEPTION, 0 };
+  return a;
+}
+
+/* How control left a statement, under the analysis assumption.
+
+   RO_RETURNED is distinct from RO_FAIL because the two mean different things
+   depending on whose frame we are in.  For the handler itself, returning is a
+   failure: it did not rethrow.  For a function the handler called, returning
+   is a success of sorts -- the call completed without doing anything
+   observable, so the walk of the caller carries on past it.  */
+
+enum rethrow_outcome
+{
+  RO_FALLTHROUGH,	/* Control continues with the next statement.  */
+  RO_RETHROWN,		/* Control left by rethrowing the in-flight exception.  */
+  RO_RETURNED,		/* Control returned normally, having done nothing
+			   observable.  */
+  RO_FAIL		/* Could not be analysed, or something observable
+			   happened.  */
+};
+
+/* How deep the walk will follow calls before giving up.  A handler that
+   delegates more than this far is not a shape worth proving, and the limit
+   doubles as the termination guard for mutual recursion.  */
+
+static const int RETHROW_MAX_DEPTH = 8;
+
+/* Strip the conversions and address/indirection operators that stand between
+   a use of a declaration and the declaration itself.  */
+
+static tree
+strip_to_decl (tree t)
+{
+  while (t
+	 && (CONVERT_EXPR_P (t)
+	     || TREE_CODE (t) == NON_LVALUE_EXPR
+	     || TREE_CODE (t) == ADDR_EXPR
+	     || TREE_CODE (t) == INDIRECT_REF))
+    t = TREE_OPERAND (t, 0);
+  return t;
+}
+
+/* True if CALL (a CALL_EXPR or AGGR_INIT_EXPR) calls a namespace-scope
+   function in namespace std named NAME.  */
+
+static bool
+calls_std_fn_p (tree call, const char *name)
+{
+  tree fn = cp_get_callee_fndecl_nofold (call);
+  if (!fn || TREE_CODE (fn) != FUNCTION_DECL || !DECL_NAME (fn))
+    return false;
+  if (!id_equal (DECL_NAME (fn), name))
+    return false;
+  return decl_in_std_namespace_p (fn);
+}
+
+/* One analysis of one handler body, under one (semantic, kind) pair.  The
+   walk assumes the violation was detected as CDM_EVAL_EXCEPTION.  */
+
+class rethrow_analysis
+{
+public:
+  rethrow_analysis (tree violation_parm, tree violation_type,
+		    contract_evaluation_semantic semantic,
+		    contract_assertion_kind kind,
+		    int depth = 0)
+    : m_violation_parm (violation_parm), m_violation_type (violation_type),
+      m_semantic (semantic), m_kind (kind), m_depth (depth),
+      m_returned (av_unknown ())
+  {}
+
+  rethrow_outcome walk_stmt (tree t);
+
+  /* Valid after walk_stmt returned RO_RETURNED: what the function returned,
+     as far as the abstract domain could tell.  */
+  aval returned_value () const { return m_returned; }
+
+private:
+  aval eval (tree t);
+  bool accessor_value (tree call, aval *out);
+  rethrow_outcome call_outcome (tree call, aval *value_out);
+
+  /* Evaluate T for its value, insisting that getting there costs nothing
+     observable.  False means the expression is not something the domain can
+     account for, and the statement containing it must not be walked past.  */
+  bool eval_pure (tree t, aval *out)
+  {
+    m_impure = false;
+    m_rethrew = false;
+    *out = eval (t);
+    return !m_impure;
+  }
+
+  /* Evaluate T where a value is wanted and control is expected to carry on.
+     RO_FALLTHROUGH means *OUT holds it; RO_RETHROWN means evaluating T never
+     produced a value at all, because something it called rethrew.  */
+  rethrow_outcome eval_value (tree t, aval *out)
+  {
+    if (eval_pure (t, out))
+      return RO_FALLTHROUGH;
+    return m_rethrew ? RO_RETHROWN : RO_FAIL;
+  }
+
+  tree m_violation_parm;
+  tree m_violation_type;
+  contract_evaluation_semantic m_semantic;
+  contract_assertion_kind m_kind;
+  int m_depth;
+  aval m_returned;
+
+  /* Set by eval when it meets something it cannot account for.  AV_UNKNOWN
+     alone does not mean "unmodelled" -- reading an untracked local yields an
+     unknown value from a perfectly pure expression -- so a caller that is
+     willing to carry on with an unknown value still has to know whether
+     getting there cost anything observable.  */
+  bool m_impure = false;
+
+  /* Set alongside m_impure when the reason no value came back is that a call
+     inside the expression always rethrows.  */
+  bool m_rethrew = false;
+
+  /* Local scalar VAR_DECL -> abstract value.  */
+  hash_map<tree, aval> m_env;
+};
+
+/* If CALL invokes one of the contract_violation accessors whose result is
+   known at the point the check is emitted, store that value in *OUT and
+   return true.  The call must be on the handler's own violation parameter:
+   a different contract_violation object tells us nothing.  */
+
+bool
+rethrow_analysis::accessor_value (tree call, aval *out)
+{
+  tree fn = cp_get_callee_fndecl_nofold (call);
+  if (!fn || TREE_CODE (fn) != FUNCTION_DECL || !DECL_NAME (fn))
+    return false;
+
+  tree ctx = DECL_CONTEXT (fn);
+  if (!ctx || !TYPE_P (ctx) || TYPE_MAIN_VARIANT (ctx) != m_violation_type)
+    return false;
+
+  if (TREE_CODE (call) != CALL_EXPR || call_expr_nargs (call) < 1)
+    return false;
+  if (strip_to_decl (CALL_EXPR_ARG (call, 0)) != m_violation_parm)
+    return false;
+
+  tree name = DECL_NAME (fn);
+  if (id_equal (name, "detection_mode"))
+    *out = av_const (CDM_EVAL_EXCEPTION);
+  else if (id_equal (name, "semantic"))
+    *out = av_const (m_semantic);
+  else if (id_equal (name, "kind"))
+    *out = av_const (m_kind);
+  else if (id_equal (name, "is_terminating"))
+    /* Of the two semantics this analysis runs for, only enforce
+       terminates.  */
+    *out = av_const (m_semantic == CES_ENFORCE);
+  else
+    return false;
+
+  return true;
+}
+
+/* Walk into CALL's callee and report how control leaves the call.
+
+   RO_RETHROWN means the callee always rethrows the in-flight exception, so
+   the call is as good as a `throw;' written here.  RO_RETURNED means it
+   always returns having done nothing observable, so the caller's walk carries
+   on; *VALUE_OUT then holds the returned value where that could be folded.
+   RO_FAIL means neither could be shown.
+
+   The recursion is the same predicate applied one frame down, so "did nothing
+   else observable first" is enforced at every level for free: a callee that
+   logs before rethrowing fails inside the nested walk exactly as it would at
+   the top.  */
+
+rethrow_outcome
+rethrow_analysis::call_outcome (tree call, aval *value_out)
+{
+  *value_out = av_unknown ();
+
+  if (m_depth >= RETHROW_MAX_DEPTH)
+    return RO_FAIL;
+
+  tree fn = cp_get_callee_fndecl_nofold (call);
+  if (!fn || TREE_CODE (fn) != FUNCTION_DECL)
+    return RO_FAIL;
+
+  tree body = DECL_SAVED_TREE (fn);
+  if (!body)
+    {
+      /* A template specialization's definition is only *queued* by the
+	 trampoline's use of it, so at this point there is nothing to read.
+	 __combined_label::handle_contract_violation is exactly that case, and
+	 it is the delegation that matters most, so ask for the definition
+	 now.  maybe_instantiate_decl is the guarded entry point -- it raises
+	 function_depth first, because instantiating collects and the caller's
+	 live trees are only reachable from the stack.  It is a no-op for
+	 anything that is not a specialization.  */
+      maybe_instantiate_decl (fn);
+      body = DECL_SAVED_TREE (fn);
+      if (!body)
+	return RO_FAIL;
+    }
+
+  /* Find the callee parameter, if any, that received our violation object, so
+     the accessors keep folding across the delegation.  When none does -- the
+     `void helper () { throw; }' shape -- the nested walk simply runs without a
+     violation parameter, which is all such a helper needs.  */
+  tree nested_parm = NULL_TREE;
+  if (m_violation_parm && TREE_CODE (call) == CALL_EXPR)
+    {
+      tree parm = DECL_ARGUMENTS (fn);
+      int nargs = call_expr_nargs (call);
+      for (int i = 0; parm && i < nargs; parm = DECL_CHAIN (parm), ++i)
+	if (strip_to_decl (CALL_EXPR_ARG (call, i)) == m_violation_parm)
+	  {
+	    nested_parm = parm;
+	    break;
+	  }
+    }
+
+  rethrow_analysis nested (nested_parm, m_violation_type, m_semantic, m_kind,
+			   m_depth + 1);
+  rethrow_outcome o = nested.walk_stmt (body);
+
+  switch (o)
+    {
+    case RO_RETHROWN:
+      /* A rethrow out of a noexcept callee terminates rather than
+	 propagating, which is not what eliding the catch would do.  */
+      if (TYPE_NOTHROW_P (TREE_TYPE (fn)))
+	return RO_FAIL;
+      return RO_RETHROWN;
+
+    case RO_RETURNED:
+      *value_out = nested.returned_value ();
+      return RO_RETURNED;
+
+    case RO_FALLTHROUGH:
+      /* Ran off the end of a void body: it returned, with no value.  */
+      return RO_RETURNED;
+
+    default:
+      return RO_FAIL;
+    }
+}
+
+/* Evaluate T as far as the abstract domain allows.  */
+
+aval
+rethrow_analysis::eval (tree t)
+{
+  if (!t || t == error_mark_node)
+    return av_unknown ();
+
+  switch (TREE_CODE (t))
+    {
+    case INTEGER_CST:
+      if (tree_fits_shwi_p (t))
+	return av_const (tree_to_shwi (t));
+      return av_unknown ();
+
+    case VAR_DECL:
+    case PARM_DECL:
+      if (aval *v = m_env.get (t))
+	return *v;
+      return av_unknown ();
+
+    CASE_CONVERT:
+    case NON_LVALUE_EXPR:
+      /* An integral conversion preserves a tracked value.  Conversions of
+	 anything else are transparent only to the extent that what they
+	 wrap still evaluates -- the exception_ptr temporary below reaches
+	 here.  */
+      return eval (TREE_OPERAND (t, 0));
+
+    case CLEANUP_POINT_EXPR:
+    case EXPR_STMT:
+      return eval (TREE_OPERAND (t, 0));
+
+    case ADDR_EXPR:
+      return eval (TREE_OPERAND (t, 0));
+
+    case TARGET_EXPR:
+      return eval (TARGET_EXPR_INITIAL (t));
+
+    case AGGR_INIT_EXPR:
+    case CALL_EXPR:
+      {
+	aval a;
+	if (TREE_CODE (t) == CALL_EXPR && accessor_value (t, &a))
+	  return a;
+	if (calls_std_fn_p (t, "current_exception"))
+	  return av_current_exception ();
+
+	/* Otherwise follow the callee.  It may return something knowable
+	   having done nothing observable, in which case the value stands in
+	   for the call; or it may always rethrow, in which case the
+	   expression yields no value and the statement containing it has to
+	   be told.  */
+	aval v;
+	switch (call_outcome (t, &v))
+	  {
+	  case RO_RETURNED:
+	    return v;
+	  case RO_RETHROWN:
+	    m_rethrew = true;
+	    m_impure = true;
+	    return av_unknown ();
+	  default:
+	    m_impure = true;
+	    return av_unknown ();
+	  }
+      }
+
+    case EQ_EXPR:
+    case NE_EXPR:
+    case LT_EXPR:
+    case LE_EXPR:
+    case GT_EXPR:
+    case GE_EXPR:
+      {
+	aval l = eval (TREE_OPERAND (t, 0));
+	aval r = eval (TREE_OPERAND (t, 1));
+	if (l.kind != AV_CONST || r.kind != AV_CONST)
+	  return av_unknown ();
+	bool res;
+	switch (TREE_CODE (t))
+	  {
+	  case EQ_EXPR: res = (l.val == r.val); break;
+	  case NE_EXPR: res = (l.val != r.val); break;
+	  case LT_EXPR: res = (l.val < r.val); break;
+	  case LE_EXPR: res = (l.val <= r.val); break;
+	  case GT_EXPR: res = (l.val > r.val); break;
+	  default:	res = (l.val >= r.val); break;
+	  }
+	return av_const (res);
+      }
+
+    case TRUTH_NOT_EXPR:
+      {
+	aval a = eval (TREE_OPERAND (t, 0));
+	if (a.kind != AV_CONST)
+	  return av_unknown ();
+	return av_const (!a.val);
+      }
+
+    case TRUTH_AND_EXPR:
+    case TRUTH_ANDIF_EXPR:
+      {
+	aval l = eval (TREE_OPERAND (t, 0));
+	if (l.kind == AV_CONST && !l.val)
+	  return av_const (0);
+	aval r = eval (TREE_OPERAND (t, 1));
+	if (l.kind != AV_CONST || r.kind != AV_CONST)
+	  return av_unknown ();
+	return av_const (l.val && r.val);
+      }
+
+    case TRUTH_OR_EXPR:
+    case TRUTH_ORIF_EXPR:
+      {
+	aval l = eval (TREE_OPERAND (t, 0));
+	if (l.kind == AV_CONST && l.val)
+	  return av_const (1);
+	aval r = eval (TREE_OPERAND (t, 1));
+	if (l.kind != AV_CONST || r.kind != AV_CONST)
+	  return av_unknown ();
+	return av_const (l.val || r.val);
+      }
+
+    default:
+      m_impure = true;
+      return av_unknown ();
+    }
+}
+
+/* Walk statement T under the assumption that the violation was detected as
+   CDM_EVAL_EXCEPTION, reporting how control leaves it.  */
+
+rethrow_outcome
+rethrow_analysis::walk_stmt (tree t)
+{
+  if (!t)
+    return RO_FALLTHROUGH;
+  if (t == error_mark_node)
+    return RO_FAIL;
+
+  switch (TREE_CODE (t))
+    {
+    case STATEMENT_LIST:
+      for (tree_stmt_iterator i = tsi_start (t); !tsi_end_p (i); tsi_next (&i))
+	{
+	  rethrow_outcome o = walk_stmt (tsi_stmt (i));
+	  if (o != RO_FALLTHROUGH)
+	    return o;
+	}
+      return RO_FALLTHROUGH;
+
+    case BIND_EXPR:
+      return walk_stmt (BIND_EXPR_BODY (t));
+
+    case CLEANUP_POINT_EXPR:
+    case EXPR_STMT:
+      return walk_stmt (TREE_OPERAND (t, 0));
+
+    case MUST_NOT_THROW_EXPR:
+      /* A region an exception may not leave -- a noexcept function's body,
+	 among others.  A rethrow inside it terminates rather than
+	 propagating, so it must not count as reaching the caller; but code
+	 that merely runs and returns is unremarkable and the walk carries
+	 on.  Bailing outright instead would lose the optimization for a
+	 handler that calls any nothrow function, however trivial, before
+	 rethrowing.  */
+      {
+	rethrow_outcome o = walk_stmt (TREE_OPERAND (t, 0));
+	return o == RO_RETHROWN ? RO_FAIL : o;
+      }
+
+    case DEBUG_BEGIN_STMT:
+      /* A statement-frontier marker, emitted throughout every statement list
+	 under -g.  It carries no code.  Falling into the default below
+	 instead silently switched the whole analysis off in any debug build
+	 -- which is most real builds, and every Compiler Explorer session,
+	 since CE always passes -g.  */
+      return RO_FALLTHROUGH;
+
+    CASE_CONVERT:
+    case NON_LVALUE_EXPR:
+      /* A discarded-value conversion.  With no side effects there is nothing
+	 to model -- an empty else-arm arrives here as a void NOP_EXPR of
+	 integer zero.  */
+      if (!TREE_SIDE_EFFECTS (t))
+	return RO_FALLTHROUGH;
+      return walk_stmt (TREE_OPERAND (t, 0));
+
+    case DECL_EXPR:
+      {
+	tree decl = DECL_EXPR_DECL (t);
+	if (!decl)
+	  return RO_FAIL;
+	if (TREE_CODE (decl) == TYPE_DECL || TREE_CODE (decl) == USING_DECL)
+	  return RO_FALLTHROUGH;
+	if (!VAR_P (decl) || TREE_STATIC (decl) || DECL_EXTERNAL (decl))
+	  return RO_FAIL;
+	/* Only scalars: a class-typed local brings a destructor, and with it
+	   cleanup control flow this walk does not model.  */
+	if (!SCALAR_TYPE_P (TREE_TYPE (decl)))
+	  return RO_FAIL;
+
+	/* An initializer that is a call has to be asked whether it returns at
+	   all before it is asked what it produces.  */
+	aval init = av_unknown ();
+	rethrow_outcome o = eval_value (DECL_INITIAL (decl), &init);
+	if (o != RO_FALLTHROUGH)
+	  return o;
+
+	m_env.put (decl, init);
+	return RO_FALLTHROUGH;
+      }
+
+    case MODIFY_EXPR:
+    case INIT_EXPR:
+      {
+	tree lhs = TREE_OPERAND (t, 0);
+	/* Only assignments to locals we are already tracking; a store
+	   anywhere else is an observable effect.  */
+	if (!VAR_P (lhs) || !m_env.get (lhs))
+	  return RO_FAIL;
+
+	/* Same as above: a call on the right may never produce a value at
+	   all.  This is the shape __combined_label delegation takes --
+	   `__r = _M_lhs.handle_contract_violation (__v)'.  */
+	aval rhs = av_unknown ();
+	rethrow_outcome o = eval_value (TREE_OPERAND (t, 1), &rhs);
+	if (o != RO_FALLTHROUGH)
+	  return o;
+
+	m_env.put (lhs, rhs);
+	return RO_FALLTHROUGH;
+      }
+
+    case COND_EXPR:
+      {
+	aval c = av_unknown ();
+	rethrow_outcome o = eval_value (TREE_OPERAND (t, 0), &c);
+	if (o != RO_FALLTHROUGH)
+	  return o;
+	if (c.kind != AV_CONST)
+	  return RO_FAIL;
+	return walk_stmt (TREE_OPERAND (t, c.val ? 1 : 2));
+      }
+
+    case THROW_EXPR:
+      /* `throw;' is a call to __cxa_rethrow.  `throw X;' raises a different
+	 exception, which is not what eliding the catch would do.  */
+      {
+	tree op = TREE_OPERAND (t, 0);
+	tree fn = op ? cp_get_callee_fndecl_nofold (op) : NULL_TREE;
+	if (fn && DECL_NAME (fn) && id_equal (DECL_NAME (fn), "__cxa_rethrow"))
+	  return RO_RETHROWN;
+	return RO_FAIL;
+      }
+
+    case CALL_EXPR:
+      /* std::rethrow_exception (std::current_exception ()) rethrows the
+	 exception that is in flight, so it reaches the same place.  */
+      if (calls_std_fn_p (t, "rethrow_exception")
+	  && call_expr_nargs (t) == 1
+	  && eval (CALL_EXPR_ARG (t, 0)).kind == AV_CURRENT_EXCEPTION)
+	return RO_RETHROWN;
+      /* A discarded call to one of the folded accessors does nothing.  */
+      {
+	aval a;
+	if (accessor_value (t, &a))
+	  return RO_FALLTHROUGH;
+      }
+      /* Otherwise let eval follow the callee: it may itself always rethrow,
+	 or return having done nothing, in which case the walk continues
+	 here with the value discarded.  */
+      {
+	aval discarded = av_unknown ();
+	return eval_value (t, &discarded);
+      }
+
+    case RETURN_EXPR:
+      /* Record what was returned, for a caller that is following this call.
+	 In GENERIC the operand is an assignment to the RESULT_DECL.  */
+      {
+	tree op = TREE_OPERAND (t, 0);
+	tree val = op;
+	if (op
+	    && (TREE_CODE (op) == MODIFY_EXPR || TREE_CODE (op) == INIT_EXPR))
+	  val = TREE_OPERAND (op, 1);
+
+	/* `return helper ();' has to follow the callee like any other call --
+	   it may rethrow, and it certainly may do something.  */
+	aval v = av_unknown ();
+	rethrow_outcome o = eval_value (val, &v);
+	if (o != RO_FALLTHROUGH)
+	  return o;
+
+	m_returned = v;
+	return RO_RETURNED;
+      }
+
+    default:
+      return RO_FAIL;
+    }
+}
+
+} // anon namespace
+
+/* Return true if CONTRACT's label carries a local violation handler that,
+   for a violation detected as CDM_EVAL_EXCEPTION under SEMANTIC and KIND,
+   always exits by rethrowing the in-flight exception without first doing
+   anything else observable.  When it does, the caller may skip wrapping the
+   predicate in a try/catch: the exception reaches the same place either way.
+
+   Conservative -- false whenever this cannot be proven.  */
+
+static bool
+contract_local_handler_always_rethrows_p (tree contract,
+					  contract_evaluation_semantic semantic,
+					  contract_assertion_kind kind)
+{
+  /* Only the two semantics whose handler may legitimately let an exception
+     escape.  */
+  if (semantic != CES_ENFORCE && semantic != CES_OBSERVE)
+    return false;
+
+  /* Mirror the conditions under which build_contract_data_block_ctor actually
+     records a local handler; without one there is nothing to reason about.  */
+  tree label = CONTRACT_LABEL (contract);
+  if (!label || label == error_mark_node || !VAR_P (label))
+    return false;
+  tree label_type = TREE_TYPE (label);
+  if (!label_type || !TYPE_P (label_type))
+    return false;
+  label_type = TYPE_MAIN_VARIANT (label_type);
+
+  if (!local_violation_trampoline_map
+      || !local_violation_trampoline_map->get (label_type)
+      || !local_violation_handler_fn_map)
+    return false;
+
+  tree *fnp = local_violation_handler_fn_map->get (label_type);
+  if (!fnp)
+    return false;
+  tree fn = *fnp;
+
+  /* A noexcept handler cannot rethrow -- it would terminate.  */
+  if (TYPE_NOTHROW_P (TREE_TYPE (fn)))
+    return false;
+
+  /* The body has to be here to be read.  It is absent for a handler defined
+     out of line later in the translation unit, and for a template member
+     whose instantiation the trampoline's use has only queued -- which is the
+     case for __combined_label's handler, so ask for that one now.  */
+  tree body = DECL_SAVED_TREE (fn);
+  if (!body)
+    {
+      maybe_instantiate_decl (fn);
+      body = DECL_SAVED_TREE (fn);
+      if (!body)
+	return false;
+    }
+
+  /* The violation parameter is the last one; for a non-static member
+     function DECL_ARGUMENTS starts with `this'.  */
+  tree parm = DECL_ARGUMENTS (fn);
+  if (!parm)
+    return false;
+  while (DECL_CHAIN (parm))
+    parm = DECL_CHAIN (parm);
+
+  tree violation_type
+    = lookup_std_contracts_type (get_identifier ("contract_violation"));
+  if (!violation_type || violation_type == error_mark_node
+      || !TYPE_P (violation_type))
+    return false;
+
+  rethrow_analysis analysis (parm, TYPE_MAIN_VARIANT (violation_type),
+			     semantic, kind);
+  return analysis.walk_stmt (body) == RO_RETHROWN;
+}
+
 /* Emit the check body for CONTRACT under a single, statically known
    evaluation SEMANTIC.  Returns a BIND_EXPR statement expression, or
    void_node when the semantic emits no check (ignore/assume), or
@@ -7412,6 +8075,13 @@ emit_check_for_semantic (tree contract, contract_evaluation_semantic semantic,
 
   bool check_might_throw = (flag_exceptions
 			    && !expr_noexcept_p (condition, tf_none));
+  /* If the label's local violation handler answers an evaluation_exception by
+     rethrowing, catching the predicate's exception only to hand it to that
+     handler is pure overhead -- let it propagate instead.  */
+  if (check_might_throw
+      && flag_contract_bypass_rethrowing_local_handler
+      && contract_local_handler_always_rethrows_p (contract, semantic, kind))
+    check_might_throw = false;
 
   /* Build a statement expression to hold a contract check, with the check
      potentially wrapped in a try-catch expr.  */
