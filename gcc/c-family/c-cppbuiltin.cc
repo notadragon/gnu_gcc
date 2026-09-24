@@ -1151,6 +1151,8 @@ c_cpp_builtins (cpp_reader *pfile)
 	cpp_define (pfile, "__cpp_contracts_message=202606L");
       if (flag_contracts_p3290)
 	cpp_define (pfile, "__gcc_contracts_p3290=202606L");
+      if (flag_contracts_p3400)
+	cpp_define (pfile, "__cpp_contracts_labels=202606L");
       if (flag_contracts_p3098)
 	cpp_define (pfile, "__cpp_contracts_postcondition_captures=202606L");
       if (flag_modules)
