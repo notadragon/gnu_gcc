@@ -1042,6 +1042,121 @@ check_contract_on_defaulted_or_deleted (tree decl, bool deleted_p)
 
    See check_postcondition_redecl_parm_types.  */
 
+static void record_postcondition_redecl_parm (tree, unsigned, tree);
+
+/* Carry the "odr used in a postcondition" property of the parameter T1 of
+   OLDDECL over to the parameter T2 of a redeclaration or instantiation that
+   corresponds to it, and check that T2 satisfies the const requirement.  */
+
+static void
+check_postcondition_parm_in_redecl (tree olddecl, tree t1, tree t2,
+				    unsigned idx)
+{
+  if (!parm_used_in_post_p (t1))
+    return;
+
+  set_parm_used_in_post (t2);
+
+  /* Either of these declarations may be the one duplicate_decls discards, and
+     which it is depends on things this function cannot see (a definition's
+     parameters win).  Record both: recording is idempotent, and a parameter
+     that does survive is checked directly anyway, so a redundant record costs
+     nothing.  Recording only T1 loses the middle declaration of three
+     (PR c++/127196).  */
+  record_postcondition_redecl_parm (olddecl, idx, t1);
+  record_postcondition_redecl_parm (olddecl, idx, t2);
+
+  if (!dependent_type_p (TREE_TYPE (t2))
+      && !CP_TYPE_CONST_P (TREE_TYPE (t2))
+      && !TREE_READONLY (t2))
+    {
+      auto_diagnostic_group d;
+      error_at (DECL_SOURCE_LOCATION (t2),
+		"value parameter %qE used in a postcondition must be "
+		"const", t2);
+      inform (DECL_SOURCE_LOCATION (olddecl), "previous declaration here");
+    }
+}
+
+/* PR c++/127196.  Record, against the surviving FUNCTION_DECL OLDDECL, that
+   the parameter PARM at index IDX of a declaration being merged away has a
+   dependent type that is not const.  [dcl.contract.func]/7 requires the
+   corresponding parameter on ALL declarations to be const once the predicate
+   odr-uses it, and a dependent type cannot be judged until the arguments are
+   known -- by which time this declaration is gone.  */
+
+static void
+record_postcondition_redecl_parm (tree olddecl, unsigned idx, tree parm)
+{
+  /* uses_template_parms, not dependent_type_p: the caller also runs from
+     tsubst_function_decl, where processing_template_decl is 0 and
+     dependent_type_p asserts if handed a TEMPLATE_TYPE_PARM.  */
+  if (!uses_template_parms (TREE_TYPE (parm))
+      || CP_TYPE_CONST_P (TREE_TYPE (parm))
+      || TREE_READONLY (parm))
+    return;
+
+  if (!postcondition_redecl_parms)
+    postcondition_redecl_parms = hash_map<tree, tree>::create_ggc ();
+
+  tree &parms = postcondition_redecl_parms->get_or_insert (olddecl);
+  for (tree p = parms; p; p = TREE_CHAIN (p))
+    if (tree_to_uhwi (TREE_PURPOSE (p)) == idx && TREE_VALUE (p) == parm)
+      return;
+  parms = tree_cons (build_int_cstu (size_type_node, idx), parm, parms);
+}
+
+/* PR c++/127196.  PATTERN is a function template whose instantiation SPEC has
+   just had its parameters substituted with ARGS.  Apply
+   [dcl.contract.func]/7 to the declarations that were merged away: substitute
+   each recorded parameter's type and require it to be const.
+
+   Nothing is reported when the instantiation's own parameter is already
+   non-const, because it has been diagnosed on its own account -- by the walk
+   over the substituted predicate, or by check_postcondition_parm_in_redecl.
+   This function exists precisely for the case where the surviving parameter
+   looks fine and an earlier declaration did not.  */
+
+void
+check_postcondition_redecl_parm_types (tree pattern, tree spec, tree args)
+{
+  if (!postcondition_redecl_parms)
+    return;
+
+  tree *slot = postcondition_redecl_parms->get (pattern);
+  if (!slot)
+    return;
+
+  for (tree p = *slot; p; p = TREE_CHAIN (p))
+    {
+      unsigned idx = tree_to_uhwi (TREE_PURPOSE (p));
+      tree recorded = TREE_VALUE (p);
+
+      /* Find the instantiation's parameter at that index.  */
+      tree sp = FUNCTION_FIRST_USER_PARM (spec);
+      for (unsigned i = 0; sp && sp != void_list_node && i < idx; ++i)
+	sp = TREE_CHAIN (sp);
+      if (!sp || sp == void_list_node)
+	continue;
+
+      if (!parm_used_in_post_p (sp))
+	continue;
+      /* Already ill-formed on its own account; do not say it twice.  */
+      if (!CP_TYPE_CONST_P (TREE_TYPE (sp)) && !TREE_READONLY (sp))
+	continue;
+
+      tree type = tsubst (TREE_TYPE (recorded), args, tf_none, NULL_TREE);
+      if (type == error_mark_node || uses_template_parms (type)
+	  || CP_TYPE_CONST_P (type))
+	continue;
+
+      auto_diagnostic_group d;
+      error_at (DECL_SOURCE_LOCATION (sp),
+		"value parameter %qE used in a postcondition must be const",
+		sp);
+      inform (DECL_SOURCE_LOCATION (recorded),
+	      "declared %qT here, which is not const", type);
+      break;
     }
 }
 
@@ -1056,28 +1171,63 @@ check_postconditions_in_redecl (tree olddecl, tree newdecl)
   if (!contract_spec)
     return;
 
-  tree t1 = FUNCTION_FIRST_USER_PARM (olddecl);
-  tree t2 = FUNCTION_FIRST_USER_PARM (newdecl);
+  tree first1 = FUNCTION_FIRST_USER_PARM (olddecl);
+  tree first2 = FUNCTION_FIRST_USER_PARM (newdecl);
 
-  for (; t1 && t1 != void_list_node;
-       t1 = TREE_CHAIN (t1), t2 = TREE_CHAIN (t2))
-    {
-      if (parm_used_in_post_p (t1))
-	{
-	  set_parm_used_in_post (t2);
-	  if (!dependent_type_p (TREE_TYPE (t2))
-	      && !CP_TYPE_CONST_P (TREE_TYPE (t2))
-	      && !TREE_READONLY (t2))
-	    {
-	      auto_diagnostic_group d;
-	      error_at (DECL_SOURCE_LOCATION (t2),
-			"value parameter %qE used in a postcondition must be "
-			"const", t2);
-	      inform (DECL_SOURCE_LOCATION (olddecl),
-		      "previous declaration here");
-	    }
-	}
-    }
+  /* A function parameter pack occupies a single slot in the pattern (OLDDECL)
+     but expands to N parameters in the instantiation (NEWDECL), so the two
+     lists cannot be walked in lockstep throughout: a pack that expands to
+     nothing leaves NEWDECL's list the shorter of the two, and a parameter
+     written after a pack sits at a different position in each list.
+
+     What does correspond however the packs expand is the run of parameters
+     before the first pack -- aligned from the front -- and the run after the
+     last pack -- aligned from the back.  Walk those two runs, and skip the
+     packs themselves: whether each odr-used element must be const is checked
+     by the walk over the substituted predicate
+     (check_postcondition_param_odr_uses), which by then sees the elements a
+     pack expanded to.  Only a parameter written BETWEEN two packs is left
+     unchecked here, which takes a second function parameter pack -- one that
+     can never be deduced, and so never expands to anything.  */
+
+  int len1 = 0, len2 = 0, first_pack = -1, last_pack = -1;
+  for (tree t = first1; t && t != void_list_node; t = TREE_CHAIN (t), ++len1)
+    if (DECL_PACK_P (t))
+      {
+	if (first_pack < 0)
+	  first_pack = len1;
+	last_pack = len1;
+      }
+  for (tree t = first2; t && t != void_list_node; t = TREE_CHAIN (t))
+    ++len2;
+
+  /* The run before the first pack, which is the whole list when there is no
+     pack at all.  */
+  tree t1 = first1, t2 = first2;
+  unsigned idx = 0;
+  for (int i = first_pack < 0 ? len1 : first_pack; i > 0;
+       --i, t1 = TREE_CHAIN (t1), t2 = TREE_CHAIN (t2), ++idx)
+    check_postcondition_parm_in_redecl (olddecl, t1, t2, idx);
+
+  if (first_pack < 0)
+    return;
+
+  /* The run after the last pack, aligned from the back of each list.  The
+     second skip is nonnegative: NEWDECL can fall short of OLDDECL by at most
+     one parameter per pack, and the LAST_PACK + 1 parameters up to and
+     including the last pack are at least that many.  */
+  int skip1 = last_pack + 1;
+  int skip2 = skip1 + (len2 - len1);
+  gcc_checking_assert (skip2 >= 0);
+
+  t1 = chain_index (skip1, first1);
+  t2 = chain_index (skip2, first2);
+  /* Index by position in NEWDECL's list, which is the one an instantiation's
+     parameters correspond to.  */
+  idx = skip2;
+  for (; t1 && t1 != void_list_node && t2 && t2 != void_list_node;
+       t1 = TREE_CHAIN (t1), t2 = TREE_CHAIN (t2), ++idx)
+    check_postcondition_parm_in_redecl (olddecl, t1, t2, idx);
 }
 
 /* Map from FUNCTION_DECL to a FUNCTION_DECL for either the PRE_FN or POST_FN.
