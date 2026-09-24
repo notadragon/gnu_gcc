@@ -8999,6 +8999,52 @@ build_implicit_op_guard (location_t loc, contract_evaluation_semantic sem,
    Returns `op0, (op1 == 0 ? <reaction> : div_result)`.  */
 
 tree
+build_implicit_divide_check (tree fndecl, location_t loc,
+			     contract_evaluation_semantic sem,
+			     tree op0, tree op1, tree div_result)
+{
+  gcc_checking_assert (sem != CES_ASSUME);
+  (void) fndecl;
+
+  tree cond = build2_loc (loc, EQ_EXPR, boolean_type_node,
+			  op1, build_zero_cst (TREE_TYPE (op1)));
+  return build_implicit_op_guard (loc, sem, op0, cond, div_result,
+				  "integer division by zero");
+}
+
+/* P3100: guard a signed integer division/remainder DIV_RESULT (OP0 / OP1) whose
+   quotient is not representable -- i.e. OP0 == the type minimum and OP1 == -1 --
+   core-language UB ({expr.mul.representable}).  Returns
+   `op0, (op0 == MIN && op1 == -1 ? <reaction> : div_result)`.  */
+
+tree
+build_implicit_divide_overflow_check (tree fndecl, location_t loc,
+				      contract_evaluation_semantic sem,
+				      tree op0, tree op1, tree div_result)
+{
+  gcc_checking_assert (sem != CES_ASSUME);
+  (void) fndecl;
+
+  tree type = TREE_TYPE (op0);
+  tree min_val = build2_loc (loc, EQ_EXPR, boolean_type_node, op0,
+			     TYPE_MIN_VALUE (type));
+  tree neg_one = build2_loc (loc, EQ_EXPR, boolean_type_node, op1,
+			     build_int_cst (TREE_TYPE (op1), -1));
+  /* Use non-short-circuiting AND so both OP0 and OP1 are always evaluated
+     before the guard branch; otherwise OP1's SAVE_EXPR would be initialized
+     only on the OP0 == MIN path yet read on the normal-division path.  */
+  tree cond = build2_loc (loc, TRUTH_AND_EXPR, boolean_type_node,
+			  min_val, neg_one);
+  return build_implicit_op_guard (loc, sem, op0, cond, div_result,
+				  "signed division overflow");
+}
+
+/* P3100: guard an integer shift SHIFT_RESULT (OP0 shifted by OP1) whose shift
+   amount may be negative or >= the width of the promoted left operand -- core-
+   language UB ({expr.shift.neg.and.width}).  Returns
+   `op0, (op1 < 0 || op1 >= width ? <reaction> : shift_result)`.  */
+
+tree
 build_implicit_shift_check (tree fndecl, location_t loc,
 			    contract_evaluation_semantic sem,
 			    tree op0, tree op1, tree shift_result)
