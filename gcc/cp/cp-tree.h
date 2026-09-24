@@ -2363,6 +2363,25 @@ struct GTY(()) language_function {
 
   bool invalid_constexpr : 1;
   bool throwing_cleanup : 1;
+  /* True if the return-value cleanup is to be spliced around the artificial
+     block holding this function's contract checks rather than around the
+     function body, so that a postcondition check exiting via an exception
+     still destroys the returned object.  Set by start_function_contracts,
+     cleared by maybe_apply_function_contracts just before that block is
+     closed.  See maybe_splice_retval_cleanup.  */
+  bool defer_retval_cleanup : 1;
+  /* True once maybe_splice_retval_cleanup has emitted the DECL_EXPR for
+     current_retval_sentinel.  With contracts it reaches sk_function_parms
+     twice -- once for the body, once for the contracts block -- and a second
+     DECL_EXPR for the same temporary is what ICEd in gimple_add_tmp_var.  */
+  bool retval_sentinel_declared : 1;
+  /* True once the function-body return-value CLEANUP_STMT has been spliced.
+     The same second visit that would duplicate the DECL_EXPR would also
+     duplicate the cleanup, destroying the returned object twice on throw --
+     the other half of PR c++/127281.  Function try blocks are unaffected:
+     each legitimately gets its own cleanup, and only function-body splices
+     consult this.  */
+  bool retval_cleanup_spliced : 1;
   /* True if we gave any errors in this function.  */
   bool erroneous : 1;
 
