@@ -2486,19 +2486,21 @@ ubsan_use_new_style_p (location_t loc)
   return true;
 }
 
-/* Instrument float point-to-integer conversion.  TYPE is an integer type of
-   destination, EXPR is floating-point expression.  */
+/* Build and return the boolean predicate that is true when converting the
+   floating-point value EXPR to the integer TYPE would be out of range -- i.e.
+   the truncated-toward-zero value is not representable in TYPE (core-language
+   UB, [conv.fpint]).  Returns NULL_TREE if the conversion can never be out of
+   range, or the floating mode is unsupported.  Shared by the UBSan float-cast
+   instrumentation and the P3100 implicit-contract-assertion guard.  */
 
 tree
-ubsan_instrument_float_cast (location_t loc, tree type, tree expr)
+ubsan_float_cast_overflow_predicate (tree type, tree expr)
 {
   tree expr_type = TREE_TYPE (expr);
-  tree t, tt, fn, min, max;
+  tree t, tt, min, max;
   machine_mode mode = TYPE_MODE (expr_type);
   int prec = TYPE_PRECISION (type);
   bool uns_p = TYPE_UNSIGNED (type);
-  if (loc == UNKNOWN_LOCATION)
-    loc = input_location;
 
   /* Float to integer conversion first truncates toward zero, so
      even signed char c = 127.875f; is not problematic.
@@ -2596,6 +2598,22 @@ ubsan_instrument_float_cast (location_t loc, tree type, tree expr)
   t = fold_build2 (TRUTH_OR_EXPR, boolean_type_node, t, tt);
   if (integer_zerop (t))
     return NULL_TREE;
+  return t;
+}
+
+/* Instrument float point-to-integer conversion.  TYPE is an integer type of
+   destination, EXPR is floating-point expression.  */
+
+tree
+ubsan_instrument_float_cast (location_t loc, tree type, tree expr)
+{
+  tree expr_type = TREE_TYPE (expr);
+  tree fn;
+  tree t = ubsan_float_cast_overflow_predicate (type, expr);
+  if (t == NULL_TREE)
+    return NULL_TREE;
+  if (loc == UNKNOWN_LOCATION)
+    loc = input_location;
 
   if (flag_sanitize_trap & SANITIZE_FLOAT_CAST)
     fn = build_call_expr_loc (loc, builtin_decl_explicit (BUILT_IN_TRAP), 0);
