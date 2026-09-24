@@ -1,0 +1,61 @@
+/* Routed UBSan checks for P3100 contract routing.
+   Copyright (C) 2026 Free Software Foundation, Inc.
+
+This file is part of GCC.
+
+GCC is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 3, or (at your option)
+any later version.
+
+GCC is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with GCC; see the file COPYING3.  If not see
+<http://www.gnu.org/licenses/>.  */
+
+/* The UBSan checks that -fcontracts-p3100 can route into a contract-violation
+   handler, in the order of the routed-check ids on the wire.
+
+   THE ORDER IS THE ABI.  The id of each row is its index, and the runtime
+   side -- libsanitizer/ubsan/ubsan_diag.cpp -- has the matching RUC_* enum and
+   ErrorTypeToRoutedId.  Rows may be appended; they may not be reordered or
+   removed.
+
+   Three places in the compiler consumed this list, each writing it out for
+   itself: the RUC_* enum and routed_checks[] in cp/decl2.cc, routed_ubsan_bits[]
+   in cp/cp-gimplify.cc, and the UBSan part of ROUTED_SANITIZER_BITS in opts.cc.
+   Two of those fail SILENTLY when a check is added to one and not the others --
+   a check that never routes, or an "assume" semantic that never suppresses the
+   instrumentation, with no diagnostic either way.  They are generated from here
+   now.
+
+   DEF_ROUTED_UBSAN_CHECK (ID, SANITIZE_BIT)
+     A check GCC implements: it occupies a wire slot and has a -fsanitize= bit.
+
+   DEF_ROUTED_UBSAN_RESERVED (ID)
+     A wire slot GCC does not fill.  Clang routes these; GCC has no bit for
+     them, so they never appear in routed_checks[] and their wire byte always
+     stays stock.  They exist here to keep the ids aligned across the two
+     compilers, which is the whole point of the ordering.  */
+
+#ifndef DEF_ROUTED_UBSAN_RESERVED
+#define DEF_ROUTED_UBSAN_RESERVED(ID)
+#endif
+
+DEF_ROUTED_UBSAN_RESERVED (RUC_FUNCTION)
+DEF_ROUTED_UBSAN_CHECK (RUC_ALIGNMENT, SANITIZE_ALIGNMENT)
+DEF_ROUTED_UBSAN_CHECK (RUC_OBJECT_SIZE, SANITIZE_OBJECT_SIZE)
+DEF_ROUTED_UBSAN_CHECK (RUC_NONNULL_ATTRIBUTE, SANITIZE_NONNULL_ATTRIBUTE)
+DEF_ROUTED_UBSAN_CHECK (RUC_RETURNS_NONNULL_ATTRIBUTE,
+			SANITIZE_RETURNS_NONNULL_ATTRIBUTE)
+DEF_ROUTED_UBSAN_RESERVED (RUC_UNSIGNED_INTEGER_OVERFLOW)
+DEF_ROUTED_UBSAN_RESERVED (RUC_IMPLICIT_CONVERSION)
+DEF_ROUTED_UBSAN_RESERVED (RUC_LOCAL_BOUNDS)
+DEF_ROUTED_UBSAN_RESERVED (RUC_OBJC_CAST)
+
+#undef DEF_ROUTED_UBSAN_CHECK
+#undef DEF_ROUTED_UBSAN_RESERVED
