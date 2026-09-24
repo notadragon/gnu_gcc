@@ -3420,6 +3420,21 @@ which are otherwise enabled by default when the contracts feature is active.
 
 The variable @var{mode} has the values '@code{on}' and '@code{off}'.
 
+Warn when the predicate of a contract assertion, evaluated during constant
+evaluation, modifies an object of the enclosing evaluation.  Such a program
+is well formed, and the modification is performed, but its meaning depends
+on the evaluation semantic chosen for the assertion: under the @code{ignore}
+semantic the predicate is not evaluated and the modification does not happen
+at all.  Enabled by default.
+
+This warning is limited to constant evaluation, which is where the compiler
+evaluates the predicate itself and can observe the modification.  A
+side-effecting predicate that is only ever evaluated at run time is not
+diagnosed.
+
+@opindex Wcontract-invalid-label-facet
+@opindex Wno-contract-invalid-label-facet
+@item -Wcontract-invalid-label-facet
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines
