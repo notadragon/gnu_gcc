@@ -2067,6 +2067,62 @@ apply_preconditions (tree fndecl)
   }
 }
 
+static bool
+postcondition_needs_retval_temp_p (tree fndecl)
+{
+  tree restype = TREE_TYPE (TREE_TYPE (fndecl));
+  if (VOID_TYPE_P (restype) || !DECL_RESULT (fndecl))
+    return false;
+
+  /* Returned in memory: DECL_RESULT is addressable and, per Example 2, is
+     the object the caller sees -- do not copy it.  */
+  if (aggregate_value_p (restype, fndecl))
+    return false;
+
+  /* A scalar result needs a home too, and for a sharper reason than an
+     aggregate does.  It is a gimple register, so gimplify_addr_expr spills it
+     to a temporary of its own EVERY TIME a predicate takes its address -- and
+     a predicate may do so more than once:
+
+       int f () post (r : rec (&r) && rec2 (addr_via_ref (r))) ...
+
+     gives two spills and therefore two addresses for one result binding,
+     inside a single evaluation of a single predicate.  [dcl.contract.res]/1
+     binds the result name to one object; nothing permits two, and the
+     predicate's value comes out wrong as a result (PR112794).  Give it one
+     home so every use in the predicate names the same object.
+
+     This does move a direct `const_cast<int&>(r)++' off DECL_RESULT, which
+     g++.dg/contracts/cpp26/expr.prim.id.unqual.p7-4.C pins -- so the caller
+     copies the temporary back once the checks are done, keeping the mutation
+     observable.  The copy-back is therefore not optional: a stand-in copied
+     into but never copied back loses that mutation, which is worse than
+     giving the result no home at all.  */
+
+  /* The copy below is a bare INIT_EXPR, so only take this path for a type
+     it is a correct initialization for.  Under the Itanium ABI anything
+     less is returned in memory and has already been excluded above.  */
+  if (!trivially_copyable_p (restype))
+    return false;
+
+  tree contracts = get_fn_contract_specifiers (fndecl);
+  if (!contracts)
+    return false;
+
+  for (tree contract : tree_vec_range (contracts))
+    if (TREE_CODE (contract) == POSTCONDITION_STMT)
+      {
+	tree result = POSTCONDITION_IDENTIFIER (contract);
+	if (result && DECL_P (result) && TREE_ADDRESSABLE (result))
+	  return true;
+      }
+
+  return false;
+}
+
+/* Add a call or a direct evaluation of the post checks.
+   For postconditions with captures, gate the predicate check on the
+   initialized flag (set by the interleaved emission path).  */
 /* Add a call or a direct evaluation of the post checks.  */
 
 static void
@@ -2077,6 +2133,83 @@ apply_postconditions (tree fndecl)
       add_post_condition_fn_call (fndecl);
       return;
     }
+
+  /* Give the checks an addressable stand-in for the returned object when
+     DECL_RESULT cannot supply one; remap_retval picks this up.  */
+  if (postcondition_needs_retval_temp_p (fndecl))
+    {
+      tree restype = TREE_TYPE (TREE_TYPE (fndecl));
+      tree tmp = build_decl (DECL_SOURCE_LOCATION (fndecl), VAR_DECL,
+			     get_identifier ("__contract_retval"), restype);
+      DECL_ARTIFICIAL (tmp) = 1;
+      DECL_IGNORED_P (tmp) = 1;
+      DECL_CONTEXT (tmp) = fndecl;
+      TREE_ADDRESSABLE (tmp) = 1;
+      layout_decl (tmp, 0);
+      pushdecl (tmp);
+      add_decl_expr (tmp);
+      finish_expr_stmt (cp_build_init_expr (tmp, DECL_RESULT (fndecl)));
+      if (!postcondition_retval_temps)
+	postcondition_retval_temps = hash_map<tree, tree>::create_ggc ();
+      postcondition_retval_temps->put (fndecl, tmp);
+    }
+
+  /* Walk original and copy in lockstep so we can look up capture flags
+     by original contract tree.  For postconditions with captures, we
+     skip copy_contracts (which can remap capture VAR_DECL references)
+     and emit the original contract directly.  */
+  tree contract_copy = copy_contracts (fndecl, cmk_post);
+  if (!contract_copy)
+    return;
+
+  tree orig_contracts = get_fn_contract_specifiers (fndecl);
+  int orig_ix = 0;
+  int orig_len = orig_contracts ? TREE_VEC_LENGTH (orig_contracts) : 0;
+
+  for (tree contract : tree_vec_range (contract_copy))
+    {
+      /* Advance through the originals to the postcondition this copy came
+	 from; CONTRACT_COPY holds only postconditions, in source order.  */
+      tree orig_contract = NULL_TREE;
+      while (orig_ix < orig_len)
+	{
+	  tree orig = TREE_VEC_ELT (orig_contracts, orig_ix++);
+	  if (TREE_CODE (orig) == POSTCONDITION_STMT)
+	    {
+	      orig_contract = orig;
+	      break;
+	    }
+	}
+
+      /* If this postcondition has captures, gate on the initialized flag.  */
+      tree *flag_p = NULL;
+      if (orig_contract && POSTCONDITION_CAPTURES (orig_contract)
+	  && postcondition_capture_flags)
+	flag_p = postcondition_capture_flags->get (orig_contract);
+
+      if (flag_p)
+	{
+	  /* Use the ORIGINAL contract (not the copy) for postconditions with
+	     captures, as copy_contracts can remap capture VAR_DECL refs.  */
+	  tree if_stmt = begin_if_stmt ();
+	  finish_if_stmt_cond (*flag_p, if_stmt);
+	  emit_contract_statement (orig_contract);
+	  finish_then_clause (if_stmt);
+	  finish_if_stmt (if_stmt);
+	}
+      else
+	emit_contract_statement (contract);
+    }
+
+  /* If the checks ran against a stand-in for the returned object, copy it
+     back: having evaluated the predicates we owe their effects to the
+     caller, and the stand-in is where those effects landed.  */
+  if (postcondition_retval_temps)
+    if (tree *tmp = postcondition_retval_temps->get (fndecl))
+      finish_expr_stmt (build2 (MODIFY_EXPR, TREE_TYPE (*tmp),
+				DECL_RESULT (fndecl), *tmp));
+}
+
 }
 
 /* Add contract handling to the function in FNDECL.

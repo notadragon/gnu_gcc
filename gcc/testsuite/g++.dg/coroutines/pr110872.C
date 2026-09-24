@@ -1,9 +1,21 @@
+// This is now the run test its own NOTE asked to become; the ICE it was
+// xfailed for is fixed.
+//
+// The predicate calls a member function on a class-typed result binding, so it
+// needs that binding's address, and the binding had none -- hence
+// expand_expr_addr_expr_1.  The coroutine is incidental: three lines with an
+// ordinary function reproduce the same ICE,
+//
+//   struct G { bool is_valid () const { return false; } };
+//   G make () post (g : g.is_valid ()) { return G{}; }
+//   int main () { make (); }
+//
+// which makes this a duplicate of PR c++/125574, fixed by handing such a
+// predicate an addressable temporary.
+//
+// { dg-do run { target c++26 } }
 // { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe" }
-// NOTE this should switch to run when the changes are resolved.
-// { dg-do compile { target c++26 } }
 // { dg-skip-if "requires hosted libstdc++ for iostream" { ! hostedlib } }
-// { dg-prune-output "during RTL pass: expand" }
-// { dg-ice "expand_expr_addr_expr_1" { lp64 || { *-*-darwin* arm*-*-* } } }
 
 #include <iostream>
 #include <coroutine>
@@ -50,4 +62,6 @@ int main() {
     std::cout << "main continues" << std::endl;
 }
 
-// { dg-output "contract violation in function generator<int> val.int. at .*.C:36: g.is_valid().*(\n|\r\n|\r)" }
+// The line number is matched loosely so that editing the header above cannot
+// silently turn this into a test of nothing.
+// { dg-output "contract violation in function generator<int> val.int. at .*.C:\[0-9\]+: g.is_valid().*(\n|\r\n|\r)" }
