@@ -214,7 +214,6 @@ strip_contract_const_wrapper (tree exp)
     return exp;
 }
 
-/* TODO : decide if we should push the tests into contracts.cc  */
 extern contract_evaluation_semantic get_evaluation_semantic (const_tree);
 
 /* Will this contract be ignored.  */
