@@ -603,6 +603,10 @@ Wconstant-logical-operand
 C ObjC C++ ObjC++ Var(warn_constant_logical_operand) Warning LangEnabledBy(C ObjC C++ ObjC++,Wall)
 Warn for constant operands of logical operators other than 0 or 1.
 
+Wcontract-configuration
+C ObjC C++ ObjC++ Var(warn_contract_configuration) Init(1) Warning
+Warn about problems in the contract configuration (P3595).
+
 Wcontract-constexpr-side-effect
 C ObjC C++ ObjC++ Var(warn_contract_constexpr_side_effect) Init(1) Warning
 Warn when a contract predicate evaluated during constant evaluation modifies the enclosing evaluation.
@@ -1978,6 +1982,18 @@ Enum(on_off) String(on) Value(1)
 fcontracts-definition-check=
 C++ ObjC++ Joined RejectNegative Enum(on_off) Var(flag_contracts_definition_check) Init(1)
 -fcontracts-definition-check=[on|off]	Enable or disable contract checks on the definition side for all functions (default on).
+
+fcontract-group-evaluation-semantic=
+C C++ ObjC ObjC++ Joined RejectNegative
+-fcontract-group-evaluation-semantic=<group>:<semantic>	Set the evaluation semantic for contracts in a specific group.
+
+fcontract-configuration=
+C C++ ObjC ObjC++ Joined RejectNegative
+-fcontract-configuration=<json>	Provide inline JSON contract configuration.
+
+fcontract-configuration-file=
+C C++ ObjC ObjC++ Joined RejectNegative
+-fcontract-configuration-file=<path>	Load contract configuration from a JSON file.
 
 fcoroutines
 C++ ObjC++ LTO Var(flag_coroutines)

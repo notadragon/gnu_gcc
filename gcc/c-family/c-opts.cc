@@ -45,6 +45,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "file-prefix-map.h"    /* add_*_prefix_map()  */
 #include "context.h"
 #include "diagnostics/text-sink.h"
+#include "c-family/contracts-config-source.h"
+#include "c-family/contracts-config.h"
 
 #ifndef DOLLARS_IN_IDENTIFIERS
 # define DOLLARS_IN_IDENTIFIERS true
@@ -100,6 +102,13 @@ static bool std_cxx_inc = true;
 
 /* If the quote chain has been split by -I-.  */
 static bool quote_chain_split;
+
+/* Accumulated contract configuration sources in command-line order.
+   Defined here (not in cp/) because c-opts.o is linked into all
+   C-family frontends; contracts-config.o is only in cc1plus.  */
+vec<contract_config_source> contracts_config_sources;
+
+static bool contract_evaluation_semantic_explicit = false;
 
 /* Number of deferred options.  */
 static size_t deferred_count;
@@ -466,6 +475,40 @@ c_common_handle_option (size_t scode, const char *arg, HOST_WIDE_INT value,
 
     case OPT_fcanonical_system_headers:
       cpp_opts->canonical_system_headers = value;
+      break;
+
+    case OPT_fcontract_group_evaluation_semantic_:
+      {
+	contract_config_source src;
+	src.kind = CCSK_GROUP_SEMANTIC;
+	src.arg = xstrdup (arg);
+	contracts_config_sources.safe_push (src);
+      }
+      break;
+
+    case OPT_fcontract_configuration_:
+      {
+	contract_config_source src;
+	src.kind = CCSK_JSON_INLINE;
+	src.arg = xstrdup (arg);
+	contracts_config_sources.safe_push (src);
+      }
+      break;
+
+    case OPT_fcontract_configuration_file_:
+      {
+	contract_config_source src;
+	src.kind = CCSK_JSON_FILE;
+	src.arg = xstrdup (arg);
+	contracts_config_sources.safe_push (src);
+      }
+      break;
+
+    case OPT_fcontract_evaluation_semantic_:
+      if (contract_evaluation_semantic_explicit)
+	error ("%<-fcontract-evaluation-semantic=%> may only be "
+	       "specified once");
+      contract_evaluation_semantic_explicit = true;
       break;
 
     case OPT_fcond_mismatch:
@@ -1352,6 +1395,17 @@ c_common_post_options (const char **pfilename)
   diagnostic_initialize_input_context (global_dc,
 				       c_common_input_charset_cb, true);
   input_location = UNKNOWN_LOCATION;
+
+  /* Parse and validate any contract configuration eagerly, before the main
+     file's line maps are established.  This makes diagnostics cite the
+     configuration source (file:line:col) rather than whatever contract
+     first triggers resolution, and it reports a broken configuration even
+     in a translation unit that contains no contract assertions.  Doing it
+     here -- rather than lazily during resolution -- also avoids injecting a
+     configuration-file line map into the middle of the main file's maps.  */
+  if ((flag_contracts || flag_contracts_p4299)
+      && !contracts_config_sources.is_empty ())
+    contract_config_init ();
 
   *pfilename = this_input_filename
     = cpp_read_main_file (parse_in, in_fnames[0],

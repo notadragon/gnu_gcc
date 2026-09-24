@@ -1,0 +1,5 @@
+[
+  {"match": {"namespace": "app", "kind": "pre", "caller": false},
+   "output": {"semantic": "observe"}},
+  {"output": {"semantic": "ignore"}}
+]

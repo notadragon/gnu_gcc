@@ -1,0 +1,6 @@
+[
+  { "match": { "kind": "pre", "wibble": 1 },
+    "output": { "semantic": "observe" } },
+  { "match": { "kind": "post" },
+    "output": { "semantic": "bogus" } }
+]

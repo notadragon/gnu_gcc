@@ -1,0 +1,6 @@
+[
+  {"match": {"caller": true},
+   "output": {"semantic": "ignore",
+              "dynamic": {"linkage": "C++", "name": "p3595_caller_sel_nw",
+                          "provideweak": false}}}
+]
