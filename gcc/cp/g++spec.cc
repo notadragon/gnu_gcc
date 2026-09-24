@@ -168,6 +168,7 @@ lang_specific_driver (struct cl_decoded_option **in_decoded_options,
 	{
 	case OPT_fcontracts:
 	case OPT_fcontracts_p3097:
+	case OPT_fcontracts_p3290:
 	case OPT_fcontracts_p3850:
 	case OPT_std_c__26:
 	case OPT_std_gnu__26:

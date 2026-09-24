@@ -2460,6 +2460,24 @@ ftms = {
 };
 
 ftms = {
+  name = contracts_api;
+  values = {
+    v = 202606;
+    cxxmin = 20;
+    extra_cond = "defined(__gcc_contracts_p3290)";
+  };
+};
+
+ftms = {
+  name = assert_can_use_contracts;
+  values = {
+    v = 202606;
+    cxxmin = 20;
+    extra_cond = "defined(__gcc_contracts_p3290)";
+  };
+};
+
+ftms = {
   name = replaceable_contract_violation_handler;
   values = {
     v = 202603;

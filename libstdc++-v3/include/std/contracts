@@ -33,6 +33,10 @@
 #pragma GCC system_header
 
 #define __glibcxx_want_contracts
+#define __glibcxx_want_contracts_message
+#define __glibcxx_want_contracts_api
+#define __glibcxx_want_contracts_implicit
+#define __glibcxx_want_contracts_labels
 #define __glibcxx_want_replaceable_contract_violation_handler
 #include <bits/version.h>
 
@@ -54,6 +58,10 @@ namespace contracts
     pre = 1,
     post = 2,
     assert = 3,
+    manual = 4,
+    cassert = 5,
+    post_capture = 6,
+    implicit = 7, // P3100 implicit contract assertion guarding language UB
 
     /* Implementation-defined values should have a minimum value of 1000. */
   };
@@ -110,4 +118,67 @@ _GLIBCXX_END_NAMESPACE_VERSION
 } // namespace std
 
 #endif // __cpp_lib_contracts
+
+#ifdef __cpp_lib_contracts_api
+#include <new>  // for std::nothrow_t
+
+namespace std _GLIBCXX_VISIBILITY(default)
+{
+_GLIBCXX_BEGIN_NAMESPACE_VERSION
+
+namespace contracts
+{
+  [[noreturn]] void handle_enforced_contract_violation(
+      const char* __comment,
+      const std::source_location& __location
+          = std::source_location::current());
+
+  void handle_observed_contract_violation(
+      const char* __comment,
+      const std::source_location& __location
+          = std::source_location::current());
+
+  [[noreturn]] void handle_quick_enforced_contract_violation(
+      const char* __comment,
+      const std::source_location& __location
+          = std::source_location::current()) noexcept;
+
+  // D4298: the nothrow_t overloads report the *noexcept* evaluation
+  // semantics only when the calling translation unit was compiled with
+  // -fcontracts-p4298 (which predefines __cpp_contracts_nonthrowing_semantics).
+  // To keep this a per-caller-TU decision without an ODR violation, the P4298
+  // variants live in the inline namespace std::contracts::__p4298: a caller
+  // with the flag binds std::contracts::handle_*_contract_violation to the
+  // distinct __p4298 symbol (reporting noexcept_enforce/noexcept_observe),
+  // while a caller without the flag binds the plain std::contracts symbol
+  // (reporting enforce/observe).  The library provides both sets of symbols;
+  // each mangled name has exactly one definition.
+#ifdef __cpp_contracts_nonthrowing_semantics
+  inline namespace __p4298 {
+#endif
+
+  [[noreturn]] void handle_enforced_contract_violation(
+      std::nothrow_t,
+      const char* __comment,
+      const std::source_location& __location
+          = std::source_location::current()) noexcept;
+
+  void handle_observed_contract_violation(
+      std::nothrow_t,
+      const char* __comment,
+      const std::source_location& __location
+          = std::source_location::current()) noexcept;
+
+#ifdef __cpp_contracts_nonthrowing_semantics
+  } // inline namespace __p4298
+#endif
+
+} // namespace contracts
+
+namespace std _GLIBCXX_VISIBILITY(default)
+{
+_GLIBCXX_BEGIN_NAMESPACE_VERSION
+
+namespace contracts
+{
 #endif // _GLIBCXX_CONTRACTS

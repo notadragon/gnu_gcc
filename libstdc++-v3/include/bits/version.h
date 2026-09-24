@@ -2711,6 +2711,56 @@
 #endif /* !defined(__cpp_lib_contracts) */
 #undef __glibcxx_want_contracts
 
+#if !defined(__cpp_lib_contracts_message)
+# if (__cplusplus >= 202002L) && defined(__cpp_contracts_message)
+#  define __glibcxx_contracts_message 202606L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_contracts_message)
+#   define __cpp_lib_contracts_message 202606L
+#  endif
+# endif
+#endif /* !defined(__cpp_lib_contracts_message) */
+#undef __glibcxx_want_contracts_message
+
+#if !defined(__cpp_lib_contracts_api)
+# if (__cplusplus >= 202002L) && defined(__gcc_contracts_p3290)
+#  define __glibcxx_contracts_api 202606L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_contracts_api)
+#   define __cpp_lib_contracts_api 202606L
+#  endif
+# endif
+#endif /* !defined(__cpp_lib_contracts_api) */
+#undef __glibcxx_want_contracts_api
+
+#if !defined(__cpp_lib_assert_can_use_contracts)
+# if (__cplusplus >= 202002L) && defined(__gcc_contracts_p3290)
+#  define __glibcxx_assert_can_use_contracts 202606L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_assert_can_use_contracts)
+#   define __cpp_lib_assert_can_use_contracts 202606L
+#  endif
+# endif
+#endif /* !defined(__cpp_lib_assert_can_use_contracts) */
+#undef __glibcxx_want_assert_can_use_contracts
+
+#if !defined(__cpp_lib_contracts_implicit)
+# if (__cplusplus >= 202002L) && defined(__gcc_contracts_p3100)
+#  define __glibcxx_contracts_implicit 202608L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_contracts_implicit)
+#   define __cpp_lib_contracts_implicit 202608L
+#  endif
+# endif
+#endif /* !defined(__cpp_lib_contracts_implicit) */
+#undef __glibcxx_want_contracts_implicit
+
+#if !defined(__cpp_lib_contracts_labels)
+# if (__cplusplus >= 202002L) && defined(__cpp_contracts_labels)
+#  define __glibcxx_contracts_labels 202606L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_contracts_labels)
+#   define __cpp_lib_contracts_labels 202606L
+#  endif
+# endif
+#endif /* !defined(__cpp_lib_contracts_labels) */
+#undef __glibcxx_want_contracts_labels
+
 #if !defined(__cpp_lib_replaceable_contract_violation_handler)
 # if (__cplusplus >= 202002L) && (__cpp_contracts >= 202502L && __ELF__)
 #  define __glibcxx_replaceable_contract_violation_handler 202603L

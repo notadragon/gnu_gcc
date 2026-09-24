@@ -284,6 +284,44 @@ _Z41invoke_default_contract_violation_handlerRKNSt9contracts18contract_violation
 namespace {
 using namespace __cxxabiv1;
 
+struct __p3290_data_block_t {
+  const __cxa_descriptor_table_t* descriptor;
+  const __cxa_contract_data_block* next;
+  __cxa_source_location location;
+  const char* comment;
+  __UINT8_TYPE__ kind;
+  __UINT8_TYPE__ semantic;
+  __UINT8_TYPE__ mode;
+};
+
+struct __p3290_desc_t {
+  __UINT8_TYPE__ header;
+  __UINT8_TYPE__ num_entries;
+  __UINT8_TYPE__ fid[5];
+  __UINT8_TYPE__ pad[1];
+  __cxa_descriptor_data_t data[5];
+};
+
+// A P3290 API violation and a C assert carry no diagnostic-message field, so
+// contract_violation::message() returns nullptr for them (P3099 "Option C1": no
+// message supplied is distinct from an empty message).
+static const __p3290_desc_t __p3290_desc = {
+  static_cast<__UINT8_TYPE__>((1u << 4) | CXA_VENDOR_GCC),
+  5,
+  { CXA_FIELD_SOURCE_LOCATION, CXA_FIELD_COMMENT,
+    CXA_FIELD_ASSERTION_KIND, CXA_FIELD_EVALUATION_SEMANTIC,
+    CXA_FIELD_DETECTION_MODE },
+  { 0 },
+  {
+    { offsetof(__p3290_data_block_t, location) },
+    { offsetof(__p3290_data_block_t, comment) },
+    { offsetof(__p3290_data_block_t, kind) },
+    { offsetof(__p3290_data_block_t, semantic) },
+    { offsetof(__p3290_data_block_t, mode) },
+  }
+};
+} // anonymous namespace
+
 namespace std _GLIBCXX_VISIBILITY(default)
 {
 _GLIBCXX_BEGIN_NAMESPACE_VERSION
@@ -292,6 +330,127 @@ namespace contracts
 
 namespace {
 
+static void
+__do_handle_violation(const char* __comment,
+		      const std::source_location& __location,
+		      __UINT8_TYPE__ __semantic)
+{
+  __p3290_data_block_t __data = {
+    reinterpret_cast<const __cxa_descriptor_table_t*>(&__p3290_desc),
+    nullptr,
+    { __location.file_name(), __location.function_name(),
+      __location.line(), __location.column() },
+    __comment ? __comment : "",
+    CXA_AK_MANUAL,
+    __semantic,
+    CXA_DM_UNSPECIFIED,
+  };
+  __cxa_contract_violation(
+      const_cast<void*>(static_cast<const void*>(&__data)));
+}
+
+} // anonymous namespace
+
+[[noreturn]] void
+handle_enforced_contract_violation(
+    const char* __comment,
+    const std::source_location& __location)
+{
+  __do_handle_violation(__comment, __location, CXA_ES_ENFORCE);
+  // Enforced dispatch aborts on normal handler return (and a throwing handler
+  // propagates out of this throwing overload); this abort() is an unreachable
+  // backstop consistent with the enforce-terminates-via-abort() policy.
+  std::abort();
+}
+
+void
+handle_observed_contract_violation(
+    const char* __comment,
+    const std::source_location& __location)
+{
+  __do_handle_violation(__comment, __location, CXA_ES_OBSERVE);
+}
+
+[[noreturn]] void
+handle_quick_enforced_contract_violation(
+    [[maybe_unused]] const char* __comment,
+    [[maybe_unused]] const std::source_location& __location) noexcept
+{
+  // Quick-enforce terminates immediately without invoking the handler, in the
+  // most efficient implementation-defined way (__builtin_trap, not abort).
+  __builtin_trap();
+}
+
+// D4298: the nothrow_t overloads come in two variants, and which one a
+// caller binds to is decided in the caller's own translation unit by whether
+// -fcontracts-p4298 (i.e. __cpp_contracts_nonthrowing) was set -- see the
+// header <contracts>.  The library provides BOTH, unconditionally (this TU is
+// built once): the plain std::contracts variants report the classic
+// enforce/observe semantics, and the std::contracts::__p4298 variants report
+// the noexcept_enforce/noexcept_observe semantics.  Each mangled name has
+// exactly one definition, so there is no ODR issue for a mixed-flag program.
+
+// Plain variants (caller compiled WITHOUT -fcontracts-p4298): classic
+// enforce/observe.
+[[noreturn]] void
+handle_enforced_contract_violation(
+    std::nothrow_t,
+    const char* __comment,
+    const std::source_location& __location) noexcept
+{
+  // Normal handler return aborts inside the ABI (enforce post-action); a
+  // throwing handler hits this noexcept boundary and calls std::terminate().
+  __do_handle_violation(__comment, __location, CXA_ES_ENFORCE);
+  std::abort();
+}
+
+void
+handle_observed_contract_violation(
+    std::nothrow_t,
+    const char* __comment,
+    const std::source_location& __location) noexcept
+{
+  __do_handle_violation(__comment, __location, CXA_ES_OBSERVE);
+}
+
 _GLIBCXX_END_NAMESPACE_VERSION
 } // namespace std
 
+// Shared assert-integration entry point (P3290).  Both libstdc++ and libc++
+// expand the <cassert> `assert` macro (under
+// __STDC_WANT_ASSERT_USES_CONTRACTS__) to a call to this single symbol.  It
+// reports evaluation_semantic=enforce and
+// assertion_kind=cassert to the handler.  Unlike the general contract entry
+// points, *any* completion of the handler results in std::abort(): a normal
+// return aborts via the enforce post-action inside the ABI, and an escaping
+// exception is caught here and turned into std::abort() as well.  This matches
+// classic assert() termination semantics regardless of how the handler exits.
+extern "C++" [[noreturn]] void
+__cxa_handle_cassert_violation(const char* __comment,
+                               std::source_location __location) noexcept
+{
+  using namespace __cxxabiv1;
+
+  __p3290_data_block_t __data = {
+    reinterpret_cast<const __cxa_descriptor_table_t*>(&__p3290_desc),
+    nullptr,
+    { __location.file_name(), __location.function_name(),
+      __location.line(), __location.column() },
+    __comment ? __comment : "",
+    CXA_AK_CASSERT,
+    CXA_ES_ENFORCE,
+    CXA_DM_PREDICATE_FALSE,
+  };
+  try
+    {
+      __cxa_contract_violation(
+	  const_cast<void*>(static_cast<const void*>(&__data)));
+    }
+  catch (...)
+    {
+      std::abort();
+    }
+  std::abort();
+}
+
+#endif // __cpp_lib_contracts_api
