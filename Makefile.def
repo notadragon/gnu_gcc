@@ -209,6 +209,7 @@ target_modules = { module= libga68; lib_path=.libs; };
 target_modules = { module= libgomp; bootstrap= true; lib_path=.libs; };
 target_modules = { module= libitm; lib_path=.libs; };
 target_modules = { module= libatomic; bootstrap=true; lib_path=.libs; };
+target_modules = { module= libcontracts; lib_path=.libs; };
 target_modules = { module= libgrust; };
 target_modules = { module= libgcobol; };
 

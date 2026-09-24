@@ -39,6 +39,7 @@
 #ifdef __cpp_lib_contracts
 #include <source_location>
 #include <bits/exception_ptr.h>
+#include <bits/contracts_abi.h>
 
 namespace std _GLIBCXX_VISIBILITY(default)
 {
@@ -49,6 +50,7 @@ namespace contracts
   // From P2900R14
 
   enum class assertion_kind : __UINT16_TYPE__ {
+    unspecified = 0,
     pre = 1,
     post = 2,
     assert = 3,
@@ -57,6 +59,7 @@ namespace contracts
   };
 
   enum class evaluation_semantic : __UINT16_TYPE__ {
+    unspecified = 0,
     ignore = 1,
     observe = 2,
     enforce = 3,
@@ -66,6 +69,7 @@ namespace contracts
   };
 
   enum class detection_mode : __UINT16_TYPE__ {
+    unspecified = 0,
     predicate_false = 1,
     evaluation_exception = 2,
 
@@ -75,33 +79,27 @@ namespace contracts
   using __vendor_ext = void;
 
   class contract_violation {
-    __UINT16_TYPE__ _M_version;
-    assertion_kind _M_assertion_kind;
-    evaluation_semantic _M_evaluation_semantic;
-    detection_mode _M_detection_mode;
-    const char* _M_comment;
-    const void* _M_src_loc_ptr;
-    __vendor_ext* _M_ext;
+    const __cxxabiv1::__cxa_contract_data_block* _M_chain;
 
   public:
-    // cannot be copied or moved or assigned to
+    // Only the ABI runtime and library internals should construct these.
+    explicit
+    contract_violation(
+	const __cxxabiv1::__cxa_contract_data_block* __chain) noexcept
+    : _M_chain(__chain) {}
+
     contract_violation(const contract_violation&) = delete;
     contract_violation& operator=(const contract_violation&) = delete;
 
-    assertion_kind kind() const noexcept { return _M_assertion_kind; }
-    evaluation_semantic semantic() const noexcept { return _M_evaluation_semantic; }
-    detection_mode mode() const noexcept { return _M_detection_mode; }
-    const char* comment() const noexcept { return _M_comment; }
-    std::source_location location() const noexcept {
-      std::source_location __loc;
-      __loc._M_impl
-	   = static_cast<const source_location::__impl*>(_M_src_loc_ptr);
-      return __loc;
-    }
-    bool is_terminating () const noexcept {
-      return _M_evaluation_semantic == std::contracts::evaluation_semantic::enforce
-	    || _M_evaluation_semantic == std::contracts::evaluation_semantic::quick_enforce;
-    }
+    assertion_kind kind() const noexcept;
+    evaluation_semantic semantic() const noexcept;
+    contracts::detection_mode detection_mode() const noexcept;
+    const char* comment() const noexcept;
+    const char* message() const noexcept;
+    std::source_location location() const noexcept;
+    bool is_terminating() const noexcept;
+    void* query_control_object(const void* __key,
+			       std::size_t __index = 0) const;
   };
 
   void invoke_default_contract_violation_handler(const contract_violation&) noexcept;

@@ -1631,6 +1631,32 @@ static GTY(()) hash_map<tree, tree> *decl_for_wrapper = nullptr;
 /* Makes wrapper the precondition function for FNDECL.  */
 
 static void
+static unsigned char
+get_wrapper_tuple_at (tree wrapdecl, unsigned position)
+{
+  tree tuple = get_wrapper_tuple (wrapdecl);
+  /* If a tuple is stored, POSITION must be one of its elements: the tuple
+     has one entry per contract in the callee's full contract-specifier
+     list, and callers only ever query positions from that same list (see
+     compute_caller_semantic_tuple, copy_and_remap_contracts, and
+     define_one_contract_wrapper_func).  Falling off the end here would
+     otherwise silently return CES_IGNORE and mask a future alignment bug.
+     A NULL_TREE tuple (no tuple stored for WRAPDECL) is the legitimate
+     sentinel case and is not subject to this check.  */
+  gcc_checking_assert (!tuple || position < (unsigned) list_length (tuple));
+  for (unsigned i = 0; tuple; tuple = TREE_CHAIN (tuple), i++)
+    if (i == position)
+      return (unsigned char) tree_to_uhwi (TREE_VALUE (tuple));
+  return (unsigned char) CES_IGNORE;
+}
+
+/* Return the P3595 dynamic-selector descriptor (TREE_PURPOSE) for the contract
+   at (full-list) POSITION in WRAPDECL's stored tuple, or NULL_TREE if that
+   entry is not dynamic.  The descriptor is a TREE_LIST whose TREE_PURPOSE is
+   the selector name IDENTIFIER and whose TREE_VALUE is the packed
+   linkage/provideweak INTEGER_CST -- the same layout the callee-side
+   CONTRACT_DYNAMIC cache uses.  */
+
 set_contract_wrapper_function (tree fndecl, tree wrapper)
 {
   gcc_checking_assert (wrapper && fndecl);
@@ -2120,6 +2146,22 @@ emit_contract_statement (tree contract)
   add_stmt (contract);
   return true;
 }
+
+/* Forward declarations.  */
+static tree build_quick_enforce_reaction (location_t);
+static void emit_pending_weak_selectors ();
+
+/* Forward declarations for new ABI data block infrastructure.  */
+static tree build_contract_data_block_ctor (tree, tree *);
+static tree build_contract_data_block_constant (tree, tree, tree);
+static tree declare_cxa_entry_point (contract_assertion_kind,
+				     contract_evaluation_semantic,
+				     int, bool);
+
+/* Map from postcondition contract tree -> initialized flag VAR_DECL.
+   Populated by the inline interleaved emission path, queried by the
+   postcondition emission path to gate predicate evaluation.
+   Cleared per function.  */
 
 /* Add a call or a direct evaluation of the pre checks.  */
 
@@ -3677,118 +3719,80 @@ emit_builtin_observable_checkpoint ()
   finish_expr_stmt (fn);
 }
 
-/* Shared code between TU-local wrappers for the violation handler.  */
+static GTY(()) tree tu_quick_enforce_wrapper = NULL_TREE;
+
+/* Declare a noipa wrapper around the quick_enforce trap.  */
 
 static tree
 declare_one_violation_handler_wrapper (tree fn_name, tree fn_type,
 				       tree p1_type, tree p2_type)
 {
-  location_t loc = BUILTINS_LOCATION;
-  tree fn_decl = build_lang_decl_loc (loc, FUNCTION_DECL, fn_name, fn_type);
-  DECL_CONTEXT (fn_decl) = FROB_CONTEXT (global_namespace);
-  DECL_ARTIFICIAL (fn_decl) = true;
-  DECL_INITIAL (fn_decl) = error_mark_node;
-  /* Let the start function code fill in the result decl.  */
-  DECL_RESULT (fn_decl) = NULL_TREE;
-  /* Two args violation ref, dynamic info.  */
-  tree parms = cp_build_parm_decl (fn_decl, NULL_TREE, p1_type);
-  TREE_USED (parms) = true;
-  DECL_READ_P (parms) = true;
-  tree p2 = cp_build_parm_decl (fn_decl, NULL_TREE, p2_type);
-  TREE_USED (p2) = true;
-  DECL_READ_P (p2) = true;
-  DECL_CHAIN (parms) = p2;
-  DECL_ARGUMENTS (fn_decl) = parms;
-  /* Make this function internal.  */
-  TREE_PUBLIC (fn_decl) = false;
-  DECL_EXTERNAL (fn_decl) = false;
-  DECL_WEAK (fn_decl) = false;
-  return fn_decl;
-}
-
-static GTY(()) tree tu_has_violation = NULL_TREE;
-static GTY(()) tree tu_has_violation_exception = NULL_TREE;
-
-static void
-declare_violation_handler_wrappers ()
-{
-  if (tu_has_violation && tu_has_violation_exception)
-    return;
-
-  iloc_sentinel ils (input_location);
-  input_location = BUILTINS_LOCATION;
-  tree v_obj_type = builtin_contract_violation_type;
-  v_obj_type = cp_build_qualified_type (v_obj_type, TYPE_QUAL_CONST);
-  v_obj_type = cp_build_reference_type (v_obj_type, /*rval*/false);
-  tree fn_type = build_function_type_list (void_type_node, v_obj_type,
-					   uint16_type_node, NULL_TREE);
-  tree fn_name = get_identifier ("__tu_has_violation_exception");
-  tu_has_violation_exception
-    = declare_one_violation_handler_wrapper (fn_name, fn_type, v_obj_type,
-					     uint16_type_node);
-  fn_name = get_identifier ("__tu_has_violation");
-  tu_has_violation
-    = declare_one_violation_handler_wrapper (fn_name, fn_type, v_obj_type,
-					     uint16_type_node);
-}
-
-static GTY(()) tree tu_terminate_wrapper = NULL_TREE;
-
-/* Declare a noipa wrapper around the call to std::terminate */
-
-static tree
-declare_terminate_wrapper ()
-{
-  if (tu_terminate_wrapper)
-    return tu_terminate_wrapper;
+  if (tu_quick_enforce_wrapper)
+    return tu_quick_enforce_wrapper;
 
   iloc_sentinel ils (input_location);
   input_location = BUILTINS_LOCATION;
 
   tree fn_type = build_function_type_list (void_type_node, NULL_TREE);
-  if (!TREE_NOTHROW (terminate_fn))
-    fn_type = build_exception_variant (fn_type, noexcept_true_spec);
-  tree fn_name = get_identifier ("__tu_terminate_wrapper");
+  fn_type = build_exception_variant (fn_type, noexcept_true_spec);
+  tree fn_name = get_identifier ("__tu_quick_enforce_wrapper");
 
-  tu_terminate_wrapper
+  tu_quick_enforce_wrapper
     = build_lang_decl_loc (input_location, FUNCTION_DECL, fn_name, fn_type);
-  DECL_CONTEXT (tu_terminate_wrapper) = FROB_CONTEXT(global_namespace);
-  DECL_ARTIFICIAL (tu_terminate_wrapper) = true;
-  DECL_INITIAL (tu_terminate_wrapper) = error_mark_node;
+  DECL_CONTEXT (tu_quick_enforce_wrapper) = FROB_CONTEXT(global_namespace);
+  DECL_ARTIFICIAL (tu_quick_enforce_wrapper) = true;
+  DECL_INITIAL (tu_quick_enforce_wrapper) = error_mark_node;
   /* Let the start function code fill in the result decl.  */
-  DECL_RESULT (tu_terminate_wrapper) = NULL_TREE;
+  DECL_RESULT (tu_quick_enforce_wrapper) = NULL_TREE;
 
   /* Make this function internal.  */
-  TREE_PUBLIC (tu_terminate_wrapper) = false;
-  DECL_EXTERNAL (tu_terminate_wrapper) = false;
-  DECL_WEAK (tu_terminate_wrapper) = false;
+  TREE_PUBLIC (tu_quick_enforce_wrapper) = false;
+  DECL_EXTERNAL (tu_quick_enforce_wrapper) = false;
+  DECL_WEAK (tu_quick_enforce_wrapper) = false;
 
-  DECL_ATTRIBUTES (tu_terminate_wrapper)
+  DECL_ATTRIBUTES (tu_quick_enforce_wrapper)
     = tree_cons (get_identifier ("noipa"), NULL, NULL_TREE);
-  cplus_decl_attributes (&tu_terminate_wrapper,
-			 DECL_ATTRIBUTES (tu_terminate_wrapper), 0);
-  return tu_terminate_wrapper;
+  cplus_decl_attributes (&tu_quick_enforce_wrapper,
+			 DECL_ATTRIBUTES (tu_quick_enforce_wrapper), 0);
+  return tu_quick_enforce_wrapper;
 }
 
-/* Define a noipa wrapper around the call to std::terminate */
+/* Define the noipa wrapper: it just traps.  */
 
 static void
 build_terminate_wrapper ()
 {
   /* We should not be trying to build this if we never used it.  */
-  gcc_checking_assert (tu_terminate_wrapper);
+  gcc_checking_assert (tu_quick_enforce_wrapper);
 
-  start_preparsed_function (tu_terminate_wrapper,
-			    DECL_ATTRIBUTES(tu_terminate_wrapper),
+  start_preparsed_function (tu_quick_enforce_wrapper,
+			    DECL_ATTRIBUTES(tu_quick_enforce_wrapper),
 			    SF_DEFAULT | SF_PRE_PARSED);
   tree body = begin_function_body ();
   tree compound_stmt = begin_compound_stmt (BCS_FN_BODY);
-  finish_expr_stmt (build_call_a (terminate_fn, 0, nullptr));
+  finish_expr_stmt (build_call_expr_loc (BUILTINS_LOCATION,
+					 builtin_decl_explicit (BUILT_IN_TRAP),
+					 0));
   finish_return_stmt (NULL_TREE);
   finish_compound_stmt (compound_stmt);
   finish_function_body (body);
-  tu_terminate_wrapper = finish_function (false);
-  expand_or_defer_fn (tu_terminate_wrapper);
+  tu_quick_enforce_wrapper = finish_function (false);
+  expand_or_defer_fn (tu_quick_enforce_wrapper);
+}
+
+/* P2900 quick_enforce: terminate the program via __builtin_trap () -- no
+   handler is invoked.  With -fcontracts-conservative-ipa (the default) the trap
+   is emitted inside a noipa wrapper so inter-procedural analysis cannot use a
+   contract check to optimize callers, which would be incorrect when the same
+   assertion may be evaluated differently (e.g. ignore) in another TU
+   (BZ121936).  Otherwise the trap is emitted inline.  */
+
+static tree
+build_quick_enforce_reaction (location_t loc)
+{
+  if (flag_contracts_conservative_ipa)
+    return build_call_a (declare_quick_enforce_wrapper (), 0, nullptr);
+  return build_call_expr_loc (loc, builtin_decl_explicit (BUILT_IN_TRAP), 0);
 }
 
 /* Lookup a name in std::contracts, or inject it.  */
@@ -3821,235 +3825,121 @@ lookup_std_contracts_type (tree name_id)
   return res_type;
 }
 
-/* Return handle_contract_violation (), declaring it if needed.  */
 
-static tree
-declare_handle_contract_violation ()
+/* Validate a user definition of ::handle_contract_violation per
+   [basic.contract.handler] and [dcl.fct.def.replace].  Called from
+   grokfndecl when a function with this name is declared at global scope.  */
+
+void
+check_handle_contract_violation (tree fndecl)
 {
-  /* We may need to declare new types, ensure they are not considered
-     attached to a named module.  */
-  auto module_kind_override = make_temp_override
-    (module_kind, module_kind & ~(MK_PURVIEW | MK_ATTACH | MK_EXPORTING));
-  tree fnname = get_identifier ("handle_contract_violation");
-  tree viol_name = get_identifier ("contract_violation");
-  tree l = lookup_qualified_name (global_namespace, fnname,
-				  LOOK_want::HIDDEN_FRIEND);
-  for (tree f: lkp_range (l))
-    if (TREE_CODE (f) == FUNCTION_DECL)
-	{
-	  tree parms = TYPE_ARG_TYPES (TREE_TYPE (f));
-	  if (remaining_arguments (parms) != 1)
-	    continue;
-	  tree parmtype = non_reference (TREE_VALUE (parms));
-	  if (CLASS_TYPE_P (parmtype)
-	      && TYPE_IDENTIFIER (parmtype) == viol_name)
-	    return f;
-	}
+  location_t loc = DECL_SOURCE_LOCATION (fndecl);
 
-  tree violation = lookup_std_contracts_type (viol_name);
-  tree fntype = NULL_TREE;
-  tree v_obj_ref = cp_build_qualified_type (violation, TYPE_QUAL_CONST);
-  v_obj_ref = cp_build_reference_type (v_obj_ref, /*rval*/false);
-  fntype = build_function_type_list (void_type_node, v_obj_ref, NULL_TREE);
+  if (DECL_DECLARED_INLINE_P (fndecl))
+    error_at (loc, "%<::handle_contract_violation%> shall not be"
+	      " declared %<inline%>");
 
-  push_nested_namespace (global_namespace);
-  tree fndecl
-    = build_cp_library_fn_ptr ("handle_contract_violation", fntype, ECF_COLD);
-  pushdecl_namespace_level (fndecl, /*hiding*/true);
-  pop_nested_namespace (global_namespace);
+  if (module_attach_p ())
+    error_at (loc, "%<::handle_contract_violation%> shall be attached"
+	      " to the global module");
 
-  /* Build the parameter(s).  */
-  tree parms = cp_build_parm_decl (fndecl, NULL_TREE, v_obj_ref);
-  TREE_USED (parms) = true;
-  DECL_READ_P (parms) = true;
-  DECL_ARGUMENTS (fndecl) = parms;
-  return fndecl;
+  if (DECL_LANGUAGE (fndecl) != lang_cplusplus)
+    error_at (loc, "%<::handle_contract_violation%> shall have"
+	      " C++ language linkage");
+
+  tree fntype = TREE_TYPE (fndecl);
+  if (!same_type_p (TREE_TYPE (fntype), void_type_node))
+    error_at (loc, "%<::handle_contract_violation%> shall return %<void%>");
+
+  tree parms = TYPE_ARG_TYPES (fntype);
+  if (!parms || parms == void_list_node)
+    {
+      error_at (loc, "%<::handle_contract_violation%> shall have a single"
+		" parameter of type %<const std::contracts::"
+		"contract_violation&%>");
+      return;
+    }
+
+  tree parmtype = TREE_VALUE (parms);
+  tree remaining = TREE_CHAIN (parms);
+  if (remaining != void_list_node)
+    {
+      error_at (loc, "%<::handle_contract_violation%> shall have a single"
+		" parameter of type %<const std::contracts::"
+		"contract_violation&%>");
+      return;
+    }
+
+  if (!TYPE_REF_P (parmtype)
+      || TYPE_REF_IS_RVALUE (parmtype))
+    {
+      error_at (loc, "parameter of %<::handle_contract_violation%> shall be"
+		" an lvalue reference to %<const std::contracts::"
+		"contract_violation%>");
+      return;
+    }
+
+  tree reftype = TREE_TYPE (parmtype);
+  if (!CP_TYPE_CONST_P (reftype))
+    {
+      error_at (loc, "parameter of %<::handle_contract_violation%> shall be"
+		" a reference to %<const std::contracts::"
+		"contract_violation%>");
+      return;
+    }
+
+  tree viol_type = lookup_std_contracts_type (
+    get_identifier ("contract_violation"));
+  if (!same_type_ignoring_top_level_qualifiers_p (reftype, viol_type))
+    error_at (loc, "parameter of %<::handle_contract_violation%> shall be"
+	      " of type %<const std::contracts::contract_violation&%>");
 }
 
-/* Build the call to handle_contract_violation for VIOLATION.  */
+/* Emit a C-linkage alias __handle_contract_violation for the user's
+   ::handle_contract_violation, if defined in this TU.  */
 
 static void
 build_contract_handler_call (tree violation)
 {
-  tree violation_fn = declare_handle_contract_violation ();
-  tree call = build_call_n (violation_fn, 1, violation);
-  finish_expr_stmt (call);
+  if (!TARGET_SUPPORTS_ALIASES)
+    return;
+
+  tree fnname = get_identifier ("handle_contract_violation");
+  tree l = lookup_qualified_name (global_namespace, fnname,
+				  LOOK_want::HIDDEN_FRIEND);
+  tree fndecl = NULL_TREE;
+  for (tree f: lkp_range (l))
+    if (TREE_CODE (f) == FUNCTION_DECL && DECL_INITIAL (f) != NULL_TREE)
+      {
+	fndecl = f;
+	break;
+      }
+
+  if (!fndecl)
+    return;
+
+  tree alias_id = get_identifier ("__handle_contract_violation");
+  tree alias_decl = build_lang_decl (FUNCTION_DECL, alias_id,
+				     TREE_TYPE (fndecl));
+  DECL_SOURCE_LOCATION (alias_decl) = DECL_SOURCE_LOCATION (fndecl);
+  TREE_PUBLIC (alias_decl) = true;
+  DECL_EXTERNAL (alias_decl) = false;
+  SET_DECL_LANGUAGE (alias_decl, lang_c);
+  SET_DECL_ASSEMBLER_NAME (alias_decl, alias_id);
+
+  cgraph_node::create_same_body_alias (alias_decl, fndecl);
 }
 
-/* If we have emitted any contracts in this TU that will call a violation
-   handler, then emit the wrappers for the handler.  */
+/* Emit any TU-level contract infrastructure (descriptor tables, etc.).
+   Called at end of translation unit from cp_write_global_declarations.  */
 
 void
 maybe_emit_violation_handler_wrappers ()
 {
-  /* We might need the terminate wrapper, even if we do not use the violation
-     handler wrappers.  */
-  if (tu_terminate_wrapper && flag_contracts_conservative_ipa)
-    build_terminate_wrapper ();
-
-  if (!tu_has_violation && !tu_has_violation_exception)
-    return;
-
-  tree terminate_wrapper = terminate_fn;
-  if (flag_contracts_conservative_ipa)
-    terminate_wrapper = tu_terminate_wrapper;
-
-  /* tu_has_violation */
-  start_preparsed_function (tu_has_violation, NULL_TREE,
-			    SF_DEFAULT | SF_PRE_PARSED);
-  tree body = begin_function_body ();
-  tree compound_stmt = begin_compound_stmt (BCS_FN_BODY);
-  tree v = DECL_ARGUMENTS (tu_has_violation);
-  tree semantic = DECL_CHAIN (v);
-
-  /* We are going to call the handler.  */
-  build_contract_handler_call (v);
-
-  tree if_observe = begin_if_stmt ();
-  /* if (observe) return; */
-  tree cond = build2 (EQ_EXPR, uint16_type_node, semantic,
-		      build_int_cst (uint16_type_node, (uint16_t)CES_OBSERVE));
-  finish_if_stmt_cond (cond, if_observe);
-  emit_builtin_observable_checkpoint ();
-  finish_then_clause (if_observe);
-  begin_else_clause (if_observe);
-  /* else terminate.  */
-  finish_expr_stmt (build_call_a (terminate_wrapper, 0, nullptr));
-  finish_else_clause (if_observe);
-  finish_if_stmt (if_observe);
-  finish_return_stmt (NULL_TREE);
-
-  finish_compound_stmt (compound_stmt);
-  finish_function_body (body);
-  tu_has_violation = finish_function (false);
-  expand_or_defer_fn (tu_has_violation);
-
-  /* tu_has_violation_exception */
-  start_preparsed_function (tu_has_violation_exception, NULL_TREE,
-			    SF_DEFAULT | SF_PRE_PARSED);
-  body = begin_function_body ();
-  compound_stmt = begin_compound_stmt (BCS_FN_BODY);
-  v = DECL_ARGUMENTS (tu_has_violation_exception);
-  semantic = DECL_CHAIN (v);
-  location_t loc = DECL_SOURCE_LOCATION (tu_has_violation_exception);
-
-  tree a_type = strip_top_quals (non_reference (TREE_TYPE (v)));
-  tree v2 = build_decl (loc, VAR_DECL, NULL_TREE, a_type);
-  DECL_SOURCE_LOCATION (v2) = loc;
-  DECL_CONTEXT (v2) = current_function_decl;
-  DECL_ARTIFICIAL (v2) = true;
-  layout_decl (v2, 0);
-  v2 = pushdecl (v2);
-  add_decl_expr (v2);
-  tree r = cp_build_init_expr (v2, convert_from_reference (v));
-  finish_expr_stmt (r);
-  tree memb = lookup_member (a_type, get_identifier ("_M_detection_mode"),
-		     /*protect=*/1, /*want_type=*/0, tf_warning_or_error);
-  r = build_class_member_access_expr (v2, memb, NULL_TREE, false,
-				      tf_warning_or_error);
-  r = cp_build_modify_expr
-   (loc, r, NOP_EXPR,
-    build_int_cst (uint16_type_node, (uint16_t)CDM_EVAL_EXCEPTION),
-    tf_warning_or_error);
-  finish_expr_stmt (r);
-  /* We are going to call the handler.  */
-  build_contract_handler_call (v);
-
-  if_observe = begin_if_stmt ();
-  /* if (observe) return; */
-  cond = build2 (EQ_EXPR, uint16_type_node, semantic,
-		 build_int_cst (uint16_type_node, (uint16_t)CES_OBSERVE));
-  finish_if_stmt_cond (cond, if_observe);
-  emit_builtin_observable_checkpoint ();
-  finish_then_clause (if_observe);
-  begin_else_clause (if_observe);
-  /* else terminate.  */
-  finish_expr_stmt (build_call_a (terminate_wrapper, 0, nullptr));
-  finish_else_clause (if_observe);
-  finish_if_stmt (if_observe);
-  finish_return_stmt (NULL_TREE);
-  finish_compound_stmt (compound_stmt);
-  finish_function_body (body);
-  tu_has_violation_exception = finish_function (false);
-  expand_or_defer_fn (tu_has_violation_exception);
-}
-
-/* Build a layout-compatible internal version of contract_violation type.  */
-
-static tree
-get_contract_violation_fields ()
-{
-  tree fields = NULL_TREE;
-  /* Must match <contracts>:
-  class contract_violation {
-    uint16_t _M_version;
-    assertion_kind _M_assertion_kind;
-    evaluation_semantic _M_evaluation_semantic;
-    detection_mode _M_detection_mode;
-    const char* _M_comment;
-    void *_M_src_loc_ptr;
-    __vendor_ext* _M_ext;
-  };
-    If this changes, also update the initializer in
-    build_contract_violation.  */
-  const tree types[] = { uint16_type_node,
-			 uint16_type_node,
-			 uint16_type_node,
-			 uint16_type_node,
-			 const_string_type_node,
-			 ptr_type_node,
-			 ptr_type_node
-			};
- const char *names[] = { "_M_version",
-			 "_M_assertion_kind",
-			 "_M_evaluation_semantic",
-			 "_M_detection_mode",
-			 "_M_comment",
-			 "_M_src_loc_ptr",
-			 "_M_ext",
-			};
-  unsigned n = 0;
-  for (tree type : types)
-    {
-      /* finish_builtin_struct wants fields chained in reverse.  */
-      tree next = build_decl (BUILTINS_LOCATION, FIELD_DECL,
-				  get_identifier(names[n++]), type);
-      DECL_CHAIN (next) = fields;
-      fields = next;
-    }
- return fields;
-}
-
-/* Build a type to represent contract violation objects.  */
-
-static tree
-init_builtin_contract_violation_type ()
-{
-  if (builtin_contract_violation_type)
-    return builtin_contract_violation_type;
-
-  tree fields = get_contract_violation_fields ();
-
-  iloc_sentinel ils (input_location);
-  input_location = BUILTINS_LOCATION;
-  builtin_contract_violation_type = make_class_type (RECORD_TYPE);
-  finish_builtin_struct (builtin_contract_violation_type,
-			 "__builtin_contract_violation_type", fields, NULL_TREE);
-  CLASSTYPE_AS_BASE (builtin_contract_violation_type)
-    = builtin_contract_violation_type;
-  DECL_CONTEXT (TYPE_NAME (builtin_contract_violation_type))
-    = FROB_CONTEXT (global_namespace);
-  CLASSTYPE_LITERAL_P (builtin_contract_violation_type) = true;
-  CLASSTYPE_LAZY_COPY_CTOR (builtin_contract_violation_type) = true;
-  xref_basetypes (builtin_contract_violation_type, /*bases=*/NULL_TREE);
-  DECL_CONTEXT (TYPE_NAME (builtin_contract_violation_type))
-    = FROB_CONTEXT (global_namespace);
-  DECL_ARTIFICIAL (TYPE_NAME (builtin_contract_violation_type)) = true;
-  TYPE_ARTIFICIAL (builtin_contract_violation_type) = true;
-  builtin_contract_violation_type
-    = cp_build_qualified_type (builtin_contract_violation_type,
-			       TYPE_QUAL_CONST);
-  return builtin_contract_violation_type;
+  if (tu_quick_enforce_wrapper && flag_contracts_conservative_ipa)
+    build_quick_enforce_wrapper ();
+  emit_pending_weak_selectors ();
+  maybe_emit_hcv_alias ();
 }
 
 /* Early initialisation of types and functions we will use.  */
@@ -4309,7 +4199,11 @@ remap_retval (tree fndecl, tree contract)
   struct replace_tree data;
   data.from = POSTCONDITION_IDENTIFIER (contract);
   gcc_checking_assert (DECL_RESULT (fndecl));
-  data.to = DECL_RESULT (fndecl);
+  /* Read the returned object through the temporary apply_postconditions set
+     up, when it decided one was needed; otherwise straight off DECL_RESULT.  */
+  tree *temp = postcondition_retval_temps
+	       ? postcondition_retval_temps->get (fndecl) : NULL;
+  data.to = temp ? *temp : DECL_RESULT (fndecl);
   walk_tree (&CONTRACT_CONDITION (contract), remap_retval_1, &data, NULL);
 }
 
@@ -4318,8 +4212,732 @@ remap_retval (tree fndecl, tree contract)
    the caller is responsible for that.
    This is called during genericization.  */
 
-tree
-build_contract_check (tree contract)
+/* === New ABI data block infrastructure ===
+
+   The compiler emits __cxa_contract_data_block structs in .rodata and calls
+   __cxa_contract_violation_* entry points defined in libstdc++exp.
+   See bits/contracts_abi.h for the ABI specification.  */
+
+/* Data block RECORD_TYPEs.  The "basic" variant has source_location + comment
+   + message.  The "label" variant adds local_handler + label_ptr.  The
+   "query" variant adds query_function + label_ptr.  The "full" variant adds
+   local_handler + query_function + label_ptr.  */
+/* Build a RECORD_TYPE from parallel arrays of types and names.  */
+
+static tree
+build_record_type_from_arrays (const char *struct_name,
+			       const tree *types, const char **names,
+			       unsigned count)
+{
+  tree fields = NULL_TREE;
+  for (unsigned i = 0; i < count; i++)
+    {
+      tree next = build_decl (BUILTINS_LOCATION, FIELD_DECL,
+			      get_identifier (names[i]), types[i]);
+      DECL_CHAIN (next) = fields;
+      fields = next;
+    }
+
+  iloc_sentinel ils (input_location);
+  input_location = BUILTINS_LOCATION;
+  tree type = cxx_make_type (RECORD_TYPE);
+  finish_builtin_struct (type, struct_name, fields, NULL_TREE);
+  DECL_ARTIFICIAL (TYPE_NAME (type)) = true;
+  TYPE_ARTIFICIAL (type) = true;
+  type = cp_build_qualified_type (type, TYPE_QUAL_CONST);
+  return type;
+}
+
+/* Initialize the data block RECORD_TYPEs.  */
+
+static void
+init_contract_data_block_types ()
+{
+  if (contract_data_block_basic_type)
+    return;
+
+  /* Basic data block:
+     { void* descriptor, void* next,
+       const char* file, const char* function, unsigned line, unsigned column,
+       const char* comment, const char* message }  */
+  {
+    const tree types[] = {
+      ptr_type_node,		    /* descriptor */
+      ptr_type_node,		    /* next */
+      const_string_type_node,	    /* file */
+      const_string_type_node,	    /* function */
+      unsigned_type_node,	    /* line */
+      unsigned_type_node,	    /* column */
+      const_string_type_node,	    /* comment */
+      const_string_type_node,	    /* message */
+    };
+    const char *names[] = {
+      "_descriptor", "_next",
+      "_file", "_function", "_line", "_column",
+      "_comment", "_message",
+    };
+    contract_data_block_basic_type
+      = build_record_type_from_arrays ("__contract_data_block_basic",
+				       types, names, 8);
+  }
+
+  /* Label data block: basic + local_handler + label_ptr.  */
+  {
+    const tree types[] = {
+      ptr_type_node,		    /* descriptor */
+      ptr_type_node,		    /* next */
+      const_string_type_node,	    /* file */
+      const_string_type_node,	    /* function */
+      unsigned_type_node,	    /* line */
+      unsigned_type_node,	    /* column */
+      const_string_type_node,	    /* comment */
+      const_string_type_node,	    /* message */
+      ptr_type_node,		    /* local_handler */
+      ptr_type_node,		    /* label_ptr */
+    };
+    const char *names[] = {
+      "_descriptor", "_next",
+      "_file", "_function", "_line", "_column",
+      "_comment", "_message",
+      "_local_handler", "_label_ptr",
+    };
+    contract_data_block_label_type
+      = build_record_type_from_arrays ("__contract_data_block_label",
+				       types, names, 10);
+  }
+
+  /* Query data block: basic + query_function + label_ptr.  */
+  {
+    const tree types[] = {
+      ptr_type_node,		    /* descriptor */
+      ptr_type_node,		    /* next */
+      const_string_type_node,	    /* file */
+      const_string_type_node,	    /* function */
+      unsigned_type_node,	    /* line */
+      unsigned_type_node,	    /* column */
+      const_string_type_node,	    /* comment */
+      const_string_type_node,	    /* message */
+      ptr_type_node,		    /* query_function */
+      ptr_type_node,		    /* label_ptr */
+    };
+    const char *names[] = {
+      "_descriptor", "_next",
+      "_file", "_function", "_line", "_column",
+      "_comment", "_message",
+      "_query_function", "_label_ptr",
+    };
+    contract_data_block_query_type
+      = build_record_type_from_arrays ("__contract_data_block_query",
+				       types, names, 10);
+  }
+
+  /* Full data block: basic + local_handler + query_function + label_ptr.  */
+  {
+    const tree types[] = {
+      ptr_type_node,		    /* descriptor */
+      ptr_type_node,		    /* next */
+      const_string_type_node,	    /* file */
+      const_string_type_node,	    /* function */
+      unsigned_type_node,	    /* line */
+      unsigned_type_node,	    /* column */
+      const_string_type_node,	    /* comment */
+      const_string_type_node,	    /* message */
+      ptr_type_node,		    /* local_handler */
+      ptr_type_node,		    /* query_function */
+      ptr_type_node,		    /* label_ptr */
+    };
+    const char *names[] = {
+      "_descriptor", "_next",
+      "_file", "_function", "_line", "_column",
+      "_comment", "_message",
+      "_local_handler", "_query_function", "_label_ptr",
+    };
+    contract_data_block_full_type
+      = build_record_type_from_arrays ("__contract_data_block_full",
+				       types, names, 11);
+  }
+}
+
+/* Build a descriptor table RECORD_TYPE with N entries.
+   Layout: header(u8), num_entries(u8), fid[N](u8 each), pad, off[N](uintptr each).
+   Returns the type and sets *out_fields to the field list.  */
+
+static tree
+build_descriptor_table_type (const char *name, unsigned num_entries)
+{
+  unsigned num_fields = 2 + num_entries + num_entries;
+  auto_vec<tree> types (num_fields);
+  auto_vec<const char *> names (num_fields);
+
+  /* header and num_entries.  */
+  types.safe_push (unsigned_char_type_node);
+  names.safe_push ("_header");
+  types.safe_push (unsigned_char_type_node);
+  names.safe_push ("_num_entries");
+
+  /* Field IDs.  */
+  char fid_name[32];
+  for (unsigned i = 0; i < num_entries; i++)
+    {
+      snprintf (fid_name, sizeof (fid_name), "_fid_%u", i);
+      types.safe_push (unsigned_char_type_node);
+      names.safe_push (xstrdup (fid_name));
+    }
+
+  /* Offset values (uintptr_t).  GCC may add padding before these.  */
+  char off_name[32];
+  for (unsigned i = 0; i < num_entries; i++)
+    {
+      snprintf (off_name, sizeof (off_name), "_off_%u", i);
+      types.safe_push (size_type_node);
+      names.safe_push (xstrdup (off_name));
+    }
+
+  return build_record_type_from_arrays (name, types.address (),
+					names.address (), num_fields);
+}
+
+/* Get the Nth field of a RECORD_TYPE, walking DECL_CHAIN.  */
+
+static tree
+get_nth_field (tree record_type, unsigned n)
+{
+  tree f = TYPE_FIELDS (record_type);
+  for (unsigned i = 0; i < n; i++)
+    f = next_aggregate_field (DECL_CHAIN (f));
+  return f ? next_aggregate_field (f) : f;
+}
+
+/* Initialize and emit descriptor table constants for this TU.
+   Call once per TU, when contracts are first seen.  */
+
+static void
+init_contract_descriptor_tables ()
+{
+  if (contract_desc_basic_var)
+    return;
+
+  init_contract_data_block_types ();
+
+  /* Basic descriptor: 3 entries (source_location, comment, message).  */
+  contract_desc_basic_type
+    = build_descriptor_table_type ("__contract_desc_basic", 3);
+
+  /* Compute field offsets from the basic data block type.  */
+  tree db = contract_data_block_basic_type;
+  tree f_file = get_nth_field (db, 2);	   /* _file */
+  tree f_comment = get_nth_field (db, 6);  /* _comment */
+  tree f_message = get_nth_field (db, 7);  /* _message */
+
+  tree d3 = contract_desc_basic_type;
+  tree d3_f = TYPE_FIELDS (d3);
+  /* Fields: header, num_entries, fid0, fid1, fid2, off0, off1, off2.  */
+  tree d3_fields[8];
+  {
+    tree f = d3_f;
+    for (int i = 0; i < 8; i++)
+      {
+	d3_fields[i] = next_aggregate_field (f);
+	f = DECL_CHAIN (d3_fields[i]);
+      }
+  }
+
+  tree ctor = build_constructor_va
+    (d3, 8,
+     d3_fields[0], build_int_cst (unsigned_char_type_node, CXA_DESC_HEADER_BYTE),
+     d3_fields[1], build_int_cst (unsigned_char_type_node, 3),
+     d3_fields[2], build_int_cst (unsigned_char_type_node, CXA_FIELD_SOURCE_LOCATION),
+     d3_fields[3], build_int_cst (unsigned_char_type_node, CXA_FIELD_COMMENT),
+     d3_fields[4], build_int_cst (unsigned_char_type_node, CXA_FIELD_MESSAGE),
+     d3_fields[5], byte_position (f_file),
+     d3_fields[6], byte_position (f_comment),
+     d3_fields[7], byte_position (f_message));
+  TREE_CONSTANT (ctor) = true;
+  TREE_READONLY (ctor) = true;
+
+  contract_desc_basic_var
+    = contracts_tu_local_named_var (BUILTINS_LOCATION,
+				    "Lcontract_desc_basic", d3);
+  DECL_INITIAL (contract_desc_basic_var) = ctor;
+  varpool_node::finalize_decl (contract_desc_basic_var);
+  /* These descriptor tables are shared TU-local statics, finalized lazily when
+     the first contract data block in the TU is built.  That first block may
+     belong to an inline/COMDAT library function (e.g. under a catch-all
+     "kind: implicit" configuration that matches implicit assertions in
+     <contracts>' own inline code); if all such early referrers are later
+     reclaimed by symtab_remove_unreachable_nodes, the descriptor would be
+     removed too -- yet a middle-end check instrumented later in pass_ubsan can
+     still reference it, leaving a dangling reference at link time.  Force the
+     descriptors to be emitted so a late referrer always resolves.  */
+  varpool_node::get (contract_desc_basic_var)->force_output = true;
+
+  /* Label descriptor: 5 entries (source_location, comment, message,
+     local_handler, label_ptr).  */
+  contract_desc_label_type
+    = build_descriptor_table_type ("__contract_desc_label", 5);
+
+  tree db_l = contract_data_block_label_type;
+  tree fl_file = get_nth_field (db_l, 2);
+  tree fl_comment = get_nth_field (db_l, 6);
+  tree fl_message = get_nth_field (db_l, 7);
+  tree fl_handler = get_nth_field (db_l, 8);
+  tree fl_label = get_nth_field (db_l, 9);
+
+  tree d5 = contract_desc_label_type;
+  tree d5_fields[12];
+  {
+    tree f = TYPE_FIELDS (d5);
+    for (int i = 0; i < 12; i++)
+      {
+	d5_fields[i] = next_aggregate_field (f);
+	f = DECL_CHAIN (d5_fields[i]);
+      }
+  }
+
+  tree ctor5 = build_constructor_va
+    (d5, 12,
+     d5_fields[0], build_int_cst (unsigned_char_type_node, CXA_DESC_HEADER_BYTE),
+     d5_fields[1], build_int_cst (unsigned_char_type_node, 5),
+     d5_fields[2], build_int_cst (unsigned_char_type_node, CXA_FIELD_SOURCE_LOCATION),
+     d5_fields[3], build_int_cst (unsigned_char_type_node, CXA_FIELD_COMMENT),
+     d5_fields[4], build_int_cst (unsigned_char_type_node, CXA_FIELD_MESSAGE),
+     d5_fields[5], build_int_cst (unsigned_char_type_node, CXA_FIELD_LOCAL_HANDLER),
+     d5_fields[6], build_int_cst (unsigned_char_type_node, CXA_FIELD_LABEL_PTR),
+     d5_fields[7], byte_position (fl_file),
+     d5_fields[8], byte_position (fl_comment),
+     d5_fields[9], byte_position (fl_message),
+     d5_fields[10], byte_position (fl_handler),
+     d5_fields[11], byte_position (fl_label));
+  TREE_CONSTANT (ctor5) = true;
+  TREE_READONLY (ctor5) = true;
+
+  contract_desc_label_var
+    = contracts_tu_local_named_var (BUILTINS_LOCATION,
+				    "Lcontract_desc_label", d5);
+  DECL_INITIAL (contract_desc_label_var) = ctor5;
+  varpool_node::finalize_decl (contract_desc_label_var);
+  varpool_node::get (contract_desc_label_var)->force_output = true;
+
+  /* Query descriptor: 5 entries (source_location, comment, message,
+     query_function, label_ptr).  */
+  contract_desc_query_type
+    = build_descriptor_table_type ("__contract_desc_query", 5);
+
+  tree db_q = contract_data_block_query_type;
+  tree fq_file = get_nth_field (db_q, 2);
+  tree fq_comment = get_nth_field (db_q, 6);
+  tree fq_message = get_nth_field (db_q, 7);
+  tree fq_query = get_nth_field (db_q, 8);
+  tree fq_label = get_nth_field (db_q, 9);
+
+  tree dq = contract_desc_query_type;
+  tree dq_fields[12];
+  {
+    tree f = TYPE_FIELDS (dq);
+    for (int i = 0; i < 12; i++)
+      {
+	dq_fields[i] = next_aggregate_field (f);
+	f = DECL_CHAIN (dq_fields[i]);
+      }
+  }
+
+  tree ctor_q = build_constructor_va
+    (dq, 12,
+     dq_fields[0], build_int_cst (unsigned_char_type_node, CXA_DESC_HEADER_BYTE),
+     dq_fields[1], build_int_cst (unsigned_char_type_node, 5),
+     dq_fields[2], build_int_cst (unsigned_char_type_node, CXA_FIELD_SOURCE_LOCATION),
+     dq_fields[3], build_int_cst (unsigned_char_type_node, CXA_FIELD_COMMENT),
+     dq_fields[4], build_int_cst (unsigned_char_type_node, CXA_FIELD_MESSAGE),
+     dq_fields[5], build_int_cst (unsigned_char_type_node, CXA_FIELD_QUERY_FUNCTION),
+     dq_fields[6], build_int_cst (unsigned_char_type_node, CXA_FIELD_LABEL_PTR),
+     dq_fields[7], byte_position (fq_file),
+     dq_fields[8], byte_position (fq_comment),
+     dq_fields[9], byte_position (fq_message),
+     dq_fields[10], byte_position (fq_query),
+     dq_fields[11], byte_position (fq_label));
+  TREE_CONSTANT (ctor_q) = true;
+  TREE_READONLY (ctor_q) = true;
+
+  contract_desc_query_var
+    = contracts_tu_local_named_var (BUILTINS_LOCATION,
+				    "Lcontract_desc_query", dq);
+  DECL_INITIAL (contract_desc_query_var) = ctor_q;
+  varpool_node::finalize_decl (contract_desc_query_var);
+  varpool_node::get (contract_desc_query_var)->force_output = true;
+
+  /* Full descriptor: 6 entries (source_location, comment, message,
+     local_handler, query_function, label_ptr).  */
+  contract_desc_full_type
+    = build_descriptor_table_type ("__contract_desc_full", 6);
+
+  tree db_f = contract_data_block_full_type;
+  tree ff_file = get_nth_field (db_f, 2);
+  tree ff_comment = get_nth_field (db_f, 6);
+  tree ff_message = get_nth_field (db_f, 7);
+  tree ff_handler = get_nth_field (db_f, 8);
+  tree ff_query = get_nth_field (db_f, 9);
+  tree ff_label = get_nth_field (db_f, 10);
+
+  tree df = contract_desc_full_type;
+  tree df_fields[14];
+  {
+    tree f = TYPE_FIELDS (df);
+    for (int i = 0; i < 14; i++)
+      {
+	df_fields[i] = next_aggregate_field (f);
+	f = DECL_CHAIN (df_fields[i]);
+      }
+  }
+
+  tree ctor_f = build_constructor_va
+    (df, 14,
+     df_fields[0], build_int_cst (unsigned_char_type_node, CXA_DESC_HEADER_BYTE),
+     df_fields[1], build_int_cst (unsigned_char_type_node, 6),
+     df_fields[2], build_int_cst (unsigned_char_type_node, CXA_FIELD_SOURCE_LOCATION),
+     df_fields[3], build_int_cst (unsigned_char_type_node, CXA_FIELD_COMMENT),
+     df_fields[4], build_int_cst (unsigned_char_type_node, CXA_FIELD_MESSAGE),
+     df_fields[5], build_int_cst (unsigned_char_type_node, CXA_FIELD_LOCAL_HANDLER),
+     df_fields[6], build_int_cst (unsigned_char_type_node, CXA_FIELD_QUERY_FUNCTION),
+     df_fields[7], build_int_cst (unsigned_char_type_node, CXA_FIELD_LABEL_PTR),
+     df_fields[8], byte_position (ff_file),
+     df_fields[9], byte_position (ff_comment),
+     df_fields[10], byte_position (ff_message),
+     df_fields[11], byte_position (ff_handler),
+     df_fields[12], byte_position (ff_query),
+     df_fields[13], byte_position (ff_label));
+  TREE_CONSTANT (ctor_f) = true;
+  TREE_READONLY (ctor_f) = true;
+
+  contract_desc_full_var
+    = contracts_tu_local_named_var (BUILTINS_LOCATION,
+				    "Lcontract_desc_full", df);
+  DECL_INITIAL (contract_desc_full_var) = ctor_f;
+  varpool_node::finalize_decl (contract_desc_full_var);
+  varpool_node::get (contract_desc_full_var)->force_output = true;
+}
+
+/* Build a data block constructor for CONTRACT.
+   Returns a tree for the constructor and sets *out_type to the type used.  */
+
+static tree
+build_contract_data_block_ctor (tree contract, tree *out_type)
+{
+  init_contract_descriptor_tables ();
+
+  location_t loc = EXPR_LOCATION (contract);
+
+  /* Determine if this assertion has a label with facets needing runtime data.  */
+  tree label = CONTRACT_LABEL (contract);
+  bool has_label = (label && label != error_mark_node
+		    && TREE_TYPE (label)
+		    && !type_dependent_expression_p (label));
+  bool has_handler = false;
+  bool has_query = false;
+  tree label_ptr_val = build_zero_cst (ptr_type_node);
+  tree local_handler_val = build_zero_cst (ptr_type_node);
+  tree query_function_val = build_zero_cst (ptr_type_node);
+
+  if (has_label)
+    {
+      /* Must match the key resolve_contract_label used.  */
+      tree label_type = TYPE_MAIN_VARIANT (TREE_TYPE (label));
+      if (local_violation_trampoline_map && VAR_P (label))
+	{
+	  tree *trampoline_p = local_violation_trampoline_map->get (label_type);
+	  if (trampoline_p)
+	    {
+	      has_handler = true;
+	      label_ptr_val = build_address (label);
+	      local_handler_val = build_address (*trampoline_p);
+	    }
+	}
+      if (query_trampoline_map && VAR_P (label))
+	{
+	  tree *trampoline_p = query_trampoline_map->get (label_type);
+	  if (trampoline_p)
+	    {
+	      has_query = true;
+	      if (!has_handler)
+		label_ptr_val = build_address (label);
+	      query_function_val = build_address (*trampoline_p);
+	    }
+	}
+    }
+
+  /* Select block type and descriptor.  */
+  tree block_type;
+  tree desc_var;
+  unsigned nfields;
+
+  if (has_handler && has_query)
+    {
+      block_type = contract_data_block_full_type;
+      desc_var = contract_desc_full_var;
+      nfields = 11;
+    }
+  else if (has_handler)
+    {
+      block_type = contract_data_block_label_type;
+      desc_var = contract_desc_label_var;
+      nfields = 10;
+    }
+  else if (has_query)
+    {
+      block_type = contract_data_block_query_type;
+      desc_var = contract_desc_query_var;
+      nfields = 10;
+    }
+  else
+    {
+      block_type = contract_data_block_basic_type;
+      desc_var = contract_desc_basic_var;
+      nfields = 8;
+    }
+
+  /* Get source location components.  */
+  tree fndecl = current_function_decl;
+  if (DECL_IS_PRE_FN_P (fndecl) || DECL_IS_POST_FN_P (fndecl))
+    fndecl = get_orig_for_outlined (fndecl);
+  if (DECL_IS_WRAPPER_FN_P (fndecl))
+    fndecl = get_orig_func_for_wrapper (fndecl);
+
+  const char *file = LOCATION_FILE (loc);
+  if (!file)
+    file = "";
+  tree file_str = build_string_literal (file);
+
+  const char *funcname = "";
+  if (fndecl)
+    funcname = cxx_printable_name (fndecl, 2);
+  tree func_str = build_string_literal (funcname);
+
+  tree line_val = build_int_cst (unsigned_type_node, LOCATION_LINE (loc));
+  tree col_val = build_int_cst (unsigned_type_node, LOCATION_COLUMN (loc));
+
+  tree comment = CONTRACT_COMMENT (contract);
+  if (!comment)
+    comment = build_string_literal ("");
+
+  tree message = CONTRACT_MESSAGE (contract);
+  if (message)
+    message = build_string_literal (TREE_STRING_LENGTH (message),
+				    TREE_STRING_POINTER (message));
+  else
+    message = build_zero_cst (const_string_type_node);
+
+  /* Build the descriptor pointer.  */
+  tree desc_ptr = build_address (desc_var);
+
+  /* Build the constructor.  */
+  tree fields[11];
+  {
+    tree f = TYPE_FIELDS (block_type);
+    for (unsigned i = 0; i < nfields; i++)
+      {
+	fields[i] = next_aggregate_field (f);
+	f = DECL_CHAIN (fields[i]);
+      }
+  }
+
+  tree ctor;
+  if (has_handler && has_query)
+    ctor = build_constructor_va
+      (block_type, 11,
+       fields[0], desc_ptr,
+       fields[1], build_zero_cst (ptr_type_node),  /* next = null */
+       fields[2], file_str,
+       fields[3], func_str,
+       fields[4], line_val,
+       fields[5], col_val,
+       fields[6], comment,
+       fields[7], message,
+       fields[8], local_handler_val,
+       fields[9], query_function_val,
+       fields[10], label_ptr_val);
+  else if (has_handler)
+    ctor = build_constructor_va
+      (block_type, 10,
+       fields[0], desc_ptr,
+       fields[1], build_zero_cst (ptr_type_node),  /* next = null */
+       fields[2], file_str,
+       fields[3], func_str,
+       fields[4], line_val,
+       fields[5], col_val,
+       fields[6], comment,
+       fields[7], message,
+       fields[8], local_handler_val,
+       fields[9], label_ptr_val);
+  else if (has_query)
+    ctor = build_constructor_va
+      (block_type, 10,
+       fields[0], desc_ptr,
+       fields[1], build_zero_cst (ptr_type_node),  /* next = null */
+       fields[2], file_str,
+       fields[3], func_str,
+       fields[4], line_val,
+       fields[5], col_val,
+       fields[6], comment,
+       fields[7], message,
+       fields[8], query_function_val,
+       fields[9], label_ptr_val);
+  else
+    ctor = build_constructor_va
+      (block_type, 8,
+       fields[0], desc_ptr,
+       fields[1], build_zero_cst (ptr_type_node),  /* next = null */
+       fields[2], file_str,
+       fields[3], func_str,
+       fields[4], line_val,
+       fields[5], col_val,
+       fields[6], comment,
+       fields[7], message);
+
+  TREE_READONLY (ctor) = true;
+  TREE_CONSTANT (ctor) = true;
+
+  *out_type = block_type;
+  return ctor;
+}
+
+/* Create a read-only data block constant.  */
+
+static tree
+build_contract_data_block_constant (tree ctor, tree block_type, tree contract)
+{
+  tree var = contracts_tu_local_named_var (EXPR_LOCATION (contract),
+					  "Lcontract_data", block_type);
+  DECL_INITIAL (var) = ctor;
+  varpool_node::finalize_decl (var);
+  return var;
+}
+
+/* Return the entry point name for the given combination.  */
+
+static const char *
+get_cxa_entry_point_name (contract_assertion_kind kind,
+			  contract_evaluation_semantic semantic,
+			  int detection_mode,
+			  bool is_noexcept)
+{
+  const char *kind_str;
+  switch (kind)
+    {
+    case CAK_PRE: kind_str = "pre"; break;
+    case CAK_POST: kind_str = "post"; break;
+    case CAK_ASSERT: kind_str = "assert"; break;
+    case CAK_POST_CAPTURE: kind_str = "post_capture"; break;
+    case CAK_IMPLICIT: kind_str = "implicit"; break;
+    default: gcc_unreachable ();
+    }
+
+  const char *sem_str;
+  switch (semantic)
+    {
+    case CES_ENFORCE: sem_str = "enforce"; break;
+    case CES_OBSERVE: sem_str = "observe"; break;
+    case CES_NOEXCEPT_ENFORCE: sem_str = "noexcept_enforce"; break;
+    case CES_NOEXCEPT_OBSERVE: sem_str = "noexcept_observe"; break;
+    default: gcc_unreachable ();
+    }
+
+  const char *mode_str;
+  switch (detection_mode)
+    {
+    case CDM_PREDICATE_FALSE: mode_str = "pf"; break;
+    case CDM_EVAL_EXCEPTION: mode_str = "ex"; break;
+    default: gcc_unreachable ();
+    }
+
+  char buf[128];
+  if (is_noexcept)
+    snprintf (buf, sizeof (buf),
+	      "__cxa_contract_violation_%s_%s_%s_noexcept",
+	      kind_str, sem_str, mode_str);
+  else
+    snprintf (buf, sizeof (buf),
+	      "__cxa_contract_violation_%s_%s_%s",
+	      kind_str, sem_str, mode_str);
+
+  return ggc_strdup (buf);
+}
+
+/* Declare (or return cached) a __cxa_contract_violation_* entry point.  */
+
+static tree
+declare_cxa_entry_point (contract_assertion_kind kind,
+			 contract_evaluation_semantic semantic,
+			 int detection_mode,
+			 bool is_noexcept)
+{
+  const char *name = get_cxa_entry_point_name (kind, semantic,
+					       detection_mode, is_noexcept);
+
+  if (!cxa_entry_point_cache)
+    cxa_entry_point_cache = hash_map<nofree_string_hash, tree>::create_ggc (16);
+
+  tree *cached = cxa_entry_point_cache->get (name);
+  if (cached)
+    return *cached;
+
+  bool is_noreturn = (semantic == CES_ENFORCE
+		      || semantic == CES_NOEXCEPT_ENFORCE);
+  tree fntype = build_function_type_list (void_type_node,
+					  ptr_type_node, NULL_TREE);
+  if (is_noexcept)
+    fntype = build_exception_variant (fntype, NULL_TREE);
+  tree fndecl = build_lang_decl (FUNCTION_DECL,
+				 get_identifier (name), fntype);
+  SET_DECL_LANGUAGE (fndecl, lang_c);
+  TREE_PUBLIC (fndecl) = true;
+  DECL_EXTERNAL (fndecl) = true;
+  DECL_ARTIFICIAL (fndecl) = true;
+  if (is_noreturn)
+    TREE_THIS_VOLATILE (fndecl) = true;
+
+  tree parms = build_decl (BUILTINS_LOCATION, PARM_DECL,
+			   NULL_TREE, ptr_type_node);
+  DECL_CONTEXT (parms) = fndecl;
+  DECL_ARGUMENTS (fndecl) = parms;
+
+  cxa_entry_point_cache->put (name, fndecl);
+  return fndecl;
+}
+
+/* ------------------------------------------------------------------------
+   Bypassing a rethrowing local violation handler (quality of
+   implementation, -fcontract-bypass-rethrowing-local-handler).
+
+   A P3400 local violation handler that responds to an evaluation_exception
+   detection by rethrowing the in-flight exception makes the try/catch we wrap
+   around a possibly-throwing predicate pure overhead: the exception is caught
+   only to be handed to a handler that throws it straight back out.  This
+   analysis recognizes that shape so the caller can skip emitting the
+   try/catch and let the predicate's exception propagate on its own.
+
+   Equivalence rests on the local handler running before the global one and
+   short-circuiting it (libcontracts/dispatch.c): if the local handler
+   rethrows, nothing else observable happens between the catch and the
+   rethrow, and no violation is ever reported.  It holds only for the enforce
+   and observe semantics -- quick_enforce calls no handler, and the D4298
+   noexcept_* semantics exist precisely to guarantee nothing propagates.
+
+   The walk follows calls, which is what lets it see through delegation: a
+   handler that calls a helper whose body is just `throw;', and the
+   __combined_label handler that forwards to the component labels, both come
+   out of the same mechanism rather than being special-cased.  Following a
+   call needs both possible answers -- the callee always rethrows, or it
+   always returns having done nothing -- because in the second case the walk
+   has to carry on in the caller.  For a combined label that means the
+   optimization applies when the rethrowing component is reached without any
+   earlier component doing anything at all, and not otherwise, which is
+   exactly the condition under which skipping the handler is sound.
+
+   Everything here is conservative: any construct the walk does not model
+   makes it answer "no", leaving the try/catch in place.  Keeping the whole
+   analysis behind one predicate lets it grow more capable without spreading
+   through the emitter.
+   ------------------------------------------------------------------------ */
+
 {
   contract_evaluation_semantic semantic = get_evaluation_semantic (contract);
   bool quick = false;
@@ -4354,11 +4972,8 @@ build_contract_check (tree contract)
 	return NULL_TREE;
     }
 
-  tree terminate_wrapper = terminate_fn;
-  if (flag_contracts_conservative_ipa)
-    terminate_wrapper = declare_terminate_wrapper ();
-  if (calls_handler)
-    declare_violation_handler_wrappers ();
+  /* Determine the assertion kind for entry point selection.  */
+  contract_assertion_kind kind = get_contract_assertion_kind (contract);
 
   bool check_might_throw = (flag_exceptions
 			    && !expr_noexcept_p (condition, tf_none));
@@ -4372,25 +4987,32 @@ build_contract_check (tree contract)
     emit_builtin_observable_checkpoint ();
   tree cond = build_x_unary_op (loc, TRUTH_NOT_EXPR, condition, NULL_TREE,
 				tf_warning_or_error);
-  tree violation;
-  bool viol_is_var = false;
-  if (quick)
-    /* We will not be calling a handler.  */
-    violation = build_zero_cst (nullptr_type_node);
-  else
+
+  tree data_addr = NULL_TREE;
+  if (!quick && calls_handler)
     {
-      /* Build a violation object, with the contract settings.  */
-      tree ctor = build_contract_violation_ctor (contract);
-      gcc_checking_assert (TREE_CONSTANT (ctor));
-      violation = build_contract_violation_constant (ctor, contract);
-      violation = build_address (violation);
+	  /* Build a data block for the violation.  */
+	  tree block_type;
+	  tree ctor = build_contract_data_block_ctor (contract, &block_type);
+	  tree data_var = build_contract_data_block_constant (ctor, block_type,
+							      contract);
+	  data_addr = build_address (data_var);
     }
 
-  tree s_const = build_int_cst (uint16_type_node, semantic);
-  /* So now do we need a try-catch?  */
+  /* Get the entry points we will call.  */
+  tree entry_pf = NULL_TREE;
+  tree entry_ex = NULL_TREE;
+  if (calls_handler)
+    {
+      entry_pf = declare_cxa_entry_point (kind, semantic,
+					  CDM_PREDICATE_FALSE, is_noexcept);
+      if (check_might_throw)
+	entry_ex = declare_cxa_entry_point (kind, semantic,
+					    CDM_EVAL_EXCEPTION, is_noexcept);
+    }
+
   if (check_might_throw)
     {
-      /* This will hold the computed condition.  */
       tree check_failed = build_decl (loc, VAR_DECL, NULL, boolean_type_node);
       DECL_ARTIFICIAL (check_failed) = true;
       DECL_IGNORED_P (check_failed) = true;
@@ -4406,34 +5028,13 @@ build_contract_check (tree contract)
       tree handler = begin_handler ();
       finish_handler_parms (NULL_TREE, handler); /* catch (...) */
       if (quick)
-	finish_expr_stmt (build_call_a (terminate_wrapper, 0, nullptr));
+	finish_expr_stmt (build_quick_enforce_reaction (loc));
       else
 	{
-	  if (viol_is_var)
-	    {
-	      /* We can update the detection mode here.  */
-	      tree memb
-		= lookup_member (builtin_contract_violation_type,
-				 get_identifier ("_M_detection_mode"),
-				 1, 0, tf_warning_or_error);
-	      tree r = cp_build_indirect_ref (loc, violation, RO_UNARY_STAR,
-					      tf_warning_or_error);
-	      r = build_class_member_access_expr (r, memb, NULL_TREE, false,
-						  tf_warning_or_error);
-	      r = cp_build_modify_expr
-		(loc, r, NOP_EXPR,
-		 build_int_cst (uint16_type_node, (uint16_t)CDM_EVAL_EXCEPTION),
-		 tf_warning_or_error);
-	      finish_expr_stmt (r);
-	      finish_expr_stmt (build_call_n (tu_has_violation, 2,
-					      violation, s_const));
-	    }
-	  else
-	    /* We need to make a copy of the violation object to update.  */
-	    finish_expr_stmt (build_call_n (tu_has_violation_exception, 2,
-					    violation, s_const));
-	  /* If we reach here, we have handled the exception thrown and do not
-	     need further action.  */
+	  /* Call the _ex variant with the SAME data block.
+	     Detection mode (evaluation_exception) is encoded in the entry
+	     point name, not the data.  */
+	  finish_expr_stmt (build_call_n (entry_ex, 1, data_addr));
 	  tree e = cp_build_modify_expr (loc, check_failed, NOP_EXPR,
 					 boolean_false_node,
 					 tf_warning_or_error);
@@ -4448,15 +5049,36 @@ build_contract_check (tree contract)
   tree do_check = begin_if_stmt ();
   finish_if_stmt_cond (cond, do_check);
   if (quick)
-    finish_expr_stmt (build_call_a (terminate_wrapper, 0, nullptr));
+    finish_expr_stmt (build_quick_enforce_reaction (loc));
   else
-    finish_expr_stmt (build_call_n (tu_has_violation, 2, violation, s_const));
+    {
+      finish_expr_stmt (build_call_n (entry_pf, 1, data_addr));
+      if (semantic == CES_OBSERVE)
+	emit_builtin_observable_checkpoint ();
+    }
   finish_then_clause (do_check);
   finish_if_stmt (do_check);
 
   TREE_SIDE_EFFECTS (cc_bind) = true;
   BIND_EXPR_BODY (cc_bind) = pop_stmt_list (BIND_EXPR_BODY (cc_bind));
   return cc_bind;
+}
+
+static const char *
+contract_dynamic_name (const_tree contract)
+{
+  tree d = CONTRACT_DYNAMIC (contract);
+  if (!d)
+    return NULL;
+  return IDENTIFIER_POINTER (TREE_PURPOSE (d));
+}
+
+static unsigned char
+contract_dynamic_linkage (const_tree contract)
+{
+  tree d = CONTRACT_DYNAMIC (contract);
+  gcc_checking_assert (d);
+  return (unsigned char) (tree_to_uhwi (TREE_VALUE (d)) >> 1);
 }
 
 #include "gt-cp-contracts.h"

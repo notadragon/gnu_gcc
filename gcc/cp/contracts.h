@@ -202,6 +202,7 @@ extern bool emit_contract_wrapper_func		(bool);
 extern void maybe_emit_violation_handler_wrappers (void);
 
 extern tree build_contract_check		(tree);
+extern void check_handle_contract_violation	(tree);
 
 /* Test if EXP is a contract const wrapper node.  */
 
@@ -252,5 +253,50 @@ contract_terminating_p (const_tree contract)
   return (get_evaluation_semantic (contract) == CES_ENFORCE
 	  || get_evaluation_semantic (contract) == CES_QUICK);
 }
+
+/* Contract data-block ABI constants.
+
+   THIS IS A MIRROR of libcontracts/contracts-abi.h, which is the source of
+   truth.  It cannot be included here: libcontracts is a target library built
+   as a separate unit, and the compiler must not depend on its headers.  So the
+   values are restated, and changing one side means changing both.
+
+   The names are what makes the mirror visible.  Spelled as bare hex in the
+   descriptor-table initializers -- `0x01`, `0x02`, ... -- these values would
+   have nothing to grep for on the compiler side while the runtime names every
+   one of them, so a renumbering there would leave no trace here.  It is a
+   mirror, not a sync: nothing mechanically checks the two agree.  */
+
+/* Field ids in a contract data block.  __cxa_field_id_t.  */
+enum cxa_field_id {
+  CXA_FIELD_SOURCE_LOCATION	= 0x01,
+  CXA_FIELD_COMMENT		= 0x02,
+  CXA_FIELD_MESSAGE		= 0x03,
+  CXA_FIELD_LOCAL_HANDLER	= 0x04,
+  CXA_FIELD_QUERY_FUNCTION	= 0x05,
+  CXA_FIELD_LABEL_PTR		= 0x06,
+  CXA_FIELD_ASSERTION_KIND	= 0x07,
+  CXA_FIELD_EVALUATION_SEMANTIC = 0x08,
+  CXA_FIELD_DETECTION_MODE	= 0x09,
+  CXA_FIELD_EXCEPTION_PTR	= 0x0A,
+  CXA_FIELD_REPORT		= 0x0B,
+  CXA_FIELD_EXTENDED		= 0x40
+};
+
+/* Producer ids.  __cxa_vendor_id_t.  */
+enum cxa_vendor_id {
+  CXA_VENDOR_GENERIC = 0x0,
+  CXA_VENDOR_GCC     = 0x1,
+  CXA_VENDOR_CLANG   = 0x2,
+  CXA_VENDOR_MSVC    = 0x3
+};
+
+/* The version nibble of a descriptor-table header byte.  */
+#define CXA_DESC_VERSION 1
+
+/* The header byte of a descriptor table: version in the high nibble, producer
+   in the low one.  */
+#define CXA_DESC_HEADER_BYTE \
+  ((CXA_DESC_VERSION << 4) | CXA_VENDOR_GCC)
 
 #endif /* ! GCC_CP_CONTRACT_H */
