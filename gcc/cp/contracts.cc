@@ -723,6 +723,80 @@ fill_query_groups (contract_query *q, tree contract,
 /* Does LABEL have a compute_semantic P3400 facet?  Used by the P3595 dynamic-
    dispatch path to decide whether the semantic map is the identity.  */
 
+static bool
+label_has_compute_semantic (tree label)
+{
+  if (!label || label == error_mark_node
+      || !TREE_TYPE (label) || !CLASS_TYPE_P (TREE_TYPE (label)))
+    return false;
+  tree fn = lookup_member (TREE_TYPE (label),
+			   get_identifier ("compute_semantic"),
+			   /*protect=*/0, /*want_type=*/false, tf_none);
+  return fn && fn != error_mark_node;
+}
+
+/* Core of the compute_semantic P3400 facet: apply LABEL's compute_semantic to
+   SEM, if present.  Sets *IN_ALLOWED to whether the (possibly transformed)
+   result lies within ALLOWED_MASK.  Returns the raw computed value when the
+   facet is present, else SEM unchanged (with *IN_ALLOWED true).  */
+
+static uint16_t
+compute_semantic_core (tree label, uint16_t sem, uint16_t allowed_mask,
+		       bool *in_allowed)
+{
+  *in_allowed = true;
+  if (!label || label == error_mark_node)
+    return sem;
+  tree cs_result = call_label_method (label,
+				      get_identifier ("compute_semantic"),
+				      sem);
+  if (cs_result && TREE_CODE (cs_result) == INTEGER_CST)
+    {
+      uint16_t computed = (uint16_t) tree_to_uhwi (cs_result);
+      *in_allowed = (allowed_mask & (1 << computed)) != 0;
+      return computed;
+    }
+  return sem;
+}
+
+/* Apply the compute_semantic P3400 facet to SEM, if present on LABEL.
+   Returns the (possibly transformed) semantic.  A result outside the allowed
+   set is a compile-time error (the compile-time-resolved path).  */
+
+static uint16_t
+apply_compute_semantic (tree label, uint16_t sem, uint16_t allowed_mask,
+			location_t loc)
+{
+  bool in_allowed;
+  uint16_t computed = compute_semantic_core (label, sem, allowed_mask,
+					     &in_allowed);
+  if (in_allowed)
+    return computed;
+  /* A compute_semantic result outside the allowed set is an error --
+     including "assume" when -fcontracts-allow-assume was not given, since
+     the flag gate keeps assume out of the set entirely.  */
+  error_at (loc, "%<compute_semantic%> result is not in the "
+	    "allowed evaluation semantics");
+  return sem;
+}
+
+/* Like apply_compute_semantic, but for the P3595 dynamic-dispatch path: when
+   the compute_semantic result lands outside the allowed set, return
+   CES_INVALID (the sentinel that stage 2 turns into a runtime enforced
+   violation) instead of issuing a compile-time error.  */
+
+static uint16_t
+apply_compute_semantic_value (tree label, uint16_t sem, uint16_t allowed_mask)
+{
+  bool in_allowed;
+  uint16_t computed = compute_semantic_core (label, sem, allowed_mask,
+					     &in_allowed);
+  return in_allowed ? computed : (uint16_t) CES_INVALID;
+}
+
+/* Lazily resolve the callee-side semantic for CONTRACT.  Uses the runtime
+   slot when !IN_CE, the constexpr slot when IN_CE.  Caches the result.  */
+
 contract_evaluation_semantic
 ensure_evaluation_semantic (tree contract, tree fndecl, bool in_ce)
 {
