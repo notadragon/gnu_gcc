@@ -1318,9 +1318,19 @@ c_common_post_options (const char **pfilename)
   SET_OPTION_IF_UNSET (&global_options, &global_options_set,
 		       flag_range_for_ext_temps, cxx_dialect >= cxx23);
 
-  /* Contracts are in C++26.  */
-  SET_OPTION_IF_UNSET (&global_options, &global_options_set,
-		       flag_contracts, cxx_dialect >= cxx26);
+  /* Contracts are in C++26, so C++26 mode enables -fcontracts.  Only ever turn
+     it on here -- never force it off -- so the LangEnabledBy implications from
+     the per-paper sub-flags (each -fcontracts-pNNNN implies -fcontracts, and
+     -fcontracts-p3850 implies the individual paper flags; see c.opt) are
+     preserved in pre-C++26 dialects.  Those auto-handlers run during option
+     handling and do not mark flag_contracts as explicitly set, so a plain
+     SET_OPTION_IF_UNSET (..., cxx_dialect >= cxx26) here would clobber them
+     back to 0 for -std=c++23 &c.  An explicit -fno-contracts still wins (it
+     marks the option set, which both this guard and the auto-handlers
+     honor).  */
+  if (cxx_dialect >= cxx26)
+    SET_OPTION_IF_UNSET (&global_options, &global_options_set,
+			 flag_contracts, true);
 
   /* EnabledBy unfortunately can't specify value to use if set and
      LangEnabledBy can't specify multiple options with &&.  For -Wunused
