@@ -3641,7 +3641,7 @@ compute_caller_semantic_tuple (tree fndecl, location_t caller_loc,
    will do the contracts check required around a CALL to FNDECL.  */
 
 tree
-maybe_contract_wrap_call (tree fndecl, tree call)
+maybe_contract_wrap_call (tree fndecl, tree call, bool is_virtual_dispatch)
 {
   /* We can be called from build_cxx_call without a known callee.  */
   if (!fndecl)
@@ -3722,27 +3722,100 @@ define_one_contract_wrapper_func (tree fndecl, tree wrapdecl)
     return true;
 
   gcc_checking_assert (!DECL_HAS_CONTRACTS_P (wrapdecl));
-  /* We check postconditions if postcondition checks are enabled for clients.
-    We should not get here unless there are some checks to make.  */
-  bool check_post = flag_contract_client_check > 1;
+
+  /* This wrapper is about to copy FNDECL's contracts and emit checks from
+     them, and it is the one reader of those contracts that does not need
+     FNDECL to have a definition: a pure virtual has none, and neither does a
+     declaration-only template reached by a P3595 caller-side check.  For
+     either, nothing has substituted them yet -- that normally happens when the
+     definition is instantiated -- so the copy below would be the pattern's own
+     dependent tree.  A no-op for everything else.
+
+     DECL_ORIGIN, to match what the contracts are actually read from below: for
+     a wrapper around a CDTOR clone that is the original, not the clone.  */
+  maybe_instantiate_contracts (DECL_ORIGIN (fndecl));
+
+  bool is_virtual = (DECL_IOBJ_MEMBER_FUNCTION_P (fndecl)
+		     && DECL_VIRTUAL_P (fndecl));
+
+  /* For virtual functions, always include postconditions -- the wrapper uses
+     callee-side semantics (P3097).  For non-virtual, check whether any
+     postcondition is active caller-side according to this wrapper's stored
+     caller-semantic tuple.  Positions are counted over the full contract
+     list, matching compute_caller_semantic_tuple / copy_and_remap_contracts.  */
+  bool check_post = is_virtual;
+  if (!check_post)
+    {
+      tree specs = get_fn_contract_specifiers (DECL_ORIGIN (fndecl));
+      unsigned nspecs = specs ? (unsigned) TREE_VEC_LENGTH (specs) : 0;
+      for (unsigned position = 0; position < nspecs; position++)
+	{
+	  tree contract = TREE_VEC_ELT (specs, position);
+	  if (!POSTCONDITION_P (contract))
+	    continue;
+	  /* A dynamic postcondition (descriptor present) must be checked even
+	     when its compile-time default is ignore/assume -- the selector may
+	     return a checking semantic at run time.  Mirrors the activeness
+	     forcing in maybe_contract_wrap_call.  */
+	  if (get_wrapper_dyn_at (wrapdecl, position)
+	      || !contract_semantic_emits_no_check
+		    (get_wrapper_tuple_at (wrapdecl, position)))
+	    {
+	      check_post = true;
+	      break;
+	    }
+	}
+    }
+
   /* For wrappers on CDTORs we need to refer to the original contracts,
      when the wrapper is around a clone.  */
-  set_fn_contract_specifiers ( wrapdecl,
-		      copy_and_remap_contracts (wrapdecl, DECL_ORIGIN (fndecl),
-						check_post? cmk_all : cmk_pre));
+  set_fn_contract_specifiers (wrapdecl,
+		    copy_and_remap_contracts (wrapdecl, DECL_ORIGIN (fndecl),
+					     check_post ? cmk_all : cmk_pre));
+
+  /* D4298: unlike build_contract_condition_function's outlined .pre/.post
+     functions (which contain nothing but contract-check code), WRAPDECL
+     also calls through to FNDECL's real implementation -- code with no
+     relationship to contract-evaluation semantics at all.  Marking
+     WRAPDECL noexcept purely because its checked contracts are all
+     nonthrowing would incorrectly also force termination on a legitimate
+     exception thrown by that implementation.  WRAPDECL's type already
+     inherits FNDECL's exception specification verbatim (in
+     build_contract_wrapper_function), so it is noexcept here if and only
+     if FNDECL itself is -- no additional marking based on contract
+     semantics is applied.  */
 
   start_preparsed_function (wrapdecl, /*DECL_ATTRIBUTES*/NULL_TREE,
 			    SF_DEFAULT | SF_PRE_PARSED);
   tree body = begin_function_body ();
   tree compound_stmt = begin_compound_stmt (BCS_FN_BODY);
 
-  vec<tree, va_gc> * args = build_arg_list (wrapdecl);
+  vec<tree, va_gc> *args = build_arg_list (wrapdecl);
 
-  /* We do not support contracts on virtual functions yet.  */
-  gcc_checking_assert (!DECL_IOBJ_MEMBER_FUNCTION_P (fndecl)
-		       || !DECL_VIRTUAL_P (fndecl));
+  /* If this is a virtual member function, dispatch through the vtable so
+     that the final overrider's callee-side contracts are checked (P3097
+     two-source model).  Otherwise, call the function directly.  */
+  tree fn = fndecl;
+  if (is_virtual)
+    {
+      tree *class_ptr = args->begin ();
+      gcc_checking_assert (class_ptr);
 
-  tree call = build_thunk_like_call (fndecl, args->length (), args->address ());
+      tree binfo = lookup_base (TREE_TYPE (TREE_TYPE (*class_ptr)),
+				DECL_CONTEXT (fndecl),
+				ba_any, NULL, tf_warning_or_error);
+      gcc_checking_assert (binfo && binfo != error_mark_node);
+
+      *class_ptr = build_base_path (PLUS_EXPR, *class_ptr, binfo, 1,
+				    tf_warning_or_error);
+      if (TREE_SIDE_EFFECTS (*class_ptr))
+	*class_ptr = save_expr (*class_ptr);
+      tree t = build_pointer_type (TREE_TYPE (fndecl));
+      fn = build_vfn_ref (*class_ptr, DECL_VINDEX (fndecl));
+      TREE_TYPE (fn) = t;
+    }
+
+  tree call = build_thunk_like_call (fn, args->length (), args->address ());
 
   finish_return_stmt (call);
 
@@ -3751,6 +3824,41 @@ define_one_contract_wrapper_func (tree fndecl, tree wrapdecl)
   expand_or_defer_fn (finish_function (/*inline_p=*/false));
   return true;
 }
+
+/* On-demand definition of a contract wrapper's body.  Contract wrappers are
+   normally defined at end of TU (emit_contract_wrapper_func); the constexpr
+   evaluator calls this to materialize a constexpr wrapper's body the first time
+   a constant evaluation needs it -- otherwise a constexpr virtual (or
+   caller-side) function carrying a contract would be "used before its
+   definition" in a constant expression.  Returns true if WRAPDECL is (now or
+   already) defined.  */
+
+bool
+maybe_define_contract_wrapper (tree wrapdecl)
+{
+  if (!wrapdecl || !DECL_CONTRACT_WRAPPER (wrapdecl))
+    return false;
+  if (DECL_INITIAL (wrapdecl) && DECL_INITIAL (wrapdecl) != error_mark_node)
+    return true;
+  tree fndecl = get_orig_func_for_wrapper (wrapdecl);
+  if (!fndecl || fndecl == error_mark_node)
+    return false;
+  return define_one_contract_wrapper_func (fndecl, wrapdecl);
+}
+
+/* Map traversal callback: FNDECL maps to a TREE_LIST of (tuple, wrapdecl)
+   pairs (see decl_wrapper_fn).  Define each wrapper that wraps FNDECL.  */
+
+bool
+define_contract_wrapper_func (const tree& fndecl, const tree& wrappers, void*)
+{
+  for (tree p = wrappers; p; p = TREE_CHAIN (p))
+    define_one_contract_wrapper_func (fndecl, TREE_VALUE (p));
+  return true;
+}
+
+/* Return the total number of (tuple, wrapper) pairs recorded across all
+   callees in decl_wrapper_fn.  A single callee may have several wrappers.  */
 
 static size_t
 count_wrapper_pairs (void)

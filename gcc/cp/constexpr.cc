@@ -4896,6 +4896,22 @@ cxx_eval_call_expression (const constexpr_ctx *ctx, tree t,
       input_location = save_loc;
     }
 
+  /* A contract wrapper's body is normally emitted at end of TU; define it now
+     if a constant evaluation needs it first (e.g. a constexpr virtual function
+     carrying a contract, whose interposed wrapper would otherwise be "used
+     before its definition").  */
+  if (!DECL_INITIAL (fun)
+      && DECL_CONTRACT_WRAPPER (fun)
+      && !uid_sensitive_constexpr_evaluation_p ())
+    {
+      location_t save_loc = input_location;
+      input_location = loc;
+      ++function_depth;
+      maybe_define_contract_wrapper (fun);
+      --function_depth;
+      input_location = save_loc;
+    }
+
   /* If in direct recursive call, optimize definition search.  */
   if (ctx && ctx->call && ctx->call->fundef && ctx->call->fundef->decl == fun)
     new_call.fundef = ctx->call->fundef;

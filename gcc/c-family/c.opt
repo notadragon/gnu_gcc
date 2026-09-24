@@ -1999,6 +1999,10 @@ fcontracts-p3850
 C++ ObjC++ Var(flag_contracts_p3850) Init(0)
 Enable all P3850 contract extensions for C++29.
 
+fcontracts-p3097
+C++ ObjC++ Var(flag_contracts_p3097) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3097 contract assertions on virtual functions.
+
 fcoroutines
 C++ ObjC++ LTO Var(flag_coroutines)
 Enable C++ coroutines (experimental).
