@@ -1002,9 +1002,6 @@ constify_in_contract_predicate_p (tree decl)
 tree
 constify_contract_access (tree decl)
 {
-  /* We check if we have a variable, a parameter, a variable of reference type,
-   * or a parameter of reference type
-   */
   if (!TREE_READONLY (decl)
       && (VAR_P (decl)
 	  || (TREE_CODE (decl) == PARM_DECL)
@@ -1013,7 +1010,19 @@ constify_contract_access (tree decl)
 		  || (TREE_CODE (TREE_OPERAND (decl, 0)) == PARM_DECL)
 		  || (TREE_CODE (TREE_OPERAND (decl, 0))
 		      == TEMPLATE_PARM_INDEX)))))
-    decl = view_as_const (decl);
+    {
+      /* P3098: Skip const-ification for postcondition capture variables.
+	 Captures are VAR_DECLs marked DECL_ARTIFICIAL in the contract scope.
+	 This exemption may change if the design evolves.  */
+      if (VAR_P (decl) && DECL_ARTIFICIAL (decl))
+	return decl;
+      if (REFERENCE_REF_P (decl)
+	  && VAR_P (TREE_OPERAND (decl, 0))
+	  && DECL_ARTIFICIAL (TREE_OPERAND (decl, 0)))
+	return decl;
+
+      decl = view_as_const (decl);
+    }
 
   return decl;
 }
@@ -1662,6 +1671,35 @@ contracts_fixup_names (tree new_fn, tree old_fn, bool pre, bool wrapper)
   free (nn);
 }
 
+static tree get_postcondition_capture_struct_type (tree);
+
+/* True when CONTRACT is a postcondition of FNDECL that will actually be
+   checked and that carries P3098 captures -- so it needs a capture struct.
+
+   Ten places ask this, and five of them must agree on more than the answer:
+   the capture-struct parameters added to __post_fn
+   (build_contract_condition_function), the struct locals declared at the call
+   site (declare_outlined_capture_struct_locals), the arguments pushed in
+   (append_capture_struct_args) and the destructors emitted after
+   (emit_outlined_capture_struct_dtors) are matched to each other BY POSITION,
+   and get_capture_struct_params counts them to size that parameter list.
+   They all walk the contracts in declaration order, so sharing this predicate
+   is what keeps those sequences the same sequence; when it was written out ten
+   times, one copy drifting would have silently misaligned a parameter list
+   against its arguments, or sized it wrongly.
+
+   ENSURE_EVALUATION_SEMANTIC is called with caller_side=false: this is about
+   what the guarded function itself emits.  */
+
+static bool
+active_postcondition_with_captures_p (tree contract, tree fndecl)
+{
+  return (TREE_CODE (contract) == POSTCONDITION_STMT
+	  && !contract_semantic_emits_no_check
+		(ensure_evaluation_semantic (contract, fndecl, false))
+	  && POSTCONDITION_CAPTURES (contract) != NULL_TREE);
+}
+
 /* Build a declaration for the pre- or postcondition of a guarded FNDECL.  */
 
 static tree
@@ -1882,7 +1920,8 @@ static bool has_postcondition_captures_p (tree);
 static tree
 build_precondition_function (tree fndecl)
 {
-  if (!has_active_preconditions (fndecl))
+  if (!has_active_preconditions (fndecl)
+      && !has_postcondition_captures_p (fndecl))
     return NULL_TREE;
 
   return build_contract_condition_function (fndecl, /*pre=*/true);
@@ -2309,7 +2348,8 @@ maybe_update_postconditions (tree fndecl)
     {
       rebuild_postconditions (fndecl);
       tree post = build_postcondition_function (fndecl);
-      set_postcondition_function (fndecl, post);
+      if (post)
+	set_postcondition_function (fndecl, post);
     }
 }
 
@@ -2382,17 +2422,19 @@ build_thunk_like_call (tree func, int n, tree *argarray)
   return call;
 }
 
+static void append_capture_struct_args (tree, vec<tree, va_gc> *);
+
 /* If we have a precondition function and it's valid, call it.  */
 
 static void
 add_pre_condition_fn_call (tree fndecl)
 {
-  /* If we're starting a guarded function with valid contracts, we need to
-     insert a call to the pre function.  */
   gcc_checking_assert (DECL_PRE_FN (fndecl)
 		       && DECL_PRE_FN (fndecl) != error_mark_node);
 
   releasing_vec args = build_arg_list (fndecl);
+  adjust_args_for_by_ref_params (DECL_PRE_FN (fndecl), args);
+  append_capture_struct_args (fndecl, args);
   tree call = build_thunk_like_call (DECL_PRE_FN (fndecl),
 				     args->length (), args->address ());
 
@@ -2597,6 +2639,15 @@ static tree declare_cxa_entry_point (contract_assertion_kind,
    postcondition emission path to gate predicate evaluation.
    Cleared per function.  */
 
+static hash_map<tree, tree> *postcondition_capture_flags;
+
+/* Map from a postcondition capture VAR_DECL to its initializer, saved just
+   before the inline capture-init emission destructively clears DECL_INITIAL.
+   A later deep-copy of the contract (e.g. for a virtual function's wrapper,
+   which is emitted after the base function has already run and cleared the
+   shared capture var) recovers the initializer from here -- otherwise the
+   wrapper's captures would be left uninitialized (P3097 x P3098).  GC-managed
+   because the saved initializer trees must survive to wrapper-emission time.  */
 static GTY(()) hash_map<tree, tree> *postcondition_capture_inits;
 
 /* Map from a guarded function -> the local standing in for its returned
@@ -2622,6 +2673,112 @@ static GTY(()) hash_map<tree, tree> *postcondition_retval_temps;
    overload resolution: it bit-copies the object, and the capture's
    destructor then runs on a copy that no constructor ever made.  */
 
+static void
+emit_postcondition_capture_init (tree target, tree init)
+{
+  tree type = TREE_TYPE (target);
+
+  if (type_build_ctor_call (type) || CLASS_TYPE_P (type))
+    /* LOOKUP_ONLYCONVERTING: this is the `= init' form, so an explicit
+       constructor is not a candidate.  */
+    finish_expr_stmt (build_aggr_init (target, init, LOOKUP_ONLYCONVERTING,
+				       tf_warning_or_error));
+  else
+    finish_expr_stmt (cp_build_init_expr (target, init));
+}
+
+/* Emit explicit destruction for postcondition captures (P3098).
+   Destroys captures in reverse lexical order, gated by the initialized flag.
+   Only destroys if captures were successfully constructed.  */
+
+static void
+emit_postcondition_capture_dtors (tree fndecl)
+{
+  tree contracts = get_fn_contract_specifiers (fndecl);
+  if (!contracts)
+    return;
+
+  /* Collect postconditions with captures in reverse order.  */
+  auto_vec<tree, 4> postconds_with_caps;
+  for (tree contract : tree_vec_range (contracts))
+    {
+      if (!active_postcondition_with_captures_p (contract, fndecl))
+	continue;
+      postconds_with_caps.safe_push (contract);
+    }
+
+  /* Destroy in reverse lexical order of postconditions, and within
+     each postcondition in reverse order of captures.  Gated by the
+     initialized flag -- only destroy if captures were fully constructed.  */
+  for (int i = postconds_with_caps.length () - 1; i >= 0; i--)
+    {
+      tree contract = postconds_with_caps[i];
+      tree captures = POSTCONDITION_CAPTURES (contract);
+
+      /* Look up the initialized flag.  */
+      tree *flag_p = postcondition_capture_flags
+		     ? postcondition_capture_flags->get (contract) : NULL;
+
+      tree if_stmt = NULL_TREE;
+      if (flag_p)
+	{
+	  if_stmt = begin_if_stmt ();
+	  finish_if_stmt_cond (*flag_p, if_stmt);
+	}
+
+      /* Collect captures for this postcondition and reverse.  */
+      auto_vec<tree, 4> cap_vars;
+      for (tree cap = captures; cap; cap = TREE_CHAIN (cap))
+	cap_vars.safe_push (TREE_VALUE (cap));
+
+      for (int j = cap_vars.length () - 1; j >= 0; j--)
+	{
+	  tree var = cap_vars[j];
+	  tree type = TREE_TYPE (var);
+	  if (!type_build_dtor_call (type))
+	    continue;
+	  /* Not build_cleanup: type_build_dtor_call is also true for a
+	     user-declared destructor that is trivial, for which
+	     cxx_maybe_build_cleanup checks access and then discards the call,
+	     returning NULL_TREE -- which build_cleanup asserts against.
+
+	     tf_none because this is codegen for a capture whose initialization
+	     has already been checked and diagnosed: the destructor's own
+	     accessibility is part of that check, and the dtors are emitted
+	     once per exit path, so diagnosing here would repeat the error.  */
+	  tree dtor = cxx_maybe_build_cleanup (var, tf_none);
+	  if (dtor && dtor != error_mark_node)
+	    finish_expr_stmt (dtor);
+	}
+
+      if (if_stmt)
+	{
+	  finish_then_clause (if_stmt);
+	  finish_if_stmt (if_stmt);
+	}
+    }
+}
+
+/* Return true if FNDECL has any active postcondition with captures.  */
+
+static bool
+has_postcondition_captures_p (tree fndecl)
+{
+  tree contracts = get_fn_contract_specifiers (fndecl);
+  if (!contracts)
+    return false;
+
+  for (tree contract : tree_vec_range (contracts))
+    {
+      if (active_postcondition_with_captures_p (contract, fndecl))
+	return true;
+    }
+  return false;
+}
+
+/* Map from postcondition contract -> capture-state RECORD_TYPE.
+   Cached because the same type must be shared between __pre_fn/__post_fn
+   signatures and the call site.  */
 static GTY(()) hash_map<tree, tree> *postcondition_capture_struct_types;
 
 /* Build (or return cached) capture-state struct type for a postcondition
@@ -2629,12 +2786,204 @@ static GTY(()) hash_map<tree, tree> *postcondition_capture_struct_types;
    union-wrapped fields for each capture (unions prevent implicit
    construction/destruction).  */
 
+static tree
+get_postcondition_capture_struct_type (tree contract)
+{
+  gcc_assert (POSTCONDITION_P (contract));
+  gcc_assert (POSTCONDITION_CAPTURES (contract));
+
+  tree *cached
+    = hash_map_safe_get (postcondition_capture_struct_types, contract);
+  if (cached)
+    return *cached;
+
+  tree captures = POSTCONDITION_CAPTURES (contract);
+
+  tree struct_type = make_node (RECORD_TYPE);
+  tree fields = NULL_TREE;
+  tree *last_field = &fields;
+
+  tree init_field = build_decl (UNKNOWN_LOCATION, FIELD_DECL,
+				get_identifier ("__initialized"),
+				boolean_type_node);
+  DECL_CONTEXT (init_field) = struct_type;
+  DECL_ARTIFICIAL (init_field) = 1;
+  *last_field = init_field;
+  last_field = &DECL_CHAIN (init_field);
+
+  for (tree cap = captures; cap; cap = TREE_CHAIN (cap))
+    {
+      tree var = TREE_VALUE (cap);
+      tree cap_type = TREE_TYPE (var);
+
+      tree union_type = make_node (UNION_TYPE);
+      tree union_member = build_decl (DECL_SOURCE_LOCATION (var), FIELD_DECL,
+				      DECL_NAME (var), cap_type);
+      DECL_CONTEXT (union_member) = union_type;
+      TYPE_FIELDS (union_type) = union_member;
+      layout_type (union_type);
+
+      tree struct_field = build_decl (DECL_SOURCE_LOCATION (var), FIELD_DECL,
+				      DECL_NAME (var), union_type);
+      DECL_CONTEXT (struct_field) = struct_type;
+      DECL_ARTIFICIAL (struct_field) = 1;
+      *last_field = struct_field;
+      last_field = &DECL_CHAIN (struct_field);
+    }
+
+  TYPE_FIELDS (struct_type) = fields;
+  TYPE_ARTIFICIAL (struct_type) = 1;
+  layout_type (struct_type);
+
+  hash_map_maybe_create<hm_ggc> (postcondition_capture_struct_types);
+  postcondition_capture_struct_types->put (contract, struct_type);
+  return struct_type;
+}
+
+/* Map from postcondition contract -> struct local VAR_DECL at the call site.
+   Used by outlined mode to share struct locals between add_pre_condition_fn_call
+   and add_post_condition_fn_call.  Cleared per function.  */
+
+static hash_map<tree, tree> *outlined_capture_struct_locals;
+
+/* Declare capture-state struct local variables at the call site for
+   outlined mode.  One struct per active postcondition with captures.
+   Stores them in outlined_capture_struct_locals for use by
+   add_pre/post_condition_fn_call and emit_outlined_capture_struct_dtors.  */
+
+static void
+declare_outlined_capture_struct_locals (tree fndecl)
+{
+  tree contracts = get_fn_contract_specifiers (fndecl);
+  if (!contracts)
+    return;
+
+  unsigned idx = 0;
+  for (tree contract : tree_vec_range (contracts))
+    {
+      if (!active_postcondition_with_captures_p (contract, fndecl))
+	continue;
+
+      tree struct_type = get_postcondition_capture_struct_type (contract);
+
+      char buf[32];
+      snprintf (buf, sizeof buf, "__cap_struct_%u", idx++);
+      tree var = build_decl (UNKNOWN_LOCATION, VAR_DECL,
+			     get_identifier (buf), struct_type);
+      DECL_ARTIFICIAL (var) = 1;
+      DECL_CONTEXT (var) = fndecl;
+      layout_decl (var, 0);
+      pushdecl (var);
+      add_decl_expr (var);
+
+      if (!outlined_capture_struct_locals)
+	outlined_capture_struct_locals = new hash_map<tree, tree>;
+      outlined_capture_struct_locals->put (contract, var);
+    }
+}
+
+/* Append capture-state struct arguments to ARGS for an outlined
+   pre or post function call.  */
+
+static void
+append_capture_struct_args (tree fndecl, vec<tree, va_gc> *args)
+{
+  if (!outlined_capture_struct_locals)
+    return;
+
+  tree contracts = get_fn_contract_specifiers (fndecl);
+  if (!contracts)
+    return;
+
+  for (tree contract : tree_vec_range (contracts))
+    {
+      if (!active_postcondition_with_captures_p (contract, fndecl))
+	continue;
+
+      tree *struct_var_p = outlined_capture_struct_locals->get (contract);
+      gcc_assert (struct_var_p);
+      /* build_thunk_like_call skips conversions; we must explicitly take
+	 the address for the reference parameter.  */
+      vec_safe_push (args, build_address (*struct_var_p));
+    }
+}
+
+/* Emit destruction of captures stored in outlined capture-state struct
+   locals.  Used at the call site for both normal and EH cleanup paths.
+   Destroys captures in reverse lexical order of postconditions, and within
+   each postcondition in reverse order of captures.  */
+
+static void
+emit_outlined_capture_struct_dtors (tree fndecl)
+{
+  if (!outlined_capture_struct_locals)
+    return;
+
+  tree contracts = get_fn_contract_specifiers (fndecl);
+  if (!contracts)
+    return;
+
+  auto_vec<tree, 4> postconds_with_caps;
+  for (tree contract : tree_vec_range (contracts))
+    {
+      if (!active_postcondition_with_captures_p (contract, fndecl))
+	continue;
+      postconds_with_caps.safe_push (contract);
+    }
+
+  for (int i = postconds_with_caps.length () - 1; i >= 0; i--)
+    {
+      tree contract = postconds_with_caps[i];
+      tree *struct_var_p = outlined_capture_struct_locals->get (contract);
+      if (!struct_var_p)
+	continue;
+
+      tree struct_var = *struct_var_p;
+      tree struct_type = TREE_TYPE (struct_var);
+      tree init_field = TYPE_FIELDS (struct_type);
+
+      tree init_ref = build3 (COMPONENT_REF, TREE_TYPE (init_field),
+			      struct_var, init_field, NULL_TREE);
+
+      tree if_stmt = begin_if_stmt ();
+      finish_if_stmt_cond (init_ref, if_stmt);
+
+      auto_vec<tree, 4> cap_fields;
+      for (tree f = DECL_CHAIN (init_field); f; f = DECL_CHAIN (f))
+	cap_fields.safe_push (f);
+
+      for (int j = cap_fields.length () - 1; j >= 0; j--)
+	{
+	  tree field = cap_fields[j];
+	  tree union_type = TREE_TYPE (field);
+	  tree union_member = TYPE_FIELDS (union_type);
+	  tree cap_type = TREE_TYPE (union_member);
+
+	  if (!type_build_dtor_call (cap_type))
+	    continue;
+
+	  tree union_ref = build3 (COMPONENT_REF, union_type,
+				   struct_var, field, NULL_TREE);
+	  tree member_ref = build3 (COMPONENT_REF, cap_type,
+				    union_ref, union_member, NULL_TREE);
+
+	  /* Not build_cleanup, and tf_none -- see the inline capture site.  */
+	  tree dtor = cxx_maybe_build_cleanup (member_ref, tf_none);
+	  if (dtor && dtor != error_mark_node)
+	    finish_expr_stmt (dtor);
+	}
+
+      finish_then_clause (if_stmt);
+      finish_if_stmt (if_stmt);
+    }
+}
+
 /* Add a call or a direct evaluation of the pre checks.  */
 
 static void
 apply_preconditions (tree fndecl)
 {
-  if (flag_contract_checks_outlined)
+  if (flag_contract_checks_outlined && DECL_PRE_FN (fndecl))
     add_pre_condition_fn_call (fndecl);
   else
   {
@@ -2643,6 +2992,155 @@ apply_preconditions (tree fndecl)
 	emit_contract_statement (contract);
   }
 }
+
+/* Emit preconditions and postcondition capture inits in lexical order (P3098).
+   This walks ALL contracts and emits:
+   - For preconditions: the check (inline)
+   - For postconditions with captures: the capture initialization
+   - For postconditions without captures: nothing (handled at postcond site)
+   This replaces separate apply_preconditions + capture init
+   calls when doing inline emission with captures present.  */
+
+static void
+emit_preconditions_and_capture_inits_interleaved (tree fndecl)
+{
+  tree contracts = get_fn_contract_specifiers (fndecl);
+  if (!contracts)
+    return;
+
+  /* We need copies of preconditions for emission (to avoid modifying
+     originals during folding).  Walk originals for ordering, emit copies
+     for preconditions.  */
+  tree pre_copies = copy_contracts (fndecl, cmk_pre);
+  int pre_ix = 0;
+  int pre_len = pre_copies ? TREE_VEC_LENGTH (pre_copies) : 0;
+
+  for (tree contract : tree_vec_range (contracts))
+    {
+      if (TREE_CODE (contract) == PRECONDITION_STMT)
+	{
+	  /* Emit this precondition (from the copy vector).  */
+	  if (pre_ix < pre_len)
+	    emit_contract_statement (TREE_VEC_ELT (pre_copies, pre_ix++));
+	}
+      else if (TREE_CODE (contract) == POSTCONDITION_STMT)
+	{
+	  /* Emit capture initialization for this postcondition.  The
+	     TREE_CODE test above is already the postcondition half of the
+	     predicate; it is re-tested here rather than restructured because
+	     this arm is one branch of a precondition/postcondition walk.  */
+	  if (!active_postcondition_with_captures_p (contract, fndecl))
+	    continue;
+	  tree captures = POSTCONDITION_CAPTURES (contract);
+
+	  /* Create the initialized flag.  */
+	  static unsigned cap_init_counter_interleaved;
+	  char buf[32];
+	  snprintf (buf, sizeof buf, "__cap_init_%u",
+		    cap_init_counter_interleaved++);
+	  tree flag = build_decl (UNKNOWN_LOCATION, VAR_DECL,
+				  get_identifier (buf), boolean_type_node);
+	  DECL_ARTIFICIAL (flag) = 1;
+	  DECL_CONTEXT (flag) = fndecl;
+	  layout_decl (flag, 0);
+	  pushdecl (flag);
+	  add_decl_expr (flag);
+	  finish_expr_stmt (cp_build_init_expr (flag, boolean_false_node));
+
+	  if (!postcondition_capture_flags)
+	    postcondition_capture_flags = new hash_map<tree, tree>;
+	  postcondition_capture_flags->put (contract, flag);
+
+	  /* Declare capture variables.  */
+	  for (tree cap = captures; cap; cap = TREE_CHAIN (cap))
+	    {
+	      tree var = TREE_VALUE (cap);
+	      DECL_CONTEXT (var) = fndecl;
+	      layout_decl (var, 0);
+	      pushdecl (var);
+	      add_decl_expr (var);
+	    }
+
+	  /* The try/catch exists only to turn a throwing capture initializer
+	     into a post_capture violation.  With -fno-exceptions nothing can
+	     throw and there is nothing to catch, so building it would just
+	     reach doing_eh() in cp/except.cc and error out; emit the bare
+	     initializations instead.  */
+	  tree try_block = NULL_TREE;
+	  if (flag_exceptions)
+	    try_block = begin_try_block ();
+
+	  for (tree cap = captures; cap; cap = TREE_CHAIN (cap))
+	    {
+	      tree var = TREE_VALUE (cap);
+	      tree init = DECL_INITIAL (var);
+	      if (!init || init == error_mark_node)
+		continue;
+	      /* Preserve the initializer before the emission below clears it,
+		 so a later deep-copy of this contract to a virtual function's
+		 wrapper can recover it (the wrapper shares this capture var and
+		 is emitted after us).  */
+	      if (!postcondition_capture_inits)
+		postcondition_capture_inits
+		  = hash_map<tree, tree>::create_ggc ();
+	      postcondition_capture_inits->put (var, init);
+	      emit_postcondition_capture_init (var, init);
+	      DECL_INITIAL (var) = NULL_TREE;
+	    }
+	  finish_expr_stmt (cp_build_init_expr (flag, boolean_true_node));
+
+	  if (flag_exceptions)
+	    {
+	      finish_try_block (try_block);
+
+	      /* Catch handler.  */
+	      tree handler = begin_handler ();
+	      finish_handler_parms (NULL_TREE, handler);
+	      contract_evaluation_semantic sem
+		= ensure_evaluation_semantic (contract, fndecl, false);
+	      if (sem == CES_QUICK)
+		finish_expr_stmt
+		  (build_quick_enforce_reaction (EXPR_LOCATION (contract)));
+	      else
+		{
+		  tree block_type;
+		  tree ctor = build_contract_data_block_ctor (contract,
+							      &block_type);
+		  tree data_var
+		    = build_contract_data_block_constant (ctor, block_type,
+							  contract);
+		  tree data_addr = build_address (data_var);
+		  tree ep = declare_cxa_entry_point (CAK_POST_CAPTURE, sem,
+						     CDM_EVAL_EXCEPTION, false);
+		  finish_expr_stmt (build_call_n (ep, 1, data_addr));
+		}
+	      finish_handler (handler);
+	      finish_handler_sequence (try_block);
+	    }
+	}
+    }
+}
+
+/* True if the inline postcondition checks for FNDECL have to read the
+   returned object through a temporary instead of through DECL_RESULT.
+
+   Aliasing the result binding onto DECL_RESULT is the same manoeuvre as the
+   NRVO, and it needs the same guard the NRVO has: want_nrvo_p (cp/typeck.cc)
+   only aliases when aggregate_value_p says the result genuinely lives in
+   memory.  When it comes back in a register there is nothing to take the
+   address of -- expand_function_start gives DECL_RESULT a pseudo and never
+   consults TREE_ADDRESSABLE -- so a predicate needing that address dies on
+   the MEM_P assertion in expand_expr_addr_expr_1 (PR c++/125574).
+
+   Introducing a temporary here is what [dcl.contract.res] describes: its
+   Example 2 has the check "can fail if the implementation introduces a
+   temporary for the return value" precisely for a register-returned type,
+   and succeed for one returned in memory.  The outlined checking mode has
+   always done this -- __post_fn takes the result as a by-value parameter,
+   which is why -fcontract-checks-outlined never saw the ICE.
+
+   Only an addressable result binding needs it; the ordinary
+   post(r: r > 0) goes on reading DECL_RESULT directly.  */
 
 static bool
 postcondition_needs_retval_temp_p (tree fndecl)
@@ -2700,7 +3198,6 @@ postcondition_needs_retval_temp_p (tree fndecl)
 /* Add a call or a direct evaluation of the post checks.
    For postconditions with captures, gate the predicate check on the
    initialized flag (set by the interleaved emission path).  */
-/* Add a call or a direct evaluation of the post checks.  */
 
 static void
 apply_postconditions (tree fndecl)
@@ -2866,16 +3363,10 @@ maybe_apply_function_contracts (tree fndecl)
        popped by our caller.  */
     return;
 
-  /* If this is not a client side check and definition side checks are
-     disabled, do nothing.  */
-  if (!flag_contracts_definition_check
-      && !DECL_CONTRACT_WRAPPER (fndecl))
-    return;
-
   bool do_pre = has_active_preconditions (fndecl);
   bool do_post = has_active_postconditions (fndecl);
-  /* We should not have reached here with nothing to do... */
-  gcc_checking_assert (do_pre || do_post);
+  if (!do_pre && !do_post)
+    return;
 
   /* If the function is noexcept, the user's written body will normally be
      wrapped in a MUST_NOT_THROW expression.  In that case we leave the
@@ -3006,26 +3497,72 @@ maybe_apply_function_contracts (tree fndecl)
       return;
     }
 
-  if (do_pre)
-    /* Add a precondition call, if we have one. */
+  /* For outlined mode with captures, declare struct locals on the caller's
+     stack.  These are passed by reference to __pre_fn and __post_fn and
+     destroyed inline at the call site.  */
+  bool outlined_caps = (flag_contract_checks_outlined
+			&& has_postcondition_captures_p (fndecl));
+  if (outlined_caps)
+    declare_outlined_capture_struct_locals (fndecl);
+
+  /* Emit preconditions and capture inits.  For outlined mode, __pre_fn
+     handles interleaving internally.  For inline mode with captures,
+     use the interleaved version that respects lexical ordering (P3098).  */
+  if (flag_contract_checks_outlined)
     apply_preconditions (fndecl);
+  else if (has_postcondition_captures_p (fndecl))
+    emit_preconditions_and_capture_inits_interleaved (fndecl);
+  else if (do_pre)
+    apply_preconditions (fndecl);
+
   tree try_fin = build_stmt (loc, TRY_FINALLY_EXPR, fnbody, NULL_TREE);
   add_stmt (try_fin);
   TREE_OPERAND (try_fin, 1) = push_stmt_list ();
   /* If we have exceptions, and a function that might throw, then add
      an EH_ELSE clause that allows the exception to propagate upwards
-     without encountering the post-condition checks.  */
+     without encountering the post-condition checks.  The EH path must
+     still destroy postcondition captures.  */
   if (flag_exceptions && !type_noexcept_p (TREE_TYPE (fndecl)))
     {
       tree eh_else = build_stmt (loc, EH_ELSE_EXPR, NULL_TREE, NULL_TREE);
       add_stmt (eh_else);
-      TREE_OPERAND (eh_else, 0) = push_stmt_list ();
+      /* Non-exceptional path: check postconditions, then destroy captures.
+	 The checks may exit via an exception (a throwing violation handler),
+	 and the returned object exists by now, so they carry a cleanup that
+	 destroys it.  */
+      tree post_stmts = push_stmt_list ();
       apply_postconditions (fndecl);
+      post_stmts = pop_stmt_list (post_stmts);
+      TREE_OPERAND (eh_else, 0) = push_stmt_list ();
+      add_stmt (wrap_checks_directly
+		? wrap_postconditions_in_retval_cleanup (fndecl, post_stmts)
+		: post_stmts);
+      if (outlined_caps)
+	emit_outlined_capture_struct_dtors (fndecl);
+      else
+	emit_postcondition_capture_dtors (fndecl);
       TREE_OPERAND (eh_else, 0) = pop_stmt_list (TREE_OPERAND (eh_else, 0));
-      TREE_OPERAND (eh_else, 1) = void_node;
+      /* Exceptional path: destroy captures without checking predicates.  */
+      TREE_OPERAND (eh_else, 1) = push_stmt_list ();
+      if (outlined_caps)
+	emit_outlined_capture_struct_dtors (fndecl);
+      else
+	emit_postcondition_capture_dtors (fndecl);
+      TREE_OPERAND (eh_else, 1) = pop_stmt_list (TREE_OPERAND (eh_else, 1));
     }
   else
-    apply_postconditions (fndecl);
+    {
+      tree post_stmts = push_stmt_list ();
+      apply_postconditions (fndecl);
+      post_stmts = pop_stmt_list (post_stmts);
+      add_stmt (wrap_checks_directly
+		? wrap_postconditions_in_retval_cleanup (fndecl, post_stmts)
+		: post_stmts);
+      if (outlined_caps)
+	emit_outlined_capture_struct_dtors (fndecl);
+      else
+	emit_postcondition_capture_dtors (fndecl);
+    }
   TREE_OPERAND (try_fin, 1) = pop_stmt_list (TREE_OPERAND (try_fin, 1));
 
   /* Hand the splice back to do_poplevel: everything the cleanup must cover is
@@ -3033,7 +3570,34 @@ maybe_apply_function_contracts (tree fndecl)
      place.  */
   cp_function_chain->defer_retval_cleanup = false;
   finish_compound_stmt (compound_stmt);
-  /* The DECL_SAVED_TREE stmt list will be popped by our caller.  */
+
+  if (outlined_capture_struct_locals)
+    {
+      delete outlined_capture_struct_locals;
+      outlined_capture_struct_locals = NULL;
+    }
+  if (postcondition_capture_flags)
+    {
+      delete postcondition_capture_flags;
+      postcondition_capture_flags = NULL;
+    }
+}
+
+/* SP is a parameter (or result placeholder) of the guarded function and DP
+   the corresponding parameter of an outlined checking function.  When the
+   checks are outlined those parameters are passed by reference so that a
+   predicate sees the guarded function's own objects rather than copies (see
+   build_contract_condition_function).  Uses of SP inside the predicate are
+   value uses, so map them to *DP rather than to DP itself.  When DP is not a
+   reference -- every other user of remap_contract, notably the wrapper
+   copies -- this is the identity.  */
+
+static tree
+remap_as_value (tree sp, tree dp)
+{
+  if (TYPE_REF_P (TREE_TYPE (dp)) && !TYPE_REF_P (TREE_TYPE (sp)))
+    return convert_from_reference (dp);
+  return dp;
 }
 
 /* Rewrite the condition of contract in place, so that references to SRC's
@@ -3090,16 +3654,20 @@ remap_contract (tree src, tree dst, tree contract, bool duplicate_p)
        sp || dp;
        sp = DECL_CHAIN (sp), dp = DECL_CHAIN (dp))
     {
-      if (!sp && dp
-	  && TREE_CODE (contract) == POSTCONDITION_STMT
-	  && DECL_CHAIN (dp) == NULL_TREE)
+      if (!sp)
 	{
-	  gcc_assert (!duplicate_p);
-	  if (tree result = POSTCONDITION_IDENTIFIER (contract))
+	  /* src params exhausted; remaining dst params are either __r
+	     (postcondition result) or capture struct refs.  Map __r if
+	     this is a postcondition.  */
+	  if (dp && TREE_CODE (contract) == POSTCONDITION_STMT)
 	    {
-	      gcc_assert (DECL_P (result));
-	      insert_decl_map (&id, result, dp);
-	      do_remap = true;
+	      gcc_assert (!duplicate_p);
+	      if (tree result = POSTCONDITION_IDENTIFIER (contract))
+		{
+		  gcc_assert (DECL_P (result));
+		  insert_decl_map (&id, result, remap_as_value (result, dp));
+		  do_remap = true;
+		}
 	    }
 	  break;
 	}
@@ -3108,7 +3676,7 @@ remap_contract (tree src, tree dst, tree contract, bool duplicate_p)
       if (sp == dp)
 	continue;
 
-      insert_decl_map (&id, sp, dp);
+      insert_decl_map (&id, sp, remap_as_value (sp, dp));
       do_remap = true;
 
       /* First artificial arg is *this. We want to remap that.  However, we
@@ -3142,9 +3710,16 @@ copy_and_remap_contracts (tree dest, tree source,
   if (!contracts)
     return NULL_TREE;
 
+  /* POSITION indexes the contract within SOURCE's *full* contract list, in
+     the same order used by compute_caller_semantic_tuple, so the wrapper's
+     stored tuple can be read by position even though pre/post may be skipped
+     below.  It is therefore taken for every contract, skipped or not.  */
+  unsigned next_position = 0;
   auto_vec<tree> copies (TREE_VEC_LENGTH (contracts));
   for (tree contract : tree_vec_range (contracts))
     {
+      const unsigned position = next_position++;
+
       if ((remap_kind == cmk_pre
 	   && TREE_CODE (contract) == POSTCONDITION_STMT)
 	  || (remap_kind == cmk_post
@@ -3152,6 +3727,50 @@ copy_and_remap_contracts (tree dest, tree source,
 	continue;
 
       tree stmt = copy_node (contract);
+
+      /* When copying contracts to a wrapper, set the evaluation semantic
+	 appropriately.  For virtual function wrappers (P3097), the wrapper
+	 evaluates contracts as callee-side checks, so keep the original
+	 callee semantic.  For non-virtual wrappers, the wrapper evaluates
+	 them caller-side, so use the caller semantic.  */
+      if (DECL_IS_WRAPPER_FN_P (dest))
+	{
+	  bool virtual_wrapper = (DECL_IOBJ_MEMBER_FUNCTION_P (source)
+				  && DECL_VIRTUAL_P (source));
+	  if (!virtual_wrapper)
+	    {
+	      unsigned char sem = get_wrapper_tuple_at (dest, position);
+	      CONTRACT_EVALUATION_SEMANTIC (stmt)
+		= build_int_cst (uint16_type_node, sem);
+
+	      /* If the caller-side resolution for this contract is dynamic,
+		 bake the descriptor + caller allowed-mask onto the wrapper's
+		 copied contract so build_contract_check emits the dynamic
+		 dispatch unchanged (it reads CONTRACT_DYNAMIC and, via
+		 transform_semantic -> make_contract_query,
+		 CONTRACT_ALLOWED_MASK).  */
+	      tree desc = get_wrapper_dyn_at (dest, position);
+	      if (desc)
+		{
+		  /* Reconstruct CONTRACT_DYNAMIC in the exact layout the
+		     callee-side accessors read: TREE_PURPOSE = name
+		     IDENTIFIER, TREE_VALUE = INTEGER_CST(linkage<<1|weak).  */
+		  CONTRACT_DYNAMIC (stmt)
+		    = build_tree_list (TREE_PURPOSE (desc), TREE_VALUE (desc));
+
+		  /* The dynamic transform clamps against the caller allowed
+		     set, which includes IGNORE.  Fold IGNORE into the mask so
+		     the emission (make_contract_query) sees the caller-side
+		     set rather than the plain label mask.  */
+		  tree m = CONTRACT_ALLOWED_MASK (stmt);
+		  uint16_t mask = m ? (uint16_t) tree_to_uhwi (m)
+				    : (uint16_t) CES_ALL_ALLOWED_WITH_EXTENSIONS;
+		  mask |= (1 << CES_IGNORE);
+		  CONTRACT_ALLOWED_MASK (stmt)
+		    = build_int_cst (uint16_type_node, mask);
+		}
+	    }
+	}
 
       /* If we have an erroneous postcondition identifier, we also mark the
 	 condition as invalid so only need to check that.  */
@@ -3165,6 +3784,84 @@ copy_and_remap_contracts (tree dest, tree source,
 	  tree var = POSTCONDITION_IDENTIFIER (stmt);
 	  if (var && var != error_mark_node)
 	    DECL_CONTEXT (var) = dest;
+
+	  /* Deep-copy postcondition captures (P3098) so the wrapper has
+	     its own VAR_DECLs with independent DECL_INITIAL.  The inline
+	     capture init machinery destructively clears DECL_INITIAL after
+	     use, so sharing VAR_DECLs between the wrapper and the original
+	     function would cause whichever runs second to see NULL inits.
+	     We also remap references to old capture vars in the condition
+	     to point to the new copies.  */
+	  tree caps = POSTCONDITION_CAPTURES (stmt);
+	  if (caps)
+	    {
+	      copy_body_data cap_id;
+	      hash_map<tree, tree> cap_decl_map;
+	      memset (&cap_id, 0, sizeof (cap_id));
+	      cap_id.src_fn = source;
+	      cap_id.dst_fn = dest;
+	      cap_id.decl_map = &cap_decl_map;
+	      cap_id.copy_decl = retain_decl;
+	      cap_id.transform_call_graph_edges = CB_CGE_DUPLICATE;
+	      cap_id.do_not_unshare = true;
+	      cap_id.do_not_fold = true;
+
+	      /* Map SOURCE's parameters (and *this) to DEST's so a recovered
+		 capture initializer that references the interface parameters
+		 refers to the wrapper's parameters.  Mirrors remap_contract.  */
+	      {
+		int s_art = num_artificial_parms_for (source);
+		int d_art = num_artificial_parms_for (dest);
+		for (tree sp = DECL_ARGUMENTS (source), dp = DECL_ARGUMENTS (dest);
+		     sp && dp; sp = DECL_CHAIN (sp), dp = DECL_CHAIN (dp))
+		  {
+		    if (sp != dp)
+		      insert_decl_map (&cap_id, sp, dp);
+		    if (s_art > 0)
+		      while (--s_art, s_art > 0)
+			sp = DECL_CHAIN (sp);
+		    if (d_art > 0)
+		      while (--d_art, d_art > 0)
+			dp = DECL_CHAIN (dp);
+		  }
+	      }
+
+	      tree new_caps = NULL_TREE;
+	      tree *last_cap = &new_caps;
+	      for (tree cap = caps; cap; cap = TREE_CHAIN (cap))
+		{
+		  tree orig_var = TREE_VALUE (cap);
+		  tree new_var = copy_node (orig_var);
+		  cxx_dup_lang_specific_decl (new_var);
+		  DECL_CONTEXT (new_var) = dest;
+		  /* Recover the initializer if SOURCE's inline emission already
+		     cleared it destructively (see postcondition_capture_inits).
+		     Structurally copy + remap it (parameters, *this) so the
+		     wrapper gets its own initializer and the shared saved tree
+		     is not mutated -- otherwise the wrapper's capture is left
+		     uninitialized.  */
+		  if (!DECL_INITIAL (new_var) && postcondition_capture_inits)
+		    if (tree *saved = postcondition_capture_inits->get (orig_var))
+		      {
+			tree init = *saved;
+			copy_body_data init_id = cap_id;
+			init_id.copy_decl = copy_decl_no_change;
+			init_id.do_not_unshare = false;
+			walk_tree (&init, copy_tree_body_r, &init_id, NULL);
+			DECL_INITIAL (new_var) = init;
+		      }
+		  insert_decl_map (&cap_id, orig_var, new_var);
+		  tree node = tree_cons (TREE_PURPOSE (cap), new_var,
+					 NULL_TREE);
+		  *last_cap = node;
+		  last_cap = &TREE_CHAIN (node);
+		}
+	      POSTCONDITION_CAPTURES (stmt) = new_caps;
+
+	      /* Remap capture var references in the condition.  */
+	      walk_tree (&CONTRACT_CONDITION (stmt), copy_tree_body_r,
+			 &cap_id, NULL);
+	    }
 	}
 
       if (CONTRACT_COMMENT (stmt) != error_mark_node)
@@ -4361,6 +5058,301 @@ remap_and_emit_conditions (tree fn, tree condfn, tree_code code)
       }
 }
 
+/* Collect the capture struct ref PARM_DECLs from an outlined function.
+   They are the last N params, where N is the number of active postconditions
+   with captures in the original FNDECL.  Returns them in the same order
+   as the postconditions with captures appear.  */
+
+static auto_vec<tree, 4>
+get_capture_struct_params (tree fndecl, tree outlined_fn)
+{
+  auto_vec<tree, 4> result;
+
+  tree contracts = get_fn_contract_specifiers (fndecl);
+  if (!contracts)
+    return result;
+
+  int num_struct_params = 0;
+  for (tree contract : tree_vec_range (contracts))
+    {
+      if (active_postcondition_with_captures_p (contract, fndecl))
+	num_struct_params++;
+    }
+
+  if (num_struct_params == 0)
+    return result;
+
+  auto_vec<tree, 8> all_params;
+  for (tree p = DECL_ARGUMENTS (outlined_fn); p; p = DECL_CHAIN (p))
+    all_params.safe_push (p);
+
+  int start_idx = all_params.length () - num_struct_params;
+  gcc_assert (start_idx >= 0);
+  for (int i = start_idx; i < (int) all_params.length (); i++)
+    result.safe_push (all_params[i]);
+
+  return result;
+}
+
+/* Set up a copy_body_data for remapping from SRC function params to DST
+   function params.  Only maps the "regular" params (skips __r and struct
+   ref params).  Returns true if any mappings were inserted.  */
+
+static bool
+setup_param_remap (copy_body_data *id, hash_map<tree, tree> *decl_map,
+		   tree src, tree dst)
+{
+  memset (id, 0, sizeof (*id));
+  id->src_fn = src;
+  id->dst_fn = dst;
+  id->src_cfun = DECL_STRUCT_FUNCTION (src);
+  id->decl_map = decl_map;
+  id->copy_decl = copy_decl_no_change;
+  id->transform_call_graph_edges = CB_CGE_DUPLICATE;
+  id->transform_new_cfg = false;
+  id->transform_return_to_modify = false;
+  id->transform_parameter = true;
+  id->regimplify = false;
+  id->do_not_unshare = true;
+  id->do_not_fold = true;
+  id->eh_lp_nr = 0;
+
+  bool do_remap = false;
+  int src_num_artificial = num_artificial_parms_for (src);
+  int dst_num_artificial = num_artificial_parms_for (dst);
+
+  for (tree sp = DECL_ARGUMENTS (src), dp = DECL_ARGUMENTS (dst);
+       sp && dp;
+       sp = DECL_CHAIN (sp), dp = DECL_CHAIN (dp))
+    {
+      if (sp != dp)
+	{
+	  /* Same by-reference adjustment as remap_contract: when the outlined
+	     function takes a parameter by reference, uses of the guarded
+	     function's parameter are value uses of *DP.  This path handles
+	     the postcondition-capture initialisers, which read the parameters
+	     at function entry.  */
+	  insert_decl_map (id, sp, remap_as_value (sp, dp));
+	  do_remap = true;
+	}
+      if (src_num_artificial > 0)
+	{
+	  while (--src_num_artificial, src_num_artificial > 0)
+	    sp = DECL_CHAIN (sp);
+	}
+      if (dst_num_artificial > 0)
+	{
+	  while (--dst_num_artificial, dst_num_artificial > 0)
+	    dp = DECL_CHAIN (dp);
+	}
+    }
+
+  return do_remap;
+}
+
+/* Emit the body of an outlined __pre_fn when postcondition captures
+   are present.  Interleaves precondition checks with capture initialization
+   in lexical order (P3098).  Capture init writes to struct ref params.  */
+
+static void
+emit_outlined_pre_body (tree fndecl, tree pre_fn)
+{
+  auto_vec<tree, 4> struct_params
+    = get_capture_struct_params (fndecl, pre_fn);
+  int struct_idx = 0;
+
+  copy_body_data id;
+  hash_map<tree, tree> decl_map;
+  setup_param_remap (&id, &decl_map, fndecl, pre_fn);
+
+  tree contracts = get_fn_contract_specifiers (fndecl);
+  if (!contracts)
+    return;
+
+  for (tree contract : tree_vec_range (contracts))
+    {
+      if (TREE_CODE (contract) == PRECONDITION_STMT)
+	{
+	  tree c = copy_node (contract);
+	  if (CONTRACT_CONDITION (c) != error_mark_node)
+	    remap_contract (fndecl, pre_fn, c, /*duplicate_p=*/false);
+	  emit_contract_statement (c);
+	}
+      else if (active_postcondition_with_captures_p (contract, fndecl))
+	{
+	  tree struct_param = struct_params[struct_idx++];
+	  tree struct_ref = convert_from_reference (struct_param);
+	  tree struct_type = TREE_TYPE (struct_ref);
+	  tree init_field = TYPE_FIELDS (struct_type);
+
+	  /* Set __initialized = false.  */
+	  tree init_ref = build3 (COMPONENT_REF, TREE_TYPE (init_field),
+				  struct_ref, init_field, NULL_TREE);
+	  finish_expr_stmt (cp_build_init_expr (init_ref, boolean_false_node));
+
+	  /* Try block: initialize each capture field.  As at the ordinary
+	     capture site, this exists only to turn a throwing capture
+	     initializer into a post_capture violation, so with -fno-exceptions
+	     it is not built at all.  */
+	  tree try_block = NULL_TREE;
+	  if (flag_exceptions)
+	    try_block = begin_try_block ();
+
+	  tree field = DECL_CHAIN (init_field);
+	  tree captures = POSTCONDITION_CAPTURES (contract);
+	  for (tree cap = captures; cap;
+	       cap = TREE_CHAIN (cap), field = DECL_CHAIN (field))
+	    {
+	      tree var = TREE_VALUE (cap);
+	      tree cap_init = DECL_INITIAL (var);
+	      if (!cap_init || cap_init == error_mark_node)
+		continue;
+
+	      /* Remap init expression from original function params to
+		 pre function params.  */
+	      tree remapped_init = unshare_expr (cap_init);
+	      walk_tree (&remapped_init, copy_tree_body_r, &id, NULL);
+
+	      tree union_type = TREE_TYPE (field);
+	      tree union_member = TYPE_FIELDS (union_type);
+	      tree union_ref = build3 (COMPONENT_REF, union_type,
+				       struct_ref, field, NULL_TREE);
+	      tree member_ref = build3 (COMPONENT_REF, TREE_TYPE (union_member),
+					union_ref, union_member, NULL_TREE);
+	      emit_postcondition_capture_init (member_ref, remapped_init);
+	    }
+
+	  /* All inits succeeded: set __initialized = true.  */
+	  finish_expr_stmt (cp_build_init_expr (init_ref, boolean_true_node));
+
+	  if (flag_exceptions)
+	    {
+	      finish_try_block (try_block);
+
+	      /* Catch (...): call violation handler.  */
+	      tree handler = begin_handler ();
+	      finish_handler_parms (NULL_TREE, handler);
+
+	      contract_evaluation_semantic sem
+		= ensure_evaluation_semantic (contract, fndecl, false);
+	      if (sem == CES_QUICK)
+		finish_expr_stmt
+		  (build_quick_enforce_reaction (EXPR_LOCATION (contract)));
+	      else
+		{
+		  tree block_type;
+		  tree ctor = build_contract_data_block_ctor (contract,
+							      &block_type);
+		  tree data_var
+		    = build_contract_data_block_constant (ctor, block_type,
+							  contract);
+		  tree data_addr = build_address (data_var);
+		  tree ep = declare_cxa_entry_point (CAK_POST_CAPTURE, sem,
+						     CDM_EVAL_EXCEPTION, false);
+		  finish_expr_stmt (build_call_n (ep, 1, data_addr));
+		}
+
+	      finish_handler (handler);
+	      finish_handler_sequence (try_block);
+	    }
+	}
+    }
+}
+
+/* Walk_tree callback: replace capture VAR_DECLs with COMPONENT_REFs into
+   the capture struct.  The DATA is a hash_map<tree,tree>* mapping capture
+   VAR_DECL -> COMPONENT_REF.  */
+
+static tree
+remap_capture_vars_r (tree *here, int *do_subtree, void *data)
+{
+  hash_map<tree, tree> *cap_map = (hash_map<tree, tree> *) data;
+  if (DECL_P (*here))
+    {
+      tree *mapped = cap_map->get (*here);
+      if (mapped)
+	{
+	  *here = *mapped;
+	  *do_subtree = 0;
+	  return NULL_TREE;
+	}
+    }
+  *do_subtree = 1;
+  return NULL_TREE;
+}
+
+/* Emit the body of an outlined __post_fn when postcondition captures
+   are present.  For each postcondition:
+   - Without captures: remap and emit as usual
+   - With captures: gate predicate on __initialized, remap capture VAR_DECLs
+     to struct field COMPONENT_REFs, then emit  */
+
+static void
+emit_outlined_post_body (tree fndecl, tree post_fn)
+{
+  auto_vec<tree, 4> struct_params
+    = get_capture_struct_params (fndecl, post_fn);
+  int struct_idx = 0;
+
+  tree contracts = get_fn_contract_specifiers (fndecl);
+  if (!contracts)
+    return;
+
+  for (tree contract : tree_vec_range (contracts))
+    {
+      if (TREE_CODE (contract) != POSTCONDITION_STMT)
+	continue;
+
+      tree captures = POSTCONDITION_CAPTURES (contract);
+      bool has_captures
+	= active_postcondition_with_captures_p (contract, fndecl);
+
+      tree c = copy_node (contract);
+      if (CONTRACT_CONDITION (c) != error_mark_node)
+	remap_contract (fndecl, post_fn, c, /*duplicate_p=*/false);
+
+      if (!has_captures)
+	{
+	  emit_contract_statement (c);
+	  continue;
+	}
+
+      tree struct_param = struct_params[struct_idx++];
+      tree struct_ref = convert_from_reference (struct_param);
+      tree struct_type = TREE_TYPE (struct_ref);
+      tree init_field = TYPE_FIELDS (struct_type);
+
+      /* Build capture VAR_DECL -> COMPONENT_REF mappings.  */
+      hash_map<tree, tree> cap_map;
+      tree field = DECL_CHAIN (init_field);
+      for (tree cap = captures; cap;
+	   cap = TREE_CHAIN (cap), field = DECL_CHAIN (field))
+	{
+	  tree var = TREE_VALUE (cap);
+	  tree union_type = TREE_TYPE (field);
+	  tree union_member = TYPE_FIELDS (union_type);
+	  tree union_ref = build3 (COMPONENT_REF, union_type,
+				   struct_ref, field, NULL_TREE);
+	  tree member_ref = build3 (COMPONENT_REF, TREE_TYPE (union_member),
+				    union_ref, union_member, NULL_TREE);
+	  cap_map.put (var, member_ref);
+	}
+
+      /* Remap capture references in the condition.  */
+      walk_tree (&CONTRACT_CONDITION (c), remap_capture_vars_r, &cap_map,
+		 NULL);
+
+      /* Gate predicate evaluation on __initialized.  */
+      tree init_ref = build3 (COMPONENT_REF, TREE_TYPE (init_field),
+			      struct_ref, init_field, NULL_TREE);
+      tree if_stmt = begin_if_stmt ();
+      finish_if_stmt_cond (init_ref, if_stmt);
+      emit_contract_statement (c);
+      finish_then_clause (if_stmt);
+      finish_if_stmt (if_stmt);
+    }
+}
+
 /* Finish up the pre & post function definitions for a guarded FNDECL,
    and compile those functions all the way to assembler language output.  */
 
@@ -4380,10 +5372,10 @@ finish_function_outlined_contracts (tree fndecl)
       || !flag_contract_checks_outlined)
     return;
 
-  /* If this is not a client side check and definition side checks are
-     disabled, do nothing.  */
-  if (!flag_contracts_definition_check
-      && !DECL_CONTRACT_WRAPPER (fndecl))
+  /* Skip outlined contract functions if there are no active callee-side
+     contracts and this is not a wrapper function (which evaluates contracts
+     caller-side).  The config system governs whether any contract is active.  */
+  if (!contract_any_active_p (fndecl) && !DECL_CONTRACT_WRAPPER (fndecl))
     return;
 
   /* If either the pre or post functions are bad, don't bother emitting
@@ -4399,11 +5391,16 @@ finish_function_outlined_contracts (tree fndecl)
 
   int flags = SF_DEFAULT | SF_PRE_PARSED;
 
+  bool has_caps = has_postcondition_captures_p (fndecl);
+
   if (pre && !DECL_INITIAL (pre))
     {
       DECL_PENDING_INLINE_P (pre) = false;
       start_preparsed_function (pre, DECL_ATTRIBUTES (pre), flags);
-      remap_and_emit_conditions (fndecl, pre, PRECONDITION_STMT);
+      if (has_caps)
+	emit_outlined_pre_body (fndecl, pre);
+      else
+	remap_and_emit_conditions (fndecl, pre, PRECONDITION_STMT);
       finish_return_stmt (NULL_TREE);
       pre = finish_function (false);
       expand_or_defer_fn (pre);
@@ -4413,7 +5410,10 @@ finish_function_outlined_contracts (tree fndecl)
     {
       DECL_PENDING_INLINE_P (post) = false;
       start_preparsed_function (post, DECL_ATTRIBUTES (post), flags);
-      remap_and_emit_conditions (fndecl, post, POSTCONDITION_STMT);
+      if (has_caps)
+	emit_outlined_post_body (fndecl, post);
+      else
+	remap_and_emit_conditions (fndecl, post, POSTCONDITION_STMT);
       gcc_checking_assert (VOID_TYPE_P (TREE_TYPE (TREE_TYPE (post))));
       finish_return_stmt (NULL_TREE);
       post = finish_function (false);
