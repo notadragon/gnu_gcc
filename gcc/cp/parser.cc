@@ -3028,6 +3028,8 @@ static tree cp_parser_contract_assert
 
 static tree cp_maybe_function_contract_specifier
   (cp_parser *parser);
+static size_t cp_skip_contract_requires_clause
+  (cp_parser *, size_t, size_t * = NULL);
 
 static tree cp_parser_function_contract_specifier
   (cp_parser *, bool);
@@ -34027,6 +34029,27 @@ cp_parser_late_contract_condition (cp_parser *parser, tree fn, tree contract)
 
   push_unparsed_function_queues (parser);
 
+  /* Replay a deferred requires-clause (P4283) first.  Like the predicate it
+     may name the function's parameters, which are in scope here and were
+     not where it was written; unlike the predicate it is not part of the
+     contract scope, so it is parsed before that scope is entered and with
+     the class reference left alone.  tsubst_contract reads this slot to
+     decide whether the contract is discarded, so it has to hold a real
+     constraint before any instantiation can reach it.  */
+  if (tree req = CONTRACT_REQUIRES_CLAUSE (contract))
+    if (TREE_CODE (req) == DEFERRED_PARSE)
+      {
+	cp_parser_push_lexer_for_tokens (parser, DEFPARSE_TOKENS (req));
+	tree parsed = cp_parser_requires_clause_opt (parser, /*lambda_p=*/true);
+	if (cp_lexer_next_token_is_not (parser->lexer, CPP_EOF))
+	  {
+	    error_at (input_location, "expected %<(%>");
+	    parsed = error_mark_node;
+	  }
+	cp_parser_pop_lexer (parser);
+	CONTRACT_REQUIRES_CLAUSE (contract) = parsed;
+      }
+
   /* Push the saved tokens onto the parser's lexer stack.  */
   cp_token_cache *tokens = DEFPARSE_TOKENS (condition);
   cp_parser_push_lexer_for_tokens (parser, tokens);
@@ -34700,6 +34723,21 @@ cp_parser_contract_assert (cp_parser *parser, cp_token *token)
   token = cp_lexer_consume_token (parser->lexer);
   location_t loc = token->location;
 
+  /* Parse optional assertion-control-specifier: < constant-expression >  */
+  tree label = cp_parser_assertion_control_specifier (parser);
+
+  /* Parse optional requires-clause (P4283).  */
+  tree requires_clause = cp_parser_contract_requires_clause (parser);
+
+  /* If the requires-clause was ill-formed, skip to end of statement to
+     avoid cascading errors from the missing predicate.  */
+  if (requires_clause == error_mark_node)
+    {
+      cp_parser_skip_to_end_of_statement (parser);
+      cp_parser_consume_semicolon_at_end_of_statement (parser);
+      return error_mark_node;
+    }
+
   location_t attrs_loc = cp_lexer_peek_token (parser->lexer)->location;
   tree std_attrs = cp_parser_std_attribute_spec_seq (parser);
   if (std_attrs)
@@ -34801,6 +34839,199 @@ cp_function_contract_specifier_intro (cp_parser *parser)
   return contract_name;
 }
 
+/* Starting at token N, which must be an opening (, [ or {, return the
+   index just past the matching close, or 0 if there is none before EOF.
+   Used by cp_maybe_function_contract_specifier so that a bracketed group
+   can be stepped over atomically.  */
+
+static size_t
+cp_skip_balanced_group (cp_parser *parser, size_t n)
+{
+  cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, n);
+  enum cpp_ttype open = tok->type, close;
+
+  switch (open)
+    {
+    case CPP_OPEN_PAREN:   close = CPP_CLOSE_PAREN;  break;
+    case CPP_OPEN_SQUARE:  close = CPP_CLOSE_SQUARE; break;
+    case CPP_OPEN_BRACE:   close = CPP_CLOSE_BRACE;  break;
+    default:               return n;
+    }
+
+  unsigned depth = 0;
+  for (;;)
+    {
+      tok = cp_lexer_peek_nth_token (parser->lexer, n);
+      if (tok->type == CPP_EOF)
+	return 0;
+      if (tok->type == open)
+	++depth;
+      else if (tok->type == close && --depth == 0)
+	return n + 1;
+      ++n;
+    }
+}
+
+/* Whether the Nth token introduces a function-contract-specifier.  The
+   nth-token form of cp_function_contract_specifier_intro, for lookahead.  */
+
+static bool
+cp_nth_token_is_contract_intro_p (cp_parser *parser, size_t n)
+{
+  cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, n);
+  return (tok->type == CPP_NAME
+	  && (id_equal (tok->u.value, "pre") || id_equal (tok->u.value, "post")));
+}
+
+/* Starting at token N, which must be the `requires' keyword introducing a
+   contract assertion's requires-clause (P4283), return the index of the
+   token that opens the contract predicate, or 0 if the predicate cannot be
+   located.
+
+   The constraint need not be parenthesized -- "pre requires Foo<T> (x > 0)"
+   is a legitimate constraint-logical-or-expression -- so the predicate's (
+   is not simply the token after `requires', nor the first ( to be seen.
+   Neither is it the first ( that nothing constraint-like follows: between
+   the constraint and the predicate the grammar allows an
+   attribute-specifier-seq and, on a postcondition, a capture list, as in
+   "post requires (C) [old = x] (r : r == old)".
+
+   So scan to the END of this specifier instead and take the LAST
+   parenthesized group before it, stepping over bracketed groups atomically.
+   The specifier ends at a token that can follow a contract but appear in
+   none of its parts: the body's {, a ;, a ctor-initializer's :, an = , or
+   the `pre'/`post' that starts the next specifier in the seq.
+
+   If CONSTRAINT_END is non-null, store there the index just past the end of
+   the CONSTRAINT, which is not the same position: the attributes and the
+   capture list sit between the two and belong to the caller, not to the
+   clause.  A caller that cached up to the predicate instead would swallow
+   them, and they would go unparsed -- silently, since both are optional.
+
+   A { is the body only when it is not a requirement-body: in
+   "pre requires requires (T t) { t.val; } (x > 0)" the braces belong to a
+   requires-expression, whose optional parameter list is also not the
+   predicate.  AFTER_REQUIRES tracks that, and is what distinguishes those
+   two ( groups and those two { groups from the ones that end the scan.
+
+   Returning 0 means the caller should parse the clause as it always has.
+   That covers a clause with no predicate at all ("pre requires (C);", where
+   the single group is the constraint, so LAST_PAREN never moves past
+   START), and a constraint carrying a top-level comma, which this scan does
+   not track angle brackets closely enough to step over.
+
+   This is the one place that decides where the constraint ends and the
+   predicate begins, for both the lookahead in
+   cp_maybe_function_contract_specifier and the token cache built when the
+   clause is deferred.  Those two must agree: if they disagreed, a
+   declaration would be recognized as carrying a contract and then cached at
+   a different boundary than the one that recognized it.  */
+
+static size_t
+cp_skip_contract_requires_clause (cp_parser *parser, size_t n,
+				  size_t *constraint_end)
+{
+  gcc_checking_assert (cp_lexer_nth_token_is_keyword (parser->lexer, n,
+						      RID_REQUIRES));
+  const size_t start = ++n;
+  /* The last ( group seen, and where the constraint ended just before it.
+     Both are provisional until the scan stops: any ( group may turn out to
+     have a later one after it, which makes it part of the constraint
+     instead.  */
+  size_t pred = 0, pred_cend = 0;
+  /* Where the constraint would end if it ended here.  A [ group never
+     advances it -- an attribute-specifier-seq or capture list is written
+     after the constraint, so anything from the last non-[ item onwards is
+     the caller's, not the clause's.  */
+  size_t cend = start;
+  /* Whether the preceding token was a `requires' introducing a
+     requires-EXPRESSION, whose parameter list and requirement-body are part
+     of the constraint.  False at START: the clause's own `requires' takes no
+     parameter list.  */
+  bool after_requires = false;
+
+  for (;;)
+    {
+      cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, n);
+
+      switch (tok->type)
+	{
+	case CPP_EOF:
+	case CPP_SEMICOLON:
+	case CPP_COMMA:
+	case CPP_COLON:
+	case CPP_EQ:
+	case CPP_CLOSE_PAREN:
+	case CPP_CLOSE_SQUARE:
+	case CPP_CLOSE_BRACE:
+	  goto done;
+
+	case CPP_OPEN_BRACE:
+	  if (!after_requires)
+	    /* The function body.  */
+	    goto done;
+	  /* A requirement-body.  */
+	  n = cp_skip_balanced_group (parser, n);
+	  if (n == 0)
+	    return 0;
+	  cend = n;
+	  after_requires = false;
+	  continue;
+
+	case CPP_OPEN_SQUARE:
+	  /* An attribute-specifier-seq, a capture list, or a lambda
+	     introducer inside the constraint.  Deliberately does not advance
+	     CEND: which of the three it is only becomes clear from whether a
+	     further ( follows, and leaving CEND behind makes the first two
+	     fall outside the constraint by construction.  */
+	  n = cp_skip_balanced_group (parser, n);
+	  if (n == 0)
+	    return 0;
+	  after_requires = false;
+	  continue;
+
+	case CPP_OPEN_PAREN:
+	  if (!after_requires)
+	    {
+	      pred = n;
+	      pred_cend = cend;
+	    }
+	  /* else a requires-expression's parameter list, which the following
+	     requirement-body belongs to -- leave AFTER_REQUIRES set.  */
+	  n = cp_skip_balanced_group (parser, n);
+	  if (n == 0)
+	    return 0;
+	  cend = n;
+	  continue;
+
+	default:
+	  if (tok->keyword == RID_REQUIRES)
+	    {
+	      after_requires = true;
+	      cend = ++n;
+	      continue;
+	    }
+	  /* The next specifier in the seq -- but only once a predicate has
+	     been seen, so that a constraint naming something spelled `pre'
+	     or `post' does not end the scan before there is one.  */
+	  if (pred && cp_nth_token_is_contract_intro_p (parser, n))
+	    goto done;
+	  after_requires = false;
+	  cend = ++n;
+	  continue;
+	}
+    }
+
+done:
+  /* Nothing was left between `requires' and the group for the constraint to
+     be, so that group is the constraint and there is no predicate.  */
+  if (pred_cend <= start)
+    return 0;
+  if (constraint_end)
+    *constraint_end = pred_cend;
+  return pred;
+}
+
 /* Look ahead to see if this might introduce a function contract specifier.
    If not return NULL_TREE, if successful return the name (pre or post).  */
 
@@ -34812,6 +35043,52 @@ cp_maybe_function_contract_specifier (cp_parser *parser)
     return NULL_TREE;
 
   size_t n = 2;
+  /* Skip optional assertion-control-specifier: < constant-expression >
+
+     The constant-expression may itself contain <, > or ; inside a
+     bracketed group -- a relational operator in a parenthesized
+     subexpression, say, or a statement in a lambda body.  Step over any
+     such group atomically so that only the angle brackets that actually
+     delimit the specifier are counted.  */
+  if (cp_lexer_nth_token_is (parser->lexer, n, CPP_LESS))
+    {
+      unsigned depth = 1;
+      ++n;
+      while (depth > 0)
+	{
+	  cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, n);
+	  if (tok->type == CPP_OPEN_PAREN
+	      || tok->type == CPP_OPEN_SQUARE
+	      || tok->type == CPP_OPEN_BRACE)
+	    {
+	      n = cp_skip_balanced_group (parser, n);
+	      if (n == 0)
+		return NULL_TREE;
+	      continue;
+	    }
+	  if (tok->type == CPP_LESS)
+	    ++depth;
+	  else if (tok->type == CPP_GREATER)
+	    --depth;
+	  else if (tok->type == CPP_RSHIFT && cxx_dialect != cxx98)
+	    {
+	      if (depth >= 2)
+		depth -= 2;
+	      else
+		--depth;
+	    }
+	  else if (tok->type == CPP_EOF || tok->type == CPP_SEMICOLON)
+	    return NULL_TREE;
+	  ++n;
+	}
+    }
+  /* Skip optional requires-clause (P4283).  */
+  if (cp_lexer_nth_token_is_keyword (parser->lexer, n, RID_REQUIRES))
+    {
+      n = cp_skip_contract_requires_clause (parser, n);
+      if (n == 0)
+	return NULL_TREE;
+    }
   if (cp_nth_tokens_can_be_std_attribute_p (parser, n))
     n = cp_parser_skip_std_attribute_spec_seq (parser, n);
   /* Skip optional postcondition capture list: [ ... ] */
@@ -34862,6 +35139,30 @@ cp_parser_function_contract_specifier (cp_parser *parser, bool defer)
   cp_lexer_consume_token (parser->lexer);
   location_t loc = token->location;
   bool postcondition_p = id_equal (contract_name, "post");
+
+  /* Whether the predicate -- and with it the requires-clause and the
+     postcondition captures, which can name the same parameters -- has to
+     be token-cached and replayed later.  Decided here rather than at the
+     point of use because the requires-clause is read first and needs the
+     same answer.  See the comment on the deferral below.  */
+  const bool defer_p
+    = defer || (current_class_type && TYPE_BEING_DEFINED (current_class_type));
+
+  /* Parse optional assertion-control-specifier: < constant-expression >  */
+  tree label = cp_parser_assertion_control_specifier (parser);
+
+  /* Parse optional requires-clause (P4283).  */
+  tree requires_clause = cp_parser_contract_requires_clause (parser, defer_p);
+
+  /* If the requires-clause was ill-formed, skip to the end of the contract
+     specifier (consuming the predicate paren group if present) to avoid
+     cascading errors.  */
+  if (requires_clause == error_mark_node)
+    {
+      if (cp_lexer_next_token_is (parser->lexer, CPP_OPEN_PAREN))
+	cp_parser_skip_to_closing_parenthesis (parser, true, false, true);
+      return error_mark_node;
+    }
 
   location_t attrs_loc = cp_lexer_peek_token (parser->lexer)->location;
   tree std_attrs = cp_parser_std_attribute_spec_seq (parser);
