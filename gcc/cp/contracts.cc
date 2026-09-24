@@ -6790,11 +6790,72 @@ build_local_violation_trampoline (tree label_type, tree hcv_fn,
   return finish_contract_trampoline (body, compound_stmt);
 }
 
-  TREE_READONLY (ctor) = true;
-  if (can_be_const)
-    TREE_CONSTANT (ctor) = true;
+/* Build a trampoline function for the queryable_label facet (P3400).
+   Generates:
+     void* __contract_query_N(const void* label_ptr,
+                              const void* key, size_t index)
+     { return ((const LabelType*)label_ptr)->query(key, index); }
+   This matches __cxa_query_fn_t in the ABI.  */
 
-  return ctor;
+static tree
+build_query_trampoline (tree label_type)
+{
+  /* Build function type: void*(const void*, const void*, size_t).  */
+  tree const_void_ptr = build_pointer_type (
+    cp_build_qualified_type (void_type_node, TYPE_QUAL_CONST));
+  tree void_ptr = build_pointer_type (void_type_node);
+
+  tree fn_type = build_function_type_list (void_ptr,
+					   const_void_ptr,
+					   const_void_ptr,
+					   size_type_node,
+					   NULL_TREE);
+
+  /* Save the enclosing parse state for the duration; see
+     trampoline_scope.  */
+  trampoline_scope sentry;
+
+  location_t loc = BUILTINS_LOCATION;
+  static int query_trampoline_counter = 0;
+  tree body, compound_stmt;
+  tree parm_types[] = { const_void_ptr, const_void_ptr, size_type_node };
+  tree fn_decl
+    = begin_contract_trampoline ("__contract_query", query_trampoline_counter,
+				 fn_type, parm_types, &body, &compound_stmt);
+
+  tree parm_label_ptr = DECL_ARGUMENTS (fn_decl);
+  tree parm_key = DECL_CHAIN (parm_label_ptr);
+  tree parm_index = DECL_CHAIN (parm_key);
+
+  /* Cast: const LabelType& lbl = *(const LabelType*) label_ptr;  */
+  tree const_label_type = cp_build_qualified_type (label_type, TYPE_QUAL_CONST);
+  tree label_ptr_type = build_pointer_type (const_label_type);
+  tree cast_label = build1 (NOP_EXPR, label_ptr_type, parm_label_ptr);
+  tree label_ref = cp_build_indirect_ref (loc, cast_label,
+					  RO_UNARY_STAR, tf_warning_or_error);
+
+  /* Call: lbl.query(key, index);  */
+  tree query_id = get_identifier ("query");
+  tree query_fns = lookup_member (label_type, query_id,
+				  /*protect=*/0, /*want_type=*/false,
+				  tf_warning_or_error);
+  vec<tree, va_gc> *args = NULL;
+  vec_safe_push (args, parm_key);
+  vec_safe_push (args, parm_index);
+  tree call = build_new_method_call (label_ref, query_fns, &args,
+				     NULL_TREE, LOOKUP_NORMAL,
+				     NULL, tf_none);
+
+  if (!call || call == error_mark_node)
+    {
+      abandon_contract_trampoline (body, compound_stmt);
+      return NULL_TREE;
+    }
+
+  /* Return the result (void*).  */
+  finish_return_stmt (call);
+
+  return finish_contract_trampoline (body, compound_stmt);
 }
 
 /* Build a named TU-local constant of TYPE.  */
