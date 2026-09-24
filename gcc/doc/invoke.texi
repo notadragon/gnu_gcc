@@ -3380,6 +3380,13 @@ fails, the execution is terminated immediately (without calling any handler).
 At compile-time there is no difference in behaviour between this option and
 the @code{enforce} case, since no handler is invoked at compile time.
 
+'@code{noexcept_enforce}' As @code{enforce}, except that the handler is
+invoked in a non-throwing context: a handler that exits by throwing
+terminates rather than propagating.  Requires @option{-fcontracts-p4298}.
+
+'@code{noexcept_observe}' As @code{observe}, with the same non-throwing
+handler context.  Requires @option{-fcontracts-p4298}.
+
 @opindex fcontracts-conservative-ipa
 @opindex fno-contracts-conservative-ipa
 @item -fcontracts-conservative-ipa
@@ -3491,12 +3498,14 @@ giving each @option{-fcontracts-p@var{nnnn}} option individually.
 @opindex fcontracts-p3290
 @opindex fcontracts-p3400
 @opindex fcontracts-p4283
+@opindex fcontracts-p4298
 @item -fcontracts-p3097
 @itemx -fcontracts-p3098
 @itemx -fcontracts-p3099
 @itemx -fcontracts-p3290
 @itemx -fcontracts-p3400
 @itemx -fcontracts-p4283
+@itemx -fcontracts-p4298
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines

@@ -97,6 +97,12 @@ __handle_contract_violation_default
     case std::contracts::evaluation_semantic::assume:
       std::cerr << " assume";
       break;
+    case std::contracts::evaluation_semantic::noexcept_observe:
+      std::cerr << " noexcept_observe";
+      break;
+    case std::contracts::evaluation_semantic::noexcept_enforce:
+      std::cerr << " noexcept_enforce";
+      break;
     default:
       std::cerr << " unknown(" << (int) violation.semantic() << ")";
   }
@@ -226,6 +232,7 @@ contract_violation::is_terminating() const noexcept
   auto __s = semantic();
   return __s == evaluation_semantic::enforce
       || __s == evaluation_semantic::quick_enforce
+      || __s == evaluation_semantic::noexcept_enforce;
 }
 
 void*
@@ -440,6 +447,33 @@ handle_observed_contract_violation(
   __do_handle_violation(__comment, __location, CXA_ES_OBSERVE);
 }
 
+// P4298 variants (caller compiled WITH -fcontracts-p4298): report the
+// noexcept_enforce/noexcept_observe semantics.  Same runtime behavior
+// otherwise -- normal return still aborts for enforce; a throwing handler
+// still terminates at the noexcept boundary.
+inline namespace __p4298
+{
+  [[noreturn]] void
+  handle_enforced_contract_violation(
+      std::nothrow_t,
+      const char* __comment,
+      const std::source_location& __location) noexcept
+  {
+    __do_handle_violation(__comment, __location, CXA_ES_NOEXCEPT_ENFORCE);
+    std::abort();
+  }
+
+  void
+  handle_observed_contract_violation(
+      std::nothrow_t,
+      const char* __comment,
+      const std::source_location& __location) noexcept
+  {
+    __do_handle_violation(__comment, __location, CXA_ES_NOEXCEPT_OBSERVE);
+  }
+} // inline namespace __p4298
+
+} // namespace contracts
 _GLIBCXX_END_NAMESPACE_VERSION
 } // namespace std
 
