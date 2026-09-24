@@ -710,33 +710,253 @@ parm_used_in_post_p (const_tree decl)
   return ((TREE_CODE (decl) == PARM_DECL) && DECL_LANG_FLAG_4 (decl));
 }
 
-/* If declaration DECL is a PARM_DECL and it appears in a postcondition, then
-   check that it is not a non-const by-value param. LOCATION is where the
-   expression was found and is used for diagnostic purposes.  */
+/* Data for check_postcondition_odr_use_r.  */
+
+struct postcondition_odr_use_data
+{
+  tree fndecl;		/* The function whose postcondition this is.  */
+  location_t loc;	/* Fallback location for the diagnostic.  */
+};
+
+/* cp_walk_tree callback implementing [dcl.contract.func]/7 over a FINISHED
+   postcondition predicate: "If the predicate of a postcondition assertion of
+   a function f odr-uses a non-reference parameter of f, that parameter ...
+   shall have const type."  */
+
+static tree check_postcondition_odr_use_r (tree *, int *, void *);
+
+/* E is a discarded-value expression inside a postcondition predicate.  Its
+   POTENTIAL RESULTS ([basic.def.odr]/2) are not odr-uses, so a parameter that
+   is one of them is exempt; everything else in E is walked normally, because
+   a subexpression that is not a potential result -- an argument to a call, the
+   condition of a ?: -- is evaluated and odr-uses whatever it names.  */
+
+static void
+walk_discarded_operand (tree e, postcondition_odr_use_data *d)
+{
+  if (!e)
+    return;
+
+  STRIP_ANY_LOCATION_WRAPPER (e);
+  /* The contract const wrapper and plain lvalue wrappers are transparent.  A
+     NOP_EXPR is deliberately NOT stripped: an ordinary conversion applies the
+     lvalue-to-rvalue conversion, which makes its operand odr-used.  */
+  while (TREE_CODE (e) == VIEW_CONVERT_EXPR
+	 || TREE_CODE (e) == NON_LVALUE_EXPR)
+    {
+      e = TREE_OPERAND (e, 0);
+      STRIP_ANY_LOCATION_WRAPPER (e);
+    }
+
+  /* A cast to void is itself a discarded-value expression, and convert_to_void
+     also builds one when it does not fold the operand away.
+
+     TREE_TYPE can be null here, so test it before asking what it is.  A
+     postcondition's result binding is a PARM_DECL of type auto until the
+     return type is deduced, which makes the predicate type-dependent while it
+     is being parsed; a dependent member access, call, subscript or ?: is then
+     built by build_min_nt, and those carry no type at all.  A null-typed tree
+     is never a cast to void, so skipping this is also the right answer and
+     not merely a safe one.  (Dependent unary and binary operators do get a
+     dependent type, which is why `(r.id, true)` crashed here and
+     `(r.id + 0, true)` did not.)  */
+  if (TREE_TYPE (e)
+      && VOID_TYPE_P (TREE_TYPE (e))
+      && (TREE_CODE (e) == CONVERT_EXPR || TREE_CODE (e) == NOP_EXPR)
+      && TREE_OPERAND_LENGTH (e) == 1)
+    {
+      walk_discarded_operand (TREE_OPERAND (e, 0), d);
+      return;
+    }
+
+  switch (TREE_CODE (e))
+    {
+    case PARM_DECL:
+      /* A potential result, and not odr-used -- unless the lvalue-to-rvalue
+	 conversion is applied after all, which for a discarded-value
+	 expression happens only for a volatile glvalue ([expr.context]).  */
+      if (!CP_TYPE_VOLATILE_P (TREE_TYPE (e)))
+	return;
+      break;
+
+    case COMPOUND_EXPR:
+      /* `(a, b)` discarded: b supplies the potential results, and a is itself
+	 a discarded-value expression.  This is what `post ((x, y, true))`
+	 needs, since that parses as `((x, y), true)`.  */
+      walk_discarded_operand (TREE_OPERAND (e, 0), d);
+      walk_discarded_operand (TREE_OPERAND (e, 1), d);
+      return;
+
+    case COND_EXPR:
+      /* The second and third operands supply the potential results; the
+	 condition is evaluated for its value.  */
+      cp_walk_tree_without_duplicates (&TREE_OPERAND (e, 0),
+				       check_postcondition_odr_use_r, d);
+      walk_discarded_operand (TREE_OPERAND (e, 1), d);
+      walk_discarded_operand (TREE_OPERAND (e, 2), d);
+      return;
+
+    default:
+      break;
+    }
+
+  cp_walk_tree_without_duplicates (&e, check_postcondition_odr_use_r, d);
+}
+
+static tree
+check_postcondition_odr_use_r (tree *tp, int *walk_subtrees, void *data)
+{
+  tree t = *tp;
+  auto *d = (postcondition_odr_use_data *) data;
+
+  /* An unevaluated operand is not an odr-use.  Most of these have already
+     folded away by now, but a dependent one has not.
+
+     The set to stop at is not a judgement call: cp_walk_subtrees enters
+     exactly three kinds of subtree under `cp_unevaluated`, and this switch
+     covers all three.  Missing two of them rejected programs stock g++
+     accepts -- a decltype whose operand is still dependent, and a
+     requires-expression, which survives into the finished predicate whether
+     or not anything in it is dependent.  */
+  switch (TREE_CODE (t))
+    {
+    case SIZEOF_EXPR:
+    case ALIGNOF_EXPR:
+    case NOEXCEPT_EXPR:
+    case AT_ENCODE_EXPR:
+    case DECLTYPE_TYPE:
+    case REQUIRES_EXPR:
+      *walk_subtrees = 0;
+      return NULL_TREE;
+
+    /* An unexpanded pack, or a pack-index-expression whose index has not yet
+       selected an element.  Substitution rewrites these to the element that
+       is actually odr-used, and the walk that runs then sees only that one.
+       Descending here is what the old defer_postcondition_pack_index_check
+       flag existed to suppress, element by element, from the middle of
+       tsubst_pack_index.  */
+    case PACK_INDEX_EXPR:
+      *walk_subtrees = 0;
+      return NULL_TREE;
+
+    case COMPOUND_EXPR:
+      {
+	/* [expr.context]: the left operand of a comma is a discarded-value
+	   expression, and the lvalue-to-rvalue conversion is not applied to
+	   it unless it is volatile-qualified.  A parameter that IS that
+	   operand is therefore not odr-used ([basic.def.odr]/5) -- this is
+	   PR126897, `void f (bool b) post ((b, true)) {}`.
+
+	   convert_to_void has usually already replaced a side-effect-free
+	   discarded operand with void_node, in which case there is nothing
+	   here to find; but it does not fold a DEPENDENT predicate, which is
+	   what a postcondition with a result-name-introducer has while it is
+	   being parsed.  So recognise the shape rather than relying on it.
+
+	   What is exempt is the set of POTENTIAL RESULTS of the discarded
+	   operand, not everything in it: in `(f (b), true)` the parameter is
+	   an argument to the call, and that is an odr-use however the call's
+	   value is discarded.  walk_discarded_operand computes that set.  */
+	*walk_subtrees = 0;
+	walk_discarded_operand (TREE_OPERAND (t, 0), d);
+	cp_walk_tree_without_duplicates (&TREE_OPERAND (t, 1),
+					 check_postcondition_odr_use_r, data);
+	return NULL_TREE;
+      }
+
+    default:
+      break;
+    }
+
+  if (PACK_EXPANSION_P (t))
+    {
+      *walk_subtrees = 0;
+      return NULL_TREE;
+    }
+
+  if (TREE_CODE (t) != PARM_DECL)
+    return NULL_TREE;
+
+  /* [dcl.contract.func]/7 constrains a NON-REFERENCE parameter.  The old
+     id-expression check got this for free, because finish_id_expression hands
+     back an INDIRECT_REF for a reference parameter and never a bare
+     PARM_DECL; a tree walk descends through that wrapper and reaches the
+     PARM_DECL itself, so the reference case has to be excluded explicitly.  */
+  if (TYPE_REF_P (TREE_TYPE (t)))
+    return NULL_TREE;
+
+  /* The rule is about a parameter of f.  A lambda appearing in the predicate
+     has parameters of its own, and they are none of f's business -- naming
+     one is not a use of a parameter of f at all.
+
+     Identify those positively rather than by "context is not FNDECL": a
+     parameter's DECL_CONTEXT is not reliably the decl we were handed (a
+     redeclaration chain has several, and the contract may hang off any of
+     them), so an identity test would silently skip everything.  A lambda's
+     operator(), on the other hand, is recognisable on its own terms -- and
+     when the contracted function IS a lambda, its own parameters still have
+     DECL_CONTEXT == FNDECL and so are not skipped here.  */
+  tree ctx = DECL_CONTEXT (t);
+  if (ctx && ctx != d->fndecl
+      && TREE_CODE (ctx) == FUNCTION_DECL
+      && LAMBDA_FUNCTION_P (ctx))
+    return NULL_TREE;
+
+  /* The synthesised parameter holding the return value is artificial.  */
+  if (DECL_ARTIFICIAL (t))
+    return NULL_TREE;
+
+  set_parm_used_in_post (t);
+
+  if (!dependent_type_p (TREE_TYPE (t))
+      && !CP_TYPE_CONST_P (TREE_TYPE (t)))
+    {
+      auto_diagnostic_group dg;
+      location_t loc = DECL_SOURCE_LOCATION (t);
+      if (d->loc != UNKNOWN_LOCATION)
+	loc = d->loc;
+      error_at (loc, "a value parameter used in a postcondition must be const");
+      inform (DECL_SOURCE_LOCATION (t), "parameter declared here");
+    }
+
+  return NULL_TREE;
+}
+
+/* Apply [dcl.contract.func]/7 to the finished postcondition predicate
+   CONDITION of FNDECL.
+
+   This runs on the FINISHED expression rather than on each id-expression as
+   it is parsed, because whether a parameter is odr-used is not known until
+   the expression around it is.  The motivating case is PR126897:
+
+     void f (bool b) post ((b, true)) {}
+
+   The left operand of a comma is a discarded-value expression to which the
+   lvalue-to-rvalue conversion is not applied, so naming `b` there is not an
+   odr-use ([basic.def.odr]/5) and the program is well-formed.  Checking at
+   id-expression time could not know that -- the parser had an identifier, not
+   an expression -- and rejected it.
+
+   Nothing here has to model discarded-value contexts: convert_to_void already
+   replaces a side-effect-free discarded operand with void_node, so such a
+   parameter is simply not in the finished tree.  What the walk must do is
+   avoid descending into the two places a parameter can appear without being
+   odr-used and WITHOUT being dropped -- an unevaluated operand, and an
+   unexpanded pack.  */
 
 void
-check_param_in_postcondition (tree decl, location_t location)
+check_postcondition_param_odr_uses (tree condition, tree fndecl,
+				    location_t loc)
 {
-  if (processing_postcondition
-      && TREE_CODE (decl) == PARM_DECL
-      /* TREE_CODE (decl) == PARM_DECL only holds for non-reference
-	 parameters.  */
-      && !cp_unevaluated_operand
-      /* Return value parameter has DECL_ARTIFICIAL flag set. The flag
-	 presence of the flag should be sufficient to distinguish the
-	 return value parameter in this context.  */
-      && !(DECL_ARTIFICIAL (decl)))
-    {
-      set_parm_used_in_post (decl);
+  if (!condition || condition == error_mark_node
+      || TREE_CODE (condition) == DEFERRED_PARSE)
+    return;
 
-      if (!dependent_type_p (TREE_TYPE (decl))
-	  && !CP_TYPE_CONST_P (TREE_TYPE (decl)))
-	{
-	  auto_diagnostic_group d;
-	  error_at (location,
-		    "a value parameter used in a postcondition must be const");
-	  inform (DECL_SOURCE_LOCATION (decl), "parameter declared here");
-	}
+  postcondition_odr_use_data data = { fndecl, loc };
+  cp_walk_tree_without_duplicates (&condition, check_postcondition_odr_use_r,
+				   &data);
+}
+
     }
 }
 
@@ -2239,7 +2459,10 @@ rebuild_postconditions (tree fndecl)
       /* Update the contract condition and result.  */
       POSTCONDITION_IDENTIFIER (contract) = newvar;
       CONTRACT_CONDITION (contract) = finish_contract_condition (condition);
-      processing_postcondition = old_pc;
+      /* [dcl.contract.func]/7 was already applied to this predicate when it
+	 was late-parsed (update_late_contract); re-substituting the result
+	 variable does not change which parameters it odr-uses.  */
+      processing_postcondition_predicate = old_pc;
       gcc_checking_assert (scope_chain && scope_chain->bindings
 			   && scope_chain->bindings->kind == sk_contract);
       pop_bindings_and_leave_scope ();
@@ -2349,7 +2572,8 @@ grok_contract (tree contract_spec, tree mode, tree result, cp_expr condition,
    if any.  */
 
 void
-update_late_contract (tree contract, tree result, cp_expr condition)
+update_late_contract (tree contract, tree fndecl, tree result,
+		      cp_expr condition)
 {
   if (TREE_CODE (contract) == POSTCONDITION_STMT)
     POSTCONDITION_IDENTIFIER (contract) = result;
@@ -2367,6 +2591,14 @@ update_late_contract (tree contract, tree result, cp_expr condition)
   /* The condition is converted to bool.  */
   condition = finish_contract_condition (condition);
   CONTRACT_CONDITION (contract) = condition;
+
+  /* The predicate is complete, so [dcl.contract.func]/7 can be applied to it.
+     This is the one place every late-parsed function contract passes through,
+     which is what makes it the right hook: a postcondition with no
+     result-name-introducer never reaches the result-variable rebuild.  */
+  if (POSTCONDITION_P (contract))
+    check_postcondition_param_odr_uses (condition, fndecl,
+					EXPR_LOCATION (contract));
 }
 
 /* Returns the precondition function for FNDECL, or null if not set.  */
