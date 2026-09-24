@@ -3490,11 +3490,13 @@ giving each @option{-fcontracts-p@var{nnnn}} option individually.
 @opindex fcontracts-p3099
 @opindex fcontracts-p3290
 @opindex fcontracts-p3400
+@opindex fcontracts-p4283
 @item -fcontracts-p3097
 @itemx -fcontracts-p3098
 @itemx -fcontracts-p3099
 @itemx -fcontracts-p3290
 @itemx -fcontracts-p3400
+@itemx -fcontracts-p4283
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines

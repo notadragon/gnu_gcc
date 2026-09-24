@@ -34534,6 +34534,90 @@ cp_parser_assertion_control_specifier (cp_parser *parser)
    parameter, and diagnosing them here keeps the error on the line that
    wrote the clause and lets the caller recover in one place.  */
 
+static tree
+cp_parser_contract_requires_clause (cp_parser *parser, bool defer = false)
+{
+  if (cp_lexer_peek_token (parser->lexer)->keyword != RID_REQUIRES)
+    return NULL_TREE;
+
+  location_t loc = cp_lexer_peek_token (parser->lexer)->location;
+
+  if (!flag_contracts_p4283)
+    {
+      error_at (loc,
+		"requires clause on contract assertions requires "
+		"%<-fcontracts-p4283%>");
+      /* Skip requires(...) to recover.  */
+      cp_lexer_consume_token (parser->lexer);
+      if (cp_lexer_next_token_is (parser->lexer, CPP_OPEN_PAREN))
+	cp_parser_skip_to_closing_parenthesis (parser, true, false, true);
+      return error_mark_node;
+    }
+
+  if (!processing_template_decl)
+    {
+      error_at (loc,
+		"requires clause on contract assertion only allowed on "
+		"templated functions");
+      cp_lexer_consume_token (parser->lexer);
+      if (cp_lexer_next_token_is (parser->lexer, CPP_OPEN_PAREN))
+	cp_parser_skip_to_closing_parenthesis (parser, true, false, true);
+      return error_mark_node;
+    }
+
+  /* Token-cache the constraint rather than parsing it here when the
+     parameters it may name are not in scope.  The cache runs from
+     `requires' up to the end of the constraint, so the replay sees EOF
+     exactly where the constraint ends and needs no lookahead of its own.
+     It stops there and not at the predicate: an attribute-specifier-seq
+     and a capture list may follow the constraint, and both belong to the
+     caller.
+
+     A clause whose end cannot be located is malformed -- `pre requires
+     (sizeof (T) > 0) ;' with no predicate at all, say.  Fall through to
+     the eager parse for those: it produces the same diagnostics it always
+     has, and a constraint that is about to be rejected has no use for the
+     parameters.  */
+  size_t cend = 0;
+  if (defer && cp_skip_contract_requires_clause (parser, 1, &cend))
+    {
+      cp_token *first = cp_lexer_peek_token (parser->lexer);
+      for (size_t i = 1; i < cend; ++i)
+	cp_lexer_consume_token (parser->lexer);
+      cp_token *last = cp_lexer_peek_token (parser->lexer);
+
+      tree clause = make_node (DEFERRED_PARSE);
+      DEFPARSE_TOKENS (clause) = cp_token_cache_new (first, last);
+      DEFPARSE_INSTANTIATIONS (clause) = NULL;
+      return clause;
+    }
+
+  /* Parse the requires-clause (including consuming 'requires').  Pass
+     lambda_p=true so that a '(' following the constraint (which is the
+     contract predicate) is not mistaken for a postfix function-call.  */
+  return cp_parser_requires_clause_opt (parser, /*lambda_p=*/true);
+}
+
+/* Parse an optional result-name-introducer
+
+     result-name-introducer:
+       identifier ':'
+
+   immediately inside a contract's condition parentheses.  Always parsed
+   -- even when POSTCONDITION_P is false -- so that a result name
+   misplaced on a precondition or contract_assert (which cannot declare
+   one) gets a targeted diagnostic naming the real problem, instead of
+   having its identifier fall through and be parsed as the start of the
+   predicate.  Doing so turns what was a "found ':' in
+   nested-name-specifier" cascade into one accurate error.
+
+   Returns the parsed identifier, or NULL_TREE if none is present or one
+   was present and rejected.
+
+   Note the grammar in the working paper writes attributed-identifier
+   here; an attribute on the result name is not accepted, matching the
+   pre-existing behaviour of the code this replaced.  */
+
 static cp_expr
 cp_parser_contract_result_name (cp_parser *parser, bool postcondition_p,
 				tree *attrs /* = NULL */)
@@ -35947,6 +36031,12 @@ cp_parser_constraint_requires_parens (cp_parser *parser, bool lambda_p)
 	  /* A primary-constraint-expression followed by a '[[' is not a
 	     postfix expression.  */
 	  if (cp_lexer_nth_token_is (parser->lexer, 2, CPP_OPEN_SQUARE))
+	    return pce_ok;
+
+	  /* In a contract requires-clause (lambda_p), a following '[' opens the
+	     postcondition capture list, not a subscript -- mirror the '(' case
+	     (the contract predicate) above.  */
+	  if (lambda_p)
 	    return pce_ok;
 
 	  gcc_fallthrough ();
