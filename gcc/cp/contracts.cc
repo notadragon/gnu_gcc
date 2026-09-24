@@ -5093,6 +5093,74 @@ rebuild_postconditions (tree fndecl)
 /* Extract a STRING_CST from a constant-evaluated const char* result.
    The result may be NOP_EXPR(ADDR_EXPR(STRING_CST)) or similar.  */
 
+static tree
+extract_string_from_const_char_ptr (tree result)
+{
+  if (!result || result == error_mark_node)
+    return NULL_TREE;
+  STRIP_NOPS (result);
+  if (TREE_CODE (result) == ADDR_EXPR)
+    {
+      tree operand = TREE_OPERAND (result, 0);
+      if (TREE_CODE (operand) == STRING_CST)
+	return operand;
+      if (VAR_P (operand) && DECL_INITIAL (operand)
+	  && TREE_CODE (DECL_INITIAL (operand)) == STRING_CST)
+	return DECL_INITIAL (operand);
+    }
+  if (TREE_CODE (result) == STRING_CST)
+    return result;
+  return NULL_TREE;
+}
+
+/* Apply a label's string-transforming facet (compute_comment or
+   compute_message) to the current value.  Returns the transformed
+   STRING_CST wrapped in build_string_literal, or the original on failure.  */
+
+static tree
+apply_label_string_facet (tree label, const char *facet_name,
+			  tree current_val, location_t loc)
+{
+  if (!label || label == error_mark_node
+      || !TREE_TYPE (label)
+      || type_dependent_expression_p (label))
+    return current_val;
+
+  tree label_type = TREE_TYPE (label);
+  if (!CLASS_TYPE_P (label_type))
+    return current_val;
+
+  tree fn_id = get_identifier (facet_name);
+  tree fn = lookup_member (label_type, fn_id,
+			   /*protect=*/0, /*want_type=*/false, tf_none);
+  if (!fn || fn == error_mark_node
+      || !label_facet_accessible_p (label_type, fn))
+    return current_val;
+
+  tree arg = current_val ? current_val
+			 : build_zero_cst (const_string_type_node);
+  vec<tree, va_gc> *args = NULL;
+  vec_safe_push (args, arg);
+  tree call = build_new_method_call (label, fn, &args,
+				     NULL_TREE, LOOKUP_NORMAL,
+				     NULL, tf_none);
+  if (!call || call == error_mark_node)
+    return current_val;
+
+  tree result = constant_facet_value (call, label_type, facet_name, loc);
+  tree str = extract_string_from_const_char_ptr (result);
+  if (str)
+    {
+      if (!current_val
+	  || (current_val && TREE_CODE (current_val) == STRING_CST))
+	return build_string (TREE_STRING_LENGTH (str),
+			     TREE_STRING_POINTER (str));
+      return build_string_literal (TREE_STRING_LENGTH (str),
+				   TREE_STRING_POINTER (str));
+    }
+  return current_val;
+}
+
 /* Make a string of the contract condition, if it is available.  */
 
 static tree
@@ -5185,6 +5253,31 @@ finish_contract_message (tree contract, tree message, tree condition,
    time, where the label was dependent and they were skipped outright, so
    compute_comment and compute_message never ran for a templated contract
    at all.  */
+
+void
+reresolve_contract_label_facets (tree contract, tree label, location_t loc)
+{
+  if (!label || label == error_mark_node
+      || type_dependent_expression_p (label))
+    return;
+
+  CONTRACT_GROUPS (contract) = NULL_TREE;
+  CONTRACT_EVALUATION_SEMANTIC (contract) = NULL_TREE;
+  CONTRACT_CONSTEXPR_EVALUATION_SEMANTIC (contract) = NULL_TREE;
+  CONTRACT_DYNAMIC (contract) = NULL_TREE;
+
+  CONTRACT_COMMENT (contract)
+    = apply_label_string_facet (label, "compute_comment",
+				CONTRACT_COMMENT (contract), loc);
+  CONTRACT_MESSAGE (contract)
+    = apply_label_string_facet (label, "compute_message",
+				CONTRACT_MESSAGE (contract), loc);
+}
+
+/* Build the argument list a facet named FACET_NAME is probed with, using FN
+   (the member found by lookup) to recover parameter types where they are not
+   fixed by the facet itself.  Returns NULL when the facet takes a shape this
+   does not know how to probe.  */
 
 static vec<tree, va_gc> *
 build_facet_probe_args (const char *facet_name, tree fn)
