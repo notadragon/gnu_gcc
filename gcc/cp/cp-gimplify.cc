@@ -2668,33 +2668,13 @@ cp_genericize_tree (tree* t_p, bool handle_invisiref_parm_p)
     cp_ubsan_instrument_member_accesses (t_p);
 }
 
-/* If a function that should end with a return in non-void
-   function doesn't obviously end with return, add ubsan
-   instrumentation code to verify it at runtime.  If -fsanitize=return
-   is not enabled, instrument __builtin_unreachable.  */
+/* Return the last executable statement of the (sub)body T, descending through
+   scopes, cleanup regions and statement lists, or NULL_TREE if there is none.
+   Used to decide whether control can fall off the end of a body.  */
 
-static void
-cp_maybe_instrument_return (tree fndecl)
+static tree
+cp_last_body_stmt (tree t)
 {
-  if (VOID_TYPE_P (TREE_TYPE (TREE_TYPE (fndecl)))
-      || DECL_CONSTRUCTOR_P (fndecl)
-      || DECL_DESTRUCTOR_P (fndecl)
-      || !targetm.warn_func_return (fndecl))
-    return;
-
-  if (!sanitize_flags_p (SANITIZE_RETURN, fndecl)
-      /* Don't add __builtin_unreachable () if not optimizing, it will not
-	 improve any optimizations in that case, just break UB code.
-	 Don't add it if -fsanitize=unreachable -fno-sanitize=return either,
-	 UBSan covers this with ubsan_instrument_return above where sufficient
-	 information is provided, while the __builtin_unreachable () below
-	 if return sanitization is disabled will just result in hard to
-	 understand runtime error without location.  */
-      && ((!optimize && !flag_unreachable_traps)
-	  || sanitize_flags_p (SANITIZE_UNREACHABLE, fndecl)))
-    return;
-
-  tree t = DECL_SAVED_TREE (fndecl);
   while (t)
     {
       switch (TREE_CODE (t))
@@ -2722,21 +2702,149 @@ cp_maybe_instrument_return (tree fndecl)
 		continue;
 	      }
 	  }
-	  break;
-	case RETURN_EXPR:
-	  return;
+	  return t;
 	default:
-	  break;
+	  return t;
 	}
-      break;
     }
-  if (t == NULL_TREE)
+  return NULL_TREE;
+}
+
+/* If FNDECL's body is a function-try-block, return its TRY_BLOCK (which still
+   carries FN_TRY_BLOCK_P at this point -- genericization to a TRY_CATCH_EXPR
+   happens later), descending the wrappers the front end places around a body:
+   the artificial outer scope, a cleanup region and the noexcept / throw()
+   exception-specification region.  Returns NULL_TREE otherwise (including for a
+   plain trailing try-block, which is not a function-try-block).  */
+
+static tree
+find_function_try_block (tree t)
+{
+  while (t)
+    {
+      switch (TREE_CODE (t))
+	{
+	case BIND_EXPR:
+	  t = BIND_EXPR_BODY (t);
+	  continue;
+	case MUST_NOT_THROW_EXPR:
+	case CLEANUP_POINT_EXPR:
+	  t = TREE_OPERAND (t, 0);
+	  continue;
+	case EH_SPEC_BLOCK:
+	  t = EH_SPEC_STMTS (t);
+	  continue;
+	case STATEMENT_LIST:
+	  {
+	    tree only = NULL_TREE;
+	    for (tree_stmt_iterator i = tsi_start (t); !tsi_end_p (i);
+		 tsi_next (&i))
+	      {
+		tree s = tsi_stmt (i);
+		if (TREE_CODE (s) == DEBUG_BEGIN_STMT)
+		  continue;
+		if (only)
+		  return NULL_TREE;
+		only = s;
+	      }
+	    if (!only)
+	      return NULL_TREE;
+	    t = only;
+	    continue;
+	  }
+	case TRY_BLOCK:
+	  return FN_TRY_BLOCK_P (t) ? t : NULL_TREE;
+	default:
+	  return NULL_TREE;
+	}
+    }
+  return NULL_TREE;
+}
+
+/* If a function that should end with a return in non-void
+   function doesn't obviously end with return, add ubsan
+   instrumentation code to verify it at runtime.  If -fsanitize=return
+   is not enabled, instrument __builtin_unreachable.  */
+
+static void
+cp_maybe_instrument_return (tree fndecl)
+{
+  if (VOID_TYPE_P (TREE_TYPE (TREE_TYPE (fndecl)))
+      || DECL_CONSTRUCTOR_P (fndecl)
+      || DECL_DESTRUCTOR_P (fndecl)
+      || !targetm.warn_func_return (fndecl))
     return;
+
+  /* Determine whether control can fall off the end of the function body.  If
+     the body definitely ends in a return (or we cannot tell where it ends),
+     there is no fall-off point to guard.  This detection is done first (before
+     the legacy skip gate below) so the P3100 path can act on it even at
+     -O0.  */
+  tree t = cp_last_body_stmt (DECL_SAVED_TREE (fndecl));
+  if (t == NULL_TREE || TREE_CODE (t) == RETURN_EXPR)
+    return;
+
   tree *p = &DECL_SAVED_TREE (fndecl);
   if (TREE_CODE (*p) == BIND_EXPR)
     p = &BIND_EXPR_BODY (*p);
 
   location_t loc = DECL_SOURCE_LOCATION (fndecl);
+
+  /* P3100: a value-returning function that can fall off its end without
+     returning ({stmt.return.flow.off}) is core-language UB guarded by an
+     implicit contract assertion.  Resolve the flow-off evaluation semantic
+     ONCE -- both the function-try-block fall-off guard and the after-construct
+     guard below use it, and resolving it twice would double any config-error
+     diagnostic emitted by resolve_implicit_contract_semantic.  For anything
+     other than "assume" emit the corresponding reaction; "assume" falls through
+     to the legacy behaviour below, keeping today's codegen byte-for-byte
+     identical.  */
+  if (flag_contracts_p3100)
+    {
+      contract_evaluation_semantic sem
+	= resolve_implicit_contract_semantic (fndecl, loc,
+					      "ub:stmt.return.flow.off");
+
+      /* For a function-try-block, control also reaches the end of the function
+	 by running off the end of the try-block body.  That point is inside the
+	 function-body scope -- the function-try-block's handlers can catch an
+	 exception thrown there -- so guard it separately, inside the try, in
+	 addition to the guard after the whole construct (below) which covers a
+	 handler running off its own end.  */
+      if (sem != CES_ASSUME)
+	{
+	  tree try_block = find_function_try_block (DECL_SAVED_TREE (fndecl));
+	  if (try_block)
+	    {
+	      tree *body_p = &TRY_STMTS (try_block);
+	      tree last = cp_last_body_stmt (*body_p);
+	      if (last != NULL_TREE && TREE_CODE (last) != RETURN_EXPR)
+		{
+		  tree check = build_implicit_flow_off_check (fndecl, loc, sem);
+		  if (check)
+		    append_to_statement_list (check, body_p);
+		}
+	    }
+
+	  tree check = build_implicit_flow_off_check (fndecl, loc, sem);
+	  if (check)
+	    append_to_statement_list (check, p);
+	  return;
+	}
+    }
+
+  if (!sanitize_flags_p (SANITIZE_RETURN, fndecl)
+      /* Don't add __builtin_unreachable () if not optimizing, it will not
+	 improve any optimizations in that case, just break UB code.
+	 Don't add it if -fsanitize=unreachable -fno-sanitize=return either,
+	 UBSan covers this with ubsan_instrument_return above where sufficient
+	 information is provided, while the __builtin_unreachable () below
+	 if return sanitization is disabled will just result in hard to
+	 understand runtime error without location.  */
+      && ((!optimize && !flag_unreachable_traps)
+	  || sanitize_flags_p (SANITIZE_UNREACHABLE, fndecl)))
+    return;
+
   if (sanitize_flags_p (SANITIZE_RETURN, fndecl))
     t = ubsan_instrument_return (loc);
   else
