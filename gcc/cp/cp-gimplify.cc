@@ -4310,15 +4310,75 @@ process_stmt_hotness_attribute (tree std_attrs, location_t attrs_loc)
   return std_attrs;
 }
 
-/* Build IFN_ASSUME internal call for assume condition ARG.  */
+/* Build the raw IFN_ASSUME internal call for assume condition ARG (the
+   status-quo lowering of [[assume (ARG)]]).  */
 
-tree
-build_assume_call (location_t loc, tree arg)
+static tree
+build_assume_ifn (location_t loc, tree arg)
 {
   if (!processing_template_decl)
     arg = fold_build_cleanup_point_expr (TREE_TYPE (arg), arg);
   return build_call_expr_internal_loc (loc, IFN_ASSUME, void_type_node,
 				       1, arg);
+}
+
+/* Build the effect of [[assume (ARG)]] at LOC.
+
+   Under -fcontracts-p3100 the assume attribute is a configurable implicit
+   contract assertion (the assumed condition being false is that core-language
+   UB).  The properties of the predicate decide both the emitted group id and
+   which semantics are available for this instance: a side-effect-free,
+   non-trapping ARG can be evaluated, so it reports the qualified group
+   "ub:dcl.attr.assume.false.pure" and supports the full checking set;
+   otherwise it reports "ub:dcl.attr.assume.false.nonpure" and only
+   assume/ignore apply (a checking semantic then clamps to ignore).  The bare
+   "ub:dcl.attr.assume.false" is the never-emitted parent of the two.  The
+   decision is deferred while still in a template -- ARG may be
+   dependent and the check is baked at instantiation, when build_assume_call is
+   called again with the substituted operand.
+
+     assume   -> the status-quo IFN_ASSUME (no runtime check);
+     ignore   -> nothing (drop the assumption; no hint);
+     checking -> `if (!ARG) <reaction>`, plus the IFN_ASSUME hint for the
+		 enforcing family (ARG then provably holds); the observing
+		 family emits the check but no hint.  */
+
+tree
+build_assume_call (location_t loc, tree arg)
+{
+  if (flag_contracts_p3100
+      && current_function_decl
+      && !processing_template_decl)
+    {
+      bool checkable = (!TREE_SIDE_EFFECTS (arg)
+			&& !generic_expr_could_trap_p (arg));
+      uint16_t allowed = checkable ? CES_ALL_ALLOWED : (1 << CES_IGNORE);
+      /* A checkable (side-effect-free, non-trapping) predicate is a
+	 distinct, separately-matchable subset of this check -- same
+	 pattern as e.g. ub:expr.unary.dereference.nullptr -- so it gets
+	 its own qualified group id; see p3100-check-table.md.  */
+      const char *group = checkable ? "ub:dcl.attr.assume.false.pure"
+				     : "ub:dcl.attr.assume.false.nonpure";
+      contract_evaluation_semantic sem
+	= resolve_implicit_contract_semantic (current_function_decl, loc,
+					      group, allowed);
+      if (sem == CES_IGNORE)
+	return void_node;
+      if (sem != CES_ASSUME)
+	{
+	  tree check = cp_build_assume_check (loc, arg, sem);
+	  if (sem == CES_ENFORCE || sem == CES_QUICK
+	      || sem == CES_NOEXCEPT_ENFORCE)
+	    {
+	      /* The predicate now provably holds; keep the optimizer hint.  */
+	      tree hint = build_assume_ifn (loc, unshare_expr (arg));
+	      check = build2 (COMPOUND_EXPR, void_type_node, check, hint);
+	    }
+	  return check;
+	}
+      /* assume: fall through to the status-quo IFN_ASSUME.  */
+    }
+  return build_assume_ifn (loc, arg);
 }
 
 /* If [[assume (cond)]] appears on this statement, handle it.  */
