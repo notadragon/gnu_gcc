@@ -321,6 +321,13 @@ extern tree build_implicit_float_cast_check
    whose value may be outside the target enumeration ENUMTYPE's value range, for
    a non-fixed-underlying-type enum, for semantic SEM
    ({expr.static.cast.enum.outside.range}).  */
+extern tree build_implicit_enum_cast_check
+  (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
+/* P3100: for a pure virtual FN_ORIGINAL, return the FUNCTION_DECL of the
+   __cxa_pure_virtual terminus variant selected by the implicit contract
+   configuration for ub:class.abstract.pure.virtual (resolved at the location of
+   the class that declares FN_ORIGINAL, where its vtable is emitted), or
+   NULL_TREE to use the legacy __cxa_pure_virtual.  */
 extern tree build_implicit_pure_virtual_terminus (tree);
 extern bool contract_constexpr_ignored_p (const_tree);
 extern bool contract_constexpr_terminating_p (const_tree);

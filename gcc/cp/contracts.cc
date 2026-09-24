@@ -9321,6 +9321,46 @@ build_implicit_float_cast_check (tree fndecl, location_t loc,
    spans its whole storage mode there are no invalid values, so CONVERTED is
    returned unchanged (mirrors instrument_bool_enum_load's precision guard).  */
 
+tree
+build_implicit_enum_cast_check (tree fndecl, location_t loc,
+				contract_evaluation_semantic sem,
+				tree expr, tree converted, tree enumtype)
+{
+  gcc_checking_assert (sem != CES_ASSUME);
+  (void) fndecl;
+
+  /* The enumeration's [dcl.enum] value range is carried by
+     TREE_TYPE (enumtype), an INTEGER_TYPE.  Only values outside [min,max] are
+     UB; if that range covers the full storage mode there is nothing to
+     check.  */
+  tree range_type = TREE_TYPE (enumtype);
+  if (range_type == NULL_TREE
+      || TREE_CODE (range_type) != INTEGER_TYPE
+      || TYPE_MIN_VALUE (range_type) == NULL_TREE
+      || TYPE_MAX_VALUE (range_type) == NULL_TREE
+      || !(TYPE_PRECISION (range_type)
+	   < GET_MODE_PRECISION (SCALAR_INT_TYPE_MODE (enumtype))))
+    return converted;
+
+  tree minv = TYPE_MIN_VALUE (range_type);
+  tree maxv = TYPE_MAX_VALUE (range_type);
+
+  /* out_of_range := (unsigned)(expr - minv) > (maxv - minv), computed in an
+     unsigned type as wide as the source so a below-min value wraps to a large
+     unsigned and is caught too (mirrors the load-site enum check).  */
+  tree utype = unsigned_type_for (TREE_TYPE (expr));
+  tree off = fold_build2_loc (loc, MINUS_EXPR, utype,
+			      fold_convert (utype, expr),
+			      fold_convert (utype, minv));
+  tree span = fold_convert (utype, int_const_binop (MINUS_EXPR, maxv, minv));
+  tree cond = build2_loc (loc, GT_EXPR, boolean_type_node, off, span);
+  return build_implicit_op_guard (loc, sem, expr, cond, converted,
+				  "enumeration value out of range");
+}
+
+/* Accessors for the cached P3595 dynamic-selector descriptor stored in
+   CONTRACT_DYNAMIC by ensure_evaluation_semantic(..., in_ce=false).  */
+
 static const char *
 contract_dynamic_name (const_tree contract)
 {

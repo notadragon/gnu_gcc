@@ -37,6 +37,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "attribs.h"
 #include "escaped_string.h"
 #include "gcc-urlifier.h"
+#include "contracts.h"
 
 static tree convert_to_pointer_force (tree, tree, tsubst_flags_t);
 static tree build_type_conversion (tree, tree);
@@ -920,6 +921,66 @@ ocp_convert (tree type, tree expr, int convtype, int flags,
 	    return e2;
 
 	  return e;
+	}
+
+      /* P3100: guard a floating-point -> integer conversion whose truncated
+	 value may not be representable in the destination integer type
+	 ({conv.fpint}).  Resolve the semantic up front so that the status-quo
+	 "assume" leaves the conversion untouched.  */
+      if (flag_contracts_p3100
+	  && current_function_decl != NULL_TREE
+	  && !processing_template_decl
+	  && !cp_unevaluated_operand
+	  && SCALAR_FLOAT_TYPE_P (intype)
+	  && TREE_CODE (type) == INTEGER_TYPE)
+	{
+	  /* No implicit UB check in an unevaluated operand: no code is
+	     generated for it, and a P3100 implicit assertion must never change
+	     the result of the noexcept operator (see the parallel gate and
+	     rationale in cp_build_binary_op).  */
+	  contract_evaluation_semantic sem
+	    = resolve_implicit_contract_semantic
+		(current_function_decl, loc,
+		 "ub:conv.fpint.float.not.represented");
+	  if (sem != CES_ASSUME)
+	    {
+	      tree saved = cp_save_expr (e);
+	      converted = convert_to_integer_maybe_fold (type, saved, dofold);
+	      converted
+		= build_implicit_float_cast_check (current_function_decl, loc,
+						   sem, saved, converted);
+	      return ignore_overflows (converted, e);
+	    }
+	}
+
+      /* P3100: guard an integer/enumeration -> enumeration conversion whose
+	 value may be outside the target enumeration's value range, when the enum
+	 has no fixed underlying type ({expr.static.cast.enum.outside.range}).  A
+	 fixed-underlying enum, or a floating-point source, was already converted
+	 through the underlying type above and is not UB (a REAL_TYPE source is
+	 excluded by INTEGRAL_OR_ENUMERATION_TYPE_P below).  The unevaluated-
+	 operand exclusion is for the same reason as the float-cast gate above.  */
+      if (flag_contracts_p3100
+	  && current_function_decl != NULL_TREE
+	  && !processing_template_decl
+	  && !cp_unevaluated_operand
+	  && TREE_CODE (type) == ENUMERAL_TYPE
+	  && !ENUM_FIXED_UNDERLYING_TYPE_P (type)
+	  && INTEGRAL_OR_ENUMERATION_TYPE_P (intype))
+	{
+	  contract_evaluation_semantic sem
+	    = resolve_implicit_contract_semantic
+		(current_function_decl, loc,
+		 "ub:expr.static.cast.enum.outside.range");
+	  if (sem != CES_ASSUME)
+	    {
+	      tree saved = cp_save_expr (e);
+	      converted = convert_to_integer_maybe_fold (type, saved, dofold);
+	      converted
+		= build_implicit_enum_cast_check (current_function_decl, loc,
+						  sem, saved, converted, type);
+	      return ignore_overflows (converted, e);
+	    }
 	}
 
       converted = convert_to_integer_maybe_fold (type, e, dofold);
