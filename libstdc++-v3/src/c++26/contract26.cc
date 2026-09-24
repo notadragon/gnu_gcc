@@ -191,6 +191,19 @@ contract_violation::comment() const noexcept
   return __p ? *__p : "";
 }
 
+const char*
+contract_violation::message() const noexcept
+{
+  using namespace __cxxabiv1;
+  auto __p = __cxa_find_field_ptr<const char*>(
+      _M_chain, CXA_FIELD_MESSAGE);
+  // Unlike comment(), a missing message field yields nullptr, not "": P3099
+  // "Option C1" keeps "no message supplied" (nullptr) distinct from an empty
+  // message (""), so a violation with no diagnostic-message field at all (a
+  // P3290 API/C-assert violation, or a C++26 TU) reports nullptr.
+  return __p ? *__p : nullptr;
+}
+
 std::source_location
 contract_violation::location() const noexcept
 {
