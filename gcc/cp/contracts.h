@@ -154,6 +154,7 @@ extern tree contract_specifiers_concat		(tree, tree);
 extern tree finish_contract_condition		(cp_expr);
 extern void update_late_contract		(tree, tree, cp_expr);
 extern void check_redecl_contract		(tree, tree);
+extern void check_contract_on_defaulted_or_deleted (tree, bool);
 extern tree invalidate_contract			(tree);
 extern tree copy_and_remap_contracts		(tree, tree, contract_match_kind = cmk_all);
 extern void diagnose_coroutine_postcondition_params (tree);
