@@ -189,13 +189,19 @@ enum contract_match_kind
 
 extern void init_contracts			(void);
 
-extern tree grok_contract			(tree, tree, tree, cp_expr, location_t);
+extern tree grok_contract			(tree, tree, cp_expr,
+						 location_t,
+						 tree = NULL_TREE,
+						 tree = NULL_TREE,
+						 tree = NULL_TREE);
 extern tree build_contract_specifiers		(vec<tree, va_gc> *);
 extern tree contract_specifiers_concat		(tree, tree);
 extern void resolve_contract_label		(tree, tree, location_t);
 extern void reresolve_contract_label_facets (tree, tree, location_t);
 extern tree finish_contract_condition		(cp_expr);
-extern void update_late_contract		(tree, tree, cp_expr);
+extern tree finish_contract_message		(tree, tree, tree, location_t);
+extern bool maybe_define_contract_wrapper	(tree);
+extern void update_late_contract		(tree, tree, tree, cp_expr);
 extern void check_redecl_contract		(tree, tree);
 extern void check_contract_on_defaulted_or_deleted (tree, bool);
 extern tree invalidate_contract			(tree);
