@@ -957,6 +957,53 @@ check_postcondition_param_odr_uses (tree condition, tree fndecl,
 				   &data);
 }
 
+/* [dcl.fct.def.coroutine]/5 says a coroutine behaves as if the top-level
+   cv-qualifiers on all its parameters were removed -- so a by-value
+   parameter is never truly const within the coroutine's real definition,
+   however it is spelled.  A postcondition odr-using such a parameter must
+   have it const ([dcl.contract.func]), and the two requirements cannot
+   both be met.  The standard states the consequence outright, as a note
+   ([dcl.fct.def.coroutine]/6): "An odr-use of a non-reference parameter in
+   a postcondition assertion of a coroutine is ill-formed."
+
+   A reference parameter is fine: its copy is bound to the same object.  So is
+   a precondition, which is not subject to the const rule.
+
+   This cannot be checked where the const rule is, because a function is not
+   known to be a coroutine until its body has been parsed -- which is after
+   its contracts.  FNDECL's parameters carry the flag set by
+   check_postcondition_param_odr_uses, so the check is a walk once we know.  */
+
+void
+diagnose_coroutine_postcondition_params (tree fndecl)
+{
+  for (tree parm = DECL_ARGUMENTS (fndecl); parm; parm = DECL_CHAIN (parm))
+    if (parm_used_in_post_p (parm))
+      {
+	auto_diagnostic_group d;
+	error_at (DECL_SOURCE_LOCATION (parm),
+		  "parameter %qD is odr-used in a postcondition of a "
+		  "coroutine", parm);
+	inform (DECL_SOURCE_LOCATION (parm),
+		"a coroutine copies its parameters at the beginning of the "
+		"replacement body, so a postcondition cannot name one; "
+		"consider a reference parameter");
+      }
+}
+
+/* [dcl.contract.func]/6: a deleted function, or one defaulted on its first
+   declaration, shall not have a function-contract-specifier-seq.  DECL has
+   just been marked as one of those; DELETED_P says which.  Diagnose a
+   contract on it and drop the contract, rather than silently ignoring it --
+   such a function has no body the precondition could guard, so the contract
+   was simply doing nothing.
+
+   The paragraph's third case, a *virtual* function, is DELIBERATELY NOT
+   implemented here: P3097 is the proposal that lifts precisely that
+   restriction, and this branch implements P3097.  A defaulted function that
+   is not on its first declaration is unaffected -- the contract lives on the
+   earlier declaration, which is where it belongs.  */
+
     }
 }
 
