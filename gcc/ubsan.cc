@@ -862,6 +862,22 @@ implicit_align_reaction (location_t loc)
    value and the optimizer stops assuming
    no overflow).  */
 
+static int
+implicit_overflow_reaction (location_t loc)
+{
+  if (!flag_contracts_p3100)
+    return IMPLICIT_UB_NONE;
+  return lang_hooks.resolve_implicit_ub_semantic (cfun->decl, loc,
+						  "ub:expr.expr.eval.signed.integer");
+}
+
+/* P3100: the reaction for an implicit invalid-value-load contract assertion
+   (ub:conv.lval.valid.representation) at LOC in the current function, or
+   IMPLICIT_UB_NONE when P3100 is off or the site resolves to assume.  Like
+   signed overflow, "ignore" resolves to IMPLICIT_UB_DEFINED here: the load is
+   instrumented so an out-of-range bool/enum value is replaced by a defined
+   valid value (0).  */
+
 /* Expand UBSAN_NULL internal call.  The type is kept on the ckind
    argument which is a constant, because the middle-end treats pointer
    conversions as useless and therefore the type of the first argument
@@ -1848,6 +1864,10 @@ tree
 ubsan_build_overflow_builtin (tree_code code, location_t loc, tree lhstype,
 			      tree op0, tree op1, tree *datap)
 {
+  /* P3100 implicit signed-overflow contract assertions do not reach here: they
+     are lowered entirely in pass_ubsan (see instrument_si_overflow_contract),
+     which runs before inlining so the semantic is resolved once with the
+     correct enclosing-function context.  This RTL path is sanitizer-only.  */
   if (flag_sanitize_trap & SANITIZE_SI_OVERFLOW)
     return build_call_expr_loc (loc, builtin_decl_explicit (BUILT_IN_TRAP), 0);
 
@@ -1897,13 +1917,131 @@ ubsan_build_overflow_builtin (tree_code code, location_t loc, tree lhstype,
 			      : NULL_TREE);
 }
 
-/* Perform the signed integer instrumentation.  GSI is the iterator
-   pointing at statement we are trying to instrument.  */
+/* P3100: lower an implicit signed-overflow contract assertion at the statement
+   *GSI points to.  REACTION is the language-neutral reaction already resolved
+   (once, here in pass_ubsan, with the correct enclosing-function context, so
+   inlining can never change it).  STMT is a signed PLUS/MINUS/MULT/NEGATE assign
+   that may overflow.  We rewrite it into a .{ADD,SUB,MUL}_OVERFLOW internal call
+   whose real part is the defined 2's-complement wrapped result (used
+   unconditionally) and, unless REACTION is IMPLICIT_UB_DEFINED (ignore), a
+   very-unlikely branch on the overflow flag to the reaction: a trap for
+   quick_enforce, or the nothrow contract handler for noexcept_enforce/observe
+   (enforce is noreturn; observe returns and continues with the wrapped result).
+   Using an internal function for the operation also stops the optimizer
+   assuming it cannot overflow, so loops built on it are no longer treated as
+   provably finite -- exactly the codegen change ignore/observe must make.  On
+   return *GSI points at the (new) statement defining LHS, in the original block,
+   so the caller's per-bb loop resumes cleanly.  */
 
 static void
-instrument_si_overflow (gimple_stmt_iterator gsi)
+instrument_si_overflow_contract (gimple_stmt_iterator *gsi, int reaction)
 {
-  gimple *stmt = gsi_stmt (gsi);
+  gimple *stmt = gsi_stmt (*gsi);
+  tree_code code = gimple_assign_rhs_code (stmt);
+  tree lhs = gimple_assign_lhs (stmt);
+  tree type = TREE_TYPE (lhs);
+  location_t loc = gimple_location (stmt);
+  internal_fn ifn;
+  tree a, b;
+
+  switch (code)
+    {
+    case PLUS_EXPR:
+      ifn = IFN_ADD_OVERFLOW;
+      a = gimple_assign_rhs1 (stmt); b = gimple_assign_rhs2 (stmt);
+      break;
+    case MINUS_EXPR:
+      ifn = IFN_SUB_OVERFLOW;
+      a = gimple_assign_rhs1 (stmt); b = gimple_assign_rhs2 (stmt);
+      break;
+    case MULT_EXPR:
+      ifn = IFN_MUL_OVERFLOW;
+      a = gimple_assign_rhs1 (stmt); b = gimple_assign_rhs2 (stmt);
+      break;
+    case NEGATE_EXPR:
+      /* -u is 0 - u; .SUB_OVERFLOW (0, u) overflows exactly for u == INT_MIN.  */
+      ifn = IFN_SUB_OVERFLOW;
+      a = build_zero_cst (type); b = gimple_assign_rhs1 (stmt);
+      break;
+    default:
+      gcc_unreachable ();
+    }
+
+  /* res = .{ADD,SUB,MUL}_OVERFLOW (a, b);  complex: real = wrapped result,
+     imag = nonzero iff the operation overflowed.  */
+  tree ctype = build_complex_type (type);
+  gcall *gc = gimple_build_call_internal (ifn, 2, a, b);
+  tree res = make_ssa_name (ctype);
+  gimple_call_set_lhs (gc, res);
+  gimple_set_location (gc, loc);
+  gsi_insert_before (gsi, gc, GSI_SAME_STMT);
+
+  /* lhs = REALPART_EXPR <res>;  the defined wrapped result, used regardless of
+     whether the operation overflowed.  Replaces the original assignment.  */
+  gassign *gr = gimple_build_assign (lhs, REALPART_EXPR,
+				     build1 (REALPART_EXPR, type, res));
+  gimple_set_location (gr, loc);
+  gsi_replace (gsi, gr, true);
+
+  if (reaction == IMPLICIT_UB_DEFINED)
+    /* ignore: the wrapped result, no reaction and no branch.  */
+    return;
+
+  /* ovf = IMAGPART_EXPR <res>;  */
+  tree ovf = make_ssa_name (type);
+  gassign *gi = gimple_build_assign (ovf, IMAGPART_EXPR,
+				     build1 (IMAGPART_EXPR, type, res));
+  gimple_set_location (gi, loc);
+  gsi_insert_after (gsi, gi, GSI_NEW_STMT);
+
+  /* if (ovf != 0) <reaction>;  */
+  basic_block then_bb, fallthru_bb;
+  gimple_stmt_iterator cond_gsi
+    = create_cond_insert_point (gsi, /*before_p=*/false,
+				/*then_more_likely_p=*/false,
+				/*create_then_fallthru_edge=*/true,
+				&then_bb, &fallthru_bb);
+  gcond *cond = gimple_build_cond (NE_EXPR, ovf, build_zero_cst (type),
+				   NULL_TREE, NULL_TREE);
+  gimple_set_location (cond, loc);
+  gsi_insert_after (&cond_gsi, cond, GSI_NEW_STMT);
+
+  gimple *g;
+  if (reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE
+      || reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE)
+    {
+      tree entry = NULL_TREE, data_addr = NULL_TREE;
+      if (lang_hooks.build_implicit_ub_handler (cfun->decl, loc,
+						"ub:expr.expr.eval.signed.integer",
+						reaction, &entry, &data_addr))
+	/* noexcept_enforce (the decl encodes noreturn) / noexcept_observe
+	   (returns and falls through to the wrapped result).  Throwing
+	   enforce/observe are excluded from this check's allowed set on the
+	   front-end side and clamped away, so they never reach here.  */
+	g = gimple_build_call (entry, 1, data_addr);
+      else
+	g = gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
+    }
+  else
+    /* IMPLICIT_UB_TRAP (quick_enforce).  */
+    g = gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
+  gimple_stmt_iterator then_gsi = gsi_after_labels (then_bb);
+  gimple_set_location (g, loc);
+  gsi_insert_before (&then_gsi, g, GSI_SAME_STMT);
+
+  /* Resume the caller's per-bb walk at LHS's definition, which stays in the
+     original (now condition) block; the new then/fallthru blocks are visited
+     in turn by the pass's FOR_EACH_BB loop.  */
+  *gsi = gsi_for_stmt (gr);
+}
+
+/* Perform the signed integer instrumentation.  *GSI is the iterator pointing at
+   the statement we are trying to instrument.  */
+
+static void
+instrument_si_overflow (gimple_stmt_iterator *gsi)
+{
+  gimple *stmt = gsi_stmt (*gsi);
   tree_code code = gimple_assign_rhs_code (stmt);
   tree lhs = gimple_assign_lhs (stmt);
   tree lhstype = TREE_TYPE (lhs);
@@ -1919,6 +2057,28 @@ instrument_si_overflow (gimple_stmt_iterator gsi)
 	  && maybe_ne (GET_MODE_BITSIZE (TYPE_MODE (lhsinner)),
 		       TYPE_PRECISION (lhsinner))))
     return;
+
+  /* When the sanitizer is off, only instrument for a P3100 implicit
+     signed-overflow contract assertion.  A vector operation has no scalar
+     overflow site to check, and ABS is not handled by the contract lowering, so
+     both fall through to assume.  The site is resolved once here (pre-inline);
+     assume leaves the raw operation (optimized, byte-identical), any other
+     semantic is lowered by instrument_si_overflow_contract.  */
+  if (!sanitize_flags_p (SANITIZE_SI_OVERFLOW))
+    {
+      if (!flag_contracts_p3100
+	  || VECTOR_TYPE_P (lhstype)
+	  || BITINT_TYPE_P (lhsinner))
+	return;
+      if (code != PLUS_EXPR && code != MINUS_EXPR && code != MULT_EXPR
+	  && code != NEGATE_EXPR)
+	return;
+      int reaction = implicit_overflow_reaction (gimple_location (stmt));
+      if (reaction == IMPLICIT_UB_NONE)
+	return;
+      instrument_si_overflow_contract (gsi, reaction);
+      return;
+    }
 
   switch (code)
     {
@@ -1937,7 +2097,7 @@ instrument_si_overflow (gimple_stmt_iterator gsi)
 				      ? IFN_UBSAN_CHECK_SUB
 				      : IFN_UBSAN_CHECK_MUL, 2, a, b);
       gimple_call_set_lhs (g, lhs);
-      gsi_replace (&gsi, g, true);
+      gsi_replace (gsi, g, true);
       break;
     case NEGATE_EXPR:
       /* Represent i = -u;
@@ -1947,7 +2107,7 @@ instrument_si_overflow (gimple_stmt_iterator gsi)
       b = gimple_assign_rhs1 (stmt);
       g = gimple_build_call_internal (IFN_UBSAN_CHECK_SUB, 2, a, b);
       gimple_call_set_lhs (g, lhs);
-      gsi_replace (&gsi, g, true);
+      gsi_replace (gsi, g, true);
       break;
     case ABS_EXPR:
       /* Transform i = ABS_EXPR<u>;
@@ -1960,7 +2120,7 @@ instrument_si_overflow (gimple_stmt_iterator gsi)
       a = make_ssa_name (lhstype);
       gimple_call_set_lhs (g, a);
       gimple_set_location (g, gimple_location (stmt));
-      gsi_insert_before (&gsi, g, GSI_SAME_STMT);
+      gsi_insert_before (gsi, g, GSI_SAME_STMT);
       gimple_assign_set_rhs1 (stmt, a);
       update_stmt (stmt);
       break;
