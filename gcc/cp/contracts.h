@@ -281,6 +281,7 @@ extern contract_evaluation_semantic ensure_evaluation_semantic
    the P4298 noexcept variants are added under -fcontracts-p4298.  A configured
    semantic outside the resulting set is clamped via the resolution fallback
    order.  */
+extern void maybe_instantiate_contracts (tree);
 
 /* Will this contract be ignored.  */
 
