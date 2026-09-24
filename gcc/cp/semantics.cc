@@ -5252,8 +5252,11 @@ finish_id_expression_1 (tree id_expression,
 	}
     }
 
-  check_param_in_postcondition (decl, location);
-  if (flag_contracts && processing_contract_condition)
+  /* [dcl.contract.func]/7 is NOT checked here.  Whether a parameter is
+     odr-used is not known until the expression around this id-expression is
+     complete, so the check runs over the finished predicate; see
+     check_postcondition_param_odr_uses.  */
+  if (flag_contracts && constify_in_contract_predicate_p (decl))
     decl = constify_contract_access (decl);
 
   return cp_expr (decl, location);

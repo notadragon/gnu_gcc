@@ -23583,9 +23583,7 @@ tsubst_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 	  /* force_paren_expr can also create a VIEW_CONVERT_EXPR.  */
 	  RETURN (finish_parenthesized_expr (op));
 
-	check_param_in_postcondition (op, EXPR_LOCATION (t));
-
-	if (flag_contracts && processing_contract_condition)
+	if (flag_contracts && constify_in_contract_predicate_p (op))
 	    op = constify_contract_access (op);
 
 	/* Otherwise, we're dealing with a wrapper to make a C++20 template
