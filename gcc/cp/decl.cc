@@ -15765,10 +15765,23 @@ grokdeclarator (const cp_declarator *declarator,
 
 	    /* Actually apply the contract specifiers to the declaration.  */
 	    if (flag_contracts)
-	      contract_specifiers
-		= contract_specifiers_concat
-		    (contract_specifiers,
-		     declarator->u.function.contract_specifiers);
+	      {
+		/* At most one cdk_function in the chain carries a seq --
+		   the one the parser decided declares the function -- so the
+		   concatenation simply collects it wherever in the walk it
+		   turns up, and there is nothing here to disambiguate.
+
+		   A "cannot appear on a return type" error stood here, from
+		   when the parser attached a seq to whichever parameter list
+		   preceded it, so an enclosing declarator could carry one.  It
+		   rejected `int (*f (int)) (int) pre (true)', which is well
+		   formed: the seq follows the complete declarator, so it
+		   belongs to f.  */
+		contract_specifiers
+		  = contract_specifiers_concat
+		      (contract_specifiers,
+		       declarator->u.function.contract_specifiers);
+	      }
 
 	    if (attrs)
 	      /* [dcl.fct]/2:

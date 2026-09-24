@@ -179,6 +179,14 @@ extern void rebuild_postconditions		(tree);
 extern bool check_postcondition_result		(tree, tree, location_t);
 
 extern bool contract_any_deferred_p 		(tree);
+/* Late-parse the deferred predicates of a redeclaration's CONTRACTS as if
+   they belonged to FNDECL.  Supplied by the parser, which owns the token
+   caches, and called only from flush_deferred_contract_matches.  */
+typedef void (*late_contract_parse_fn) (tree, tree, tree);
+extern void flush_deferred_contract_matches (late_contract_parse_fn);
+/* Late-parse FNDECL's own deferred contract predicates.  Defined in the
+   parser, which owns the token caches.  */
+extern void cp_late_parse_function_contracts (tree);
 
 extern tree get_precondition_function		(tree);
 extern tree get_postcondition_function		(tree);

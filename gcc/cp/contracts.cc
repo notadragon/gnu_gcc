@@ -161,6 +161,22 @@ contract_valid_p (tree contract)
   return CONTRACT_CONDITION (contract) != error_mark_node;
 }
 
+/* True if every contract in CONTRACTS parsed.  Only meaningful once they
+   have been: a DEFERRED_PARSE condition is not error_mark_node, so an
+   unparsed contract reads as valid here.  */
+
+static bool
+contract_all_valid_p (tree contracts)
+{
+  if (!contracts)
+    return true;
+
+  for (tree contract : tree_vec_range (contracts))
+    if (!contract_valid_p (contract))
+      return false;
+  return true;
+}
+
 /* Compare the contract conditions of OLD_CONTRACT and NEW_CONTRACT.
    Returns false if the conditions are equivalent, and true otherwise.  */
 
@@ -2057,7 +2073,11 @@ copy_contracts_list (tree contracts, tree fndecl,
       id.eh_lp_nr = 0;
       walk_tree (&CONTRACT_CONDITION (c), copy_tree_body_r, &id, NULL);
 
-      CONTRACT_COMMENT (c) = copy_node (CONTRACT_COMMENT (c));
+      /* A contract whose predicate never parsed -- one the shadow check
+	 error-marked, say -- has no comment to copy, and copy_node does not
+	 take NULL.  */
+      if (CONTRACT_COMMENT (c))
+	CONTRACT_COMMENT (c) = copy_node (CONTRACT_COMMENT (c));
 
       copies.quick_push (c);
     }
@@ -2738,6 +2758,174 @@ get_fn_contract_specifiers (tree decl)
   return NULL_TREE;
 }
 
+/* A redeclaration match that could not be performed where redeclarations are
+   merged, because one side's predicate had not been parsed yet.
+
+   Every function contract is now token-cached at its declarator and replayed
+   once the function's parameters can be put back in scope, so by the time
+   duplicate_decls runs the two predicates being compared may still be
+   DEFERRED_PARSE.  Comparing them there would compare two unparsed nodes and
+   silently accept any mismatch.  The comparison is recorded instead and run
+   from flush_deferred_contract_matches, once both sides have been parsed.
+
+   The contract vectors are kept rather than the declarations: duplicate_decls
+   merges newdecl into olddecl and the former does not survive, while the
+   vectors are the operands match_contract_specifiers actually reads, and the
+   late parse updates their conditions in place.  The locations are taken here
+   for the same reason -- they must describe where the declarations were
+   written, not wherever the parser has reached when the match finally runs.  */
+
+struct GTY(()) deferred_contract_match
+{
+  tree old_contracts;
+  tree new_contracts;
+  /* The declaration that survives the merge; it supplies the parameters the
+     redeclaration's predicate is parsed against.  */
+  tree fndecl;
+  /* The redeclaration's parameter names, kept because the declaration itself
+     does not survive to be asked.  */
+  tree new_parm_names;
+  location_t old_loc;
+  location_t new_loc;
+  /* True when the entry is not a comparison but the check that a
+     redeclaration does not ADD contracts to a function first declared
+     without them.  OLD_CONTRACTS is null for those, there being none, and
+     OLD_LOC is the first declaration rather than a contract on it.  */
+  bool adds_p;
+};
+
+static GTY(()) vec<deferred_contract_match, va_gc> *deferred_contract_matches;
+
+/* The parameter names of DECL as a TREE_LIST, so that they can be compared
+   after DECL has been reclaimed.  */
+
+static tree
+contract_parm_name_list (tree decl)
+{
+  tree names = NULL_TREE;
+  for (tree parm = DECL_ARGUMENTS (decl); parm; parm = DECL_CHAIN (parm))
+    names = tree_cons (NULL_TREE, DECL_NAME (parm), names);
+  return nreverse (names);
+}
+
+/* Whether DECL has exactly as many parameters as NAMES lists.  The names
+   themselves need not agree: the predicate is parsed with DECL's parameters
+   bound under the redeclaration's names, so a renamed parameter resolves to
+   the right one positionally.  Only the count has to line up.  */
+
+static bool
+contract_parm_count_matches_p (tree decl, tree names)
+{
+  tree parm = DECL_ARGUMENTS (decl);
+  for (; parm && names; parm = DECL_CHAIN (parm), names = TREE_CHAIN (names))
+    ;
+  return !parm && !names;
+}
+
+/* Run every recorded match that can now be run.  Called after each late
+   parse.  LATE_PARSE is supplied by the parser, which owns the token caches.
+
+   An entry becomes runnable once the surviving declaration's own predicate
+   has been parsed.  The redeclaration's predicate usually has not been and
+   never will be: duplicate_decls drops its contract_decl_map entry and frees
+   the declaration, so nothing walks it.  It is parsed here instead, against
+   the surviving declaration's parameters, bound under the names the
+   redeclaration itself used -- the two may spell them differently, and a
+   definition in between will have replaced the names with its own.  Only a
+   differing parameter COUNT defeats that, and two declarations of one
+   function cannot differ there.  */
+
+void
+flush_deferred_contract_matches (late_contract_parse_fn late_parse)
+{
+  static bool flushing = false;
+
+  if (!deferred_contract_matches || flushing)
+    return;
+
+  temp_override<bool> guard (flushing, true);
+
+  unsigned ix = 0;
+  while (ix < deferred_contract_matches->length ())
+    {
+      /* By value: the entry is removed while it is still in use below.  */
+      deferred_contract_match m = (*deferred_contract_matches)[ix];
+
+      if (m.adds_p)
+	{
+	  if (contract_any_deferred_p (m.new_contracts))
+	    {
+	      if (!late_parse
+		  || !m.fndecl
+		  || !contract_parm_count_matches_p (m.fndecl,
+						     m.new_parm_names))
+		{
+		  deferred_contract_matches->ordered_remove (ix);
+		  continue;
+		}
+	      late_parse (m.fndecl, m.new_contracts, m.new_parm_names);
+	      if (contract_any_deferred_p (m.new_contracts))
+		{
+		  deferred_contract_matches->ordered_remove (ix);
+		  continue;
+		}
+	    }
+
+	  /* A predicate that did not parse has already been reported at the
+	     point it was written.  It never became a contract, so it did not
+	     add one either.  */
+	  if (contract_all_valid_p (m.new_contracts))
+	    {
+	      auto_diagnostic_group d;
+	      error_at (m.new_loc, "declaration adds contracts to %q#D",
+			m.fndecl);
+	      inform (m.old_loc, "first declared here");
+	    }
+
+	  /* Rejected either way, so they are not this function's contracts.
+	     Dropping them is what lets a THIRD declaration still be compared
+	     with the first, which has none: while they stayed recorded, the
+	     next redeclaration was compared against the very contracts that
+	     had just been refused, and so was either accepted in silence or
+	     reported as a mismatch rather than as another addition.  */
+	  remove_fn_contract_specifiers (m.fndecl);
+	  deferred_contract_matches->ordered_remove (ix);
+	  continue;
+	}
+
+      /* Still waiting on the surviving declaration.  */
+      if (contract_any_deferred_p (m.old_contracts))
+	{
+	  ++ix;
+	  continue;
+	}
+
+      if (contract_any_deferred_p (m.new_contracts))
+	{
+	  if (!late_parse
+	      || !m.fndecl
+	      || !contract_parm_count_matches_p (m.fndecl, m.new_parm_names))
+	    {
+	      deferred_contract_matches->ordered_remove (ix);
+	      continue;
+	    }
+
+	  late_parse (m.fndecl, m.new_contracts, m.new_parm_names);
+
+	  /* If it still did not parse, there is nothing to compare.  */
+	  if (contract_any_deferred_p (m.new_contracts))
+	    {
+	      deferred_contract_matches->ordered_remove (ix);
+	      continue;
+	    }
+	}
+
+      match_contract_specifiers (m.old_loc, m.old_contracts,
+				 m.new_loc, m.new_contracts);
+      deferred_contract_matches->ordered_remove (ix);
+    }
+}
+
 /* A subroutine of duplicate_decls. Diagnose issues in the redeclaration of
    guarded functions.  */
 
@@ -2768,11 +2956,30 @@ check_redecl_contract (tree newdecl, tree olddecl)
   location_t new_loc = DECL_SOURCE_LOCATION (newdecl);
   if (new_contracts && !old_contracts)
     {
-      auto_diagnostic_group d;
       /* If a re-declaration has contracts, they must be the same as those
        that appear on the first declaration seen (they cannot be added).  */
       location_t cont_end = get_contract_end_loc (new_contracts);
       cont_end = make_location (new_loc, new_loc, cont_end);
+
+      /* Whether there is anything to complain about is not yet known when
+	 the predicate has not been parsed: one that fails to parse never
+	 becomes a contract, and is reported where it was written, so
+	 "declaration adds contracts" on top of it is noise.  Record the
+	 check and run it from flush_deferred_contract_matches, which is
+	 also the only point at which the contracts can be dropped again --
+	 update_contract_arguments copies them onto the surviving
+	 declaration after this runs, whatever is decided here.  */
+      if (contract_any_deferred_p (new_contracts))
+	{
+	  deferred_contract_match m
+	    = { NULL_TREE, new_contracts, olddecl,
+		contract_parm_name_list (newdecl),
+		DECL_SOURCE_LOCATION (olddecl), cont_end, /*adds_p=*/true };
+	  vec_safe_push (deferred_contract_matches, m);
+	  return;
+	}
+
+      auto_diagnostic_group d;
       error_at (cont_end, "declaration adds contracts to %q#D", olddecl);
       inform (DECL_SOURCE_LOCATION (olddecl), "first declared here");
       return;
@@ -2783,22 +2990,33 @@ check_redecl_contract (tree newdecl, tree olddecl)
        In fact, this is required if the conditions contain lambdas.  Check if
        all the parameters are correctly const qualified. */
     check_postconditions_in_redecl (olddecl, newdecl);
-  else if (old_contracts && new_contracts
-	   && !contract_any_deferred_p (old_contracts)
-	   && contract_any_deferred_p (new_contracts)
-	   && DECL_UNIQUE_FRIEND_P (newdecl))
-    {
-      /* Put the deferred contracts on the olddecl so we parse it when
-	 we can.  */
-      set_fn_contract_specifiers (olddecl, old_contracts);
-    }
+  /* A friend redeclaration is not special here.  It was, back when a
+     friend's were the only deferred contracts and there was nowhere to
+     record a comparison that could not yet be made; the queue below is that
+     place, and a friend belongs in it like any other redeclaration.  Taking
+     the friend out of the queue is what left one accepted however it was
+     spelled -- undeclared names and contradictory conditions alike --
+     because the queue is also the only thing that parses it.  */
   else if (contract_any_deferred_p (old_contracts)
 	   || contract_any_deferred_p (new_contracts))
     {
-      /* TODO: ignore these and figure out how to process them later.  */
-      /* Note that a friend declaration has deferred contracts, but the
-	 declaration of the same function outside the class definition
-	 doesn't.  */
+      /* One side has not been parsed yet, so the two cannot be compared
+	 here.  Record the comparison and run it from
+	 flush_deferred_contract_matches once both have been.
+
+	 This used to do nothing at all, which was survivable only while the
+	 case was confined to friend declarations -- their contracts are
+	 late-parsed at the end of the class while the same function declared
+	 outside is not.  Now that every function contract is deferred to its
+	 late parse, doing nothing here would skip redeclaration matching
+	 entirely and accept any mismatch in silence.  */
+      location_t cont_end = get_contract_end_loc (new_contracts);
+      cont_end = make_location (new_loc, new_loc, cont_end);
+      deferred_contract_match m
+	= { old_contracts, new_contracts, olddecl,
+	    contract_parm_name_list (newdecl), rdp->note_loc, cont_end,
+	    /*adds_p=*/false };
+      vec_safe_push (deferred_contract_matches, m);
     }
   else
     {
@@ -2847,6 +3065,12 @@ update_contract_arguments (tree srcdecl, tree destdecl)
     onto the decl that will be preserved. This is not ideal because the
     redeclaration may have erroneous contracts.
     For non deferred contracts we currently do copy and remap, which is doing
+    The copy is unconditional on purpose, and it is tempting to think it
+    should not be: the first declaration's contracts are the function's, so
+    a later declaration's look like they exist only to be compared.  An
+    out-of-line DEFINITION also arrives here as SRCDECL, though, and its own
+    token cache is what its body has to be checked against -- withhold the
+    copy and it is checked against the in-class text instead.  */
     more than we need.  */
   if (contract_any_deferred_p (src_contracts))
     set_fn_contract_specifiers (destdecl, src_contracts);

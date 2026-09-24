@@ -27,6 +27,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "c-family/c-common.h"
 #include "timevar.h"
 #include "stringpool.h"
+#include "stor-layout.h"
 #include "cgraph.h"
 #include "print-tree.h"
 #include "attribs.h"
@@ -760,6 +761,12 @@ cp_lexer_handle_early_pragma (cp_lexer *lexer)
 /* The parser.  */
 static cp_parser *cp_parser_new (cp_lexer *);
 static GTY (()) cp_parser *the_parser;
+
+/* True only while start_function is running for a function definition the
+   parser is reading, which is the one moment a deferred contract predicate
+   can be replayed -- the parameters are in scope and the token cache belongs
+   to the text being parsed.  */
+static bool parsing_function_definition_p;
 
 /* Create a new main C++ lexer, the lexer that gets tokens from the
    preprocessor, and also create the main parser.  */
@@ -3015,11 +3022,18 @@ static tree cp_maybe_function_contract_specifier
   (cp_parser *parser);
 
 static tree cp_parser_function_contract_specifier
-  (cp_parser *);
+  (cp_parser *, bool);
 static tree cp_parser_function_contract_specifier_seq
-  (cp_parser *);
+  (cp_parser *, bool);
 static void cp_parser_late_contracts
   (cp_parser *, tree);
+static tree cp_parser_declarator_contracts_opt
+  (cp_parser *, cp_declarator *);
+static void cp_parser_reject_contracts
+  (cp_parser *, const char *);
+static void inject_parm_decls (tree);
+static void pop_injected_parms (void);
+static void cp_parser_late_parse_for_match (tree, tree, tree);
 
 enum pragma_context {
   pragma_external,
@@ -13629,14 +13643,12 @@ cp_parser_lambda_declarator_opt (cp_parser* parser, tree lambda_expr,
       return_type = cp_parser_trailing_type_id (parser);
     }
 
-  tree contract_specifiers = NULL_TREE;
-  if (flag_contracts)
-    contract_specifiers = cp_parser_function_contract_specifier_seq (parser);
-
   /* Also allow GNU attributes at the very end of the declaration, the usual
      place for GNU attributes.  */
   if (cp_next_tokens_can_be_gnu_attribute_p (parser))
     gnu_attrs = chainon (gnu_attrs, cp_parser_gnu_attributes_opt (parser));
+
+  tree contract_specifiers = NULL_TREE;
 
   if (has_param_list)
     {
@@ -13646,10 +13658,24 @@ cp_parser_lambda_declarator_opt (cp_parser* parser, tree lambda_expr,
       /* Parse optional trailing requires clause.  */
       trailing_requires_clause = cp_parser_requires_clause_opt (parser, false);
 
+      /* The function-contract-specifier-seq comes last in every
+	 lambda-declarator alternative, and in this one it follows the
+	 requires-clause.  Parsed before the parameters leave scope so that
+	 a result-name-introducer can be checked against them.  */
+      if (flag_contracts)
+	contract_specifiers
+	  = cp_parser_function_contract_specifier_seq (parser,
+						       /*defer=*/false);
+
       /* The function parameters must be in scope all the way until after the
          trailing-return-type in case of decltype.  */
       pop_bindings_and_leave_scope ();
     }
+  else if (flag_contracts)
+    /* No parameter list, so no requires-clause either: the seq follows the
+       trailing-return-type directly.  */
+    contract_specifiers
+      = cp_parser_function_contract_specifier_seq (parser, /*defer=*/false);
 
   /* We are about to create the real operator(), so get rid of the old one.  */
   if (dummy_fco)
@@ -25068,6 +25094,10 @@ cp_parser_alias_declaration (cp_parser* parser)
   if (parser->num_template_parameter_lists)
     parser->type_definition_forbidden_message = saved_message;
 
+  /* An alias-declaration's defining-type-id takes no
+     function-contract-specifier-seq.  */
+  cp_parser_reject_contracts (parser, "a type-id");
+
   if (type == error_mark_node
       || !cp_parser_require (parser, CPP_SEMICOLON, RT_SEMICOLON))
     {
@@ -26129,6 +26159,14 @@ cp_parser_init_declarator (cp_parser* parser,
   decl_specifiers->type
     = maybe_update_decl_type (decl_specifiers->type, scope);
 
+  /* Parse the optional function-contract-specifier-seq.  This is the
+     init-declarator position, `declarator requires-clause[opt]
+     function-contract-specifier-seq[opt]', and also the
+     function-definition position, which differs only in taking a
+     virt-specifier-seq instead -- both of those are consumed by
+     cp_parser_declarator above, so either way the seq is next.  */
+  cp_parser_declarator_contracts_opt (parser, declarator);
+
   /* If we're allowing GNU extensions, look for an
      asm-specification.  */
   if (cp_parser_allow_gnu_extensions_p (parser))
@@ -26609,6 +26647,55 @@ cp_parser_init_declarator (cp_parser* parser,
       && function_declarator_p (declarator))
     omp_maybe_record_variant_base (parser, decl);
 
+  /* Replay any deferred contract predicates on a function DECLARATION.  A
+     definition is handled in cp_parser_function_definition_after_declarator,
+     where start_function has already put the parameters in scope; here there
+     is no function body and no scope, so the parameters are injected and
+     removed around the replay, exactly as the class late-parsing path does.
+
+     A member declared inside a class still being defined is skipped: its
+     predicate may name members declared further down, so it is replayed when
+     the class is complete.  */
+  if (flag_contracts
+      && !(function_definition_p && *function_definition_p)
+      && decl != NULL_TREE
+      && decl != error_mark_node
+      && !(current_class_type && TYPE_BEING_DEFINED (current_class_type)))
+    {
+      /* A constrained or template declaration arrives as a TEMPLATE_DECL;
+	 the contracts hang off the FUNCTION_DECL it wraps.  */
+      tree fn = decl;
+      if (TREE_CODE (fn) == TEMPLATE_DECL)
+	fn = DECL_TEMPLATE_RESULT (fn);
+
+      if (fn != NULL_TREE && TREE_CODE (fn) == FUNCTION_DECL)
+	{
+	  tree contracts = get_fn_contract_specifiers (fn);
+	  if (contracts && contract_any_deferred_p (contracts))
+	    {
+	      temp_override<tree> cfd (current_function_decl, fn);
+	      tree save_ccp = current_class_ptr;
+	      tree save_ccr = current_class_ref;
+	      current_class_ptr = current_class_ref = NULL_TREE;
+	      inject_parm_decls (fn);
+	      cp_parser_late_contracts (parser, fn);
+	      pop_injected_parms ();
+	      current_class_ptr = save_ccp;
+	      current_class_ref = save_ccr;
+	    }
+	}
+    }
+
+  /* Drain any redeclaration match this declaration made ready.  Separate
+     from the replay above, and not conditional on it: a plain redeclaration
+     adds nothing to parse -- the surviving declaration's predicate was
+     parsed when IT was seen -- so cp_parser_late_contracts returns at once
+     and never reaches the flush it normally drives.  Without this a mismatch
+     between two declarations is only noticed when a definition happens to
+     follow them.  */
+  if (flag_contracts)
+    flush_deferred_contract_matches (cp_parser_late_parse_for_match);
+
   return decl;
 }
 
@@ -26958,10 +27045,19 @@ cp_parser_direct_declarator (cp_parser* parser,
 		  /* Parse the virt-specifier-seq.  */
 		  virt_specifiers = cp_parser_virt_specifier_seq_opt (parser);
 
-		  tree contract_specifiers = NULL_TREE;
-		  if (flag_contracts)
-		    contract_specifiers
-		      = cp_parser_function_contract_specifier_seq (parser);
+		  /* NO function-contract-specifier-seq is parsed here.  The
+		     grammar attaches one to the complete DECLARATOR -- see
+		     init-declarator, function-definition, member-declarator
+		     and lambda-declarator -- and this arm runs once per
+		     parameter list in the declarator, with no way to know
+		     which of them, if any, belongs to the function being
+		     declared.  Parsing it here bound it to whichever
+		     parameters-and-qualifiers happened to come last, which
+		     silently dropped it on a trailing-return type-id, refused
+		     it after an array declarator, and parsed the predicate in
+		     the wrong parameter scope.  The callers listed above
+		     collect the seq through
+		     cp_parser_declarator_contracts_opt.  */
 
 		  location_t parens_loc = make_location (parens_start,
 							 parens_start,
@@ -26976,7 +27072,8 @@ cp_parser_direct_declarator (cp_parser* parser,
 						     exception_specification,
 						     late_return,
 						     requires_clause,
-						     contract_specifiers,
+						     /*contract_specifiers=*/
+						     NULL_TREE,
 						     attrs,
 						     parens_loc);
 		  declarator->attributes = gnu_attrs;
@@ -28736,6 +28833,12 @@ cp_parser_parameter_declaration (cp_parser *parser,
 					 /*friend_p=*/false,
 					 /*static_p=*/false);
       parser->default_arg_ok_p = saved_default_arg_ok_p;
+
+      /* A parameter-declaration takes no function-contract-specifier-seq.
+	 A parameter of function type is adjusted to a pointer to function
+	 ([dcl.fct]/5), so it declares no function for one to belong to.  */
+      cp_parser_reject_contracts (parser, "a parameter");
+
       /* After the declarator, allow more attributes.  */
       decl_specifiers.attributes
 	= attr_chainon (decl_specifiers.attributes,
@@ -31603,6 +31706,13 @@ cp_parser_member_declaration (cp_parser* parser)
 					    (declarator, decl_specifiers.type,
 					     decl_specifiers.locations[ds_type_spec]);
 
+	      /* Parse the optional function-contract-specifier-seq.  This is
+		 the member-declarator position: the seq follows the
+		 declarator and its virt-specifier-seq or requires-clause,
+		 both of which cp_parser_declarator has already consumed,
+		 and precedes any pure-specifier.  */
+	      cp_parser_declarator_contracts_opt (parser, declarator);
+
 	      /* Look for an asm-specification.  */
 	      asm_specification = cp_parser_asm_specification_opt (parser);
 	      /* Look for attributes that apply to the declaration.  */
@@ -33879,6 +33989,15 @@ cp_parser_late_contract_condition (cp_parser *parser, tree fn, tree contract)
     {
       cp_expr result_id (r_ident, r_loc);
       result = make_postcondition_variable (result_id, type);
+
+      /* Apply any attribute-specifier-seq written on the result name.  It
+	 was read at the declarator and parked on the contract node, because
+	 this is the first point at which there is a variable to attach it
+	 to.  */
+      if (tree attrs = POSTCONDITION_RESULT_ATTRS (contract))
+	if (result != error_mark_node)
+	  cplus_decl_attributes (&result, attrs, 0);
+
       if (undeduced_result_type_p)
 	++processing_template_decl;
     }
@@ -33908,6 +34027,101 @@ cp_parser_late_contract_condition (cp_parser *parser, tree fn, tree contract)
   contract_class_ptr = saved_contract_ccp;
 }
 
+/* Late-parse the deferred predicates of CONTRACTS as if they belonged to
+   FNDECL, so that a redeclaration's contracts can be compared with the
+   surviving declaration's.  Only reached for a redeclaration that
+   duplicate_decls has already reclaimed, and only once its parameter names
+   have been checked against FNDECL's.  */
+
+static void
+cp_parser_late_parse_for_match (tree fndecl, tree contracts, tree parm_names)
+{
+  cp_parser *parser = the_parser;
+
+  if (!parser || !contracts || contracts == error_mark_node)
+    return;
+
+  temp_override<tree> cfd (current_function_decl, fndecl);
+  tree save_ccp = current_class_ptr;
+  tree save_ccr = current_class_ref;
+  current_class_ptr = current_class_ref = NULL_TREE;
+
+  /* Bind FNDECL's parameters under the names the redeclaration wrote, so a
+     predicate naming them resolves positionally.  The two declarations may
+     spell the parameters differently, and a definition seen in between will
+     have replaced FNDECL's names with its own -- without this, a mismatch
+     between two declarations that both used the original names goes
+     undiagnosed as soon as a renaming definition sits between them.  The
+     names are put back immediately; nothing else observes them here.  */
+  auto_vec<tree, 8> saved_names;
+  {
+    tree parm = DECL_ARGUMENTS (fndecl);
+    tree name = parm_names;
+    for (; parm && name; parm = DECL_CHAIN (parm), name = TREE_CHAIN (name))
+      {
+	saved_names.safe_push (DECL_NAME (parm));
+	DECL_NAME (parm) = TREE_VALUE (name);
+      }
+  }
+
+  /* Undo, for the duration of this parse, the invisible-reference rewrite
+     cp_genericize applies to a by-value parameter of non-trivially-copyable
+     class type.  It retypes the PARM_DECL itself to a reference, so once
+     FNDECL has been DEFINED every expression built from that parameter
+     acquires an indirection -- `t.x' becomes `(*t).x', and an argument
+     `plain (t)' a dereference and a copy from it.  The predicate being
+     compared against was parsed before the definition and has neither, so
+     two textually identical contracts compared unequal and the
+     redeclaration was reported as a mismatch.
+
+     Restoring the parameter to the shape it had then makes this parse
+     produce the same tree that parse did, which is the only thing the
+     comparison is for.  Nothing else runs while it is undone, and the
+     saved state is put back below, so the definition's own code generation
+     still sees the rewritten form.  */
+  auto_vec<tree, 8> saved_types;
+  {
+    for (tree parm = DECL_ARGUMENTS (fndecl); parm; parm = DECL_CHAIN (parm))
+      if (DECL_BY_REFERENCE (parm) && TYPE_REF_P (TREE_TYPE (parm)))
+	{
+	  saved_types.safe_push (parm);
+	  saved_types.safe_push (TREE_TYPE (parm));
+	  TREE_TYPE (parm) = TREE_TYPE (TREE_TYPE (parm));
+	  DECL_BY_REFERENCE (parm) = 0;
+	  TREE_ADDRESSABLE (parm) = 1;
+	  relayout_decl (parm);
+	}
+  }
+
+  inject_parm_decls (fndecl);
+
+  for (tree contract : tree_vec_range (contracts))
+    if (CONTRACT_CONDITION_DEFERRED_P (contract))
+      cp_parser_late_contract_condition (parser, fndecl, contract);
+
+  pop_injected_parms ();
+
+  for (unsigned ix = 0; ix < saved_types.length (); ix += 2)
+    {
+      tree parm = saved_types[ix];
+      TREE_TYPE (parm) = saved_types[ix + 1];
+      DECL_BY_REFERENCE (parm) = 1;
+      TREE_ADDRESSABLE (parm) = 0;
+      relayout_decl (parm);
+    }
+
+  {
+    unsigned ix = 0;
+    for (tree parm = DECL_ARGUMENTS (fndecl);
+	 parm && ix < saved_names.length ();
+	 parm = DECL_CHAIN (parm), ++ix)
+      DECL_NAME (parm) = saved_names[ix];
+  }
+
+  current_class_ptr = save_ccp;
+  current_class_ref = save_ccr;
+}
+
 /* Parse deferred contracts of FNDECL.  */
 
 void
@@ -33930,6 +34144,24 @@ cp_parser_late_contracts (cp_parser *parser, tree fndecl)
     }
 
   update_fn_contract_specifiers (fndecl, contracts);
+void
+cp_late_parse_function_contracts (tree fndecl)
+{
+  if (the_parser && flag_contracts && parsing_function_definition_p)
+    cp_parser_late_contracts (the_parser, fndecl);
+}
+
+/* Parse a diagnostic-message: either an unevaluated-string or a
+   constant-expression with .size() and .data() members.
+   Used by both static_assert and contract assertions (P3099).
+
+   The caller has already consumed the comma before the message.
+   The closing paren is NOT consumed.
+
+   If NON_STRING_P is non-null, *NON_STRING_P is set to true when the
+   message was parsed as a non-string-literal expression (the caller may
+   want to issue a pedwarn for pre-C++26 modes).  */
+
 static cp_expr
 cp_parser_contract_result_name (cp_parser *parser, bool postcondition_p,
 				tree *attrs /* = NULL */)
@@ -34123,7 +34355,7 @@ cp_maybe_function_contract_specifier (cp_parser *parser)
    contract specifier.  */
 
 static tree
-cp_parser_function_contract_specifier (cp_parser *parser)
+cp_parser_function_contract_specifier (cp_parser *parser, bool defer)
 {
   tree contract_name = cp_function_contract_specifier_intro (parser);
   if (!contract_name)
@@ -34164,7 +34396,19 @@ cp_parser_function_contract_specifier (cp_parser *parser)
     = cp_parser_contract_result_name (parser, postcondition_p, &result_attrs);
 
   tree contract;
-  if (current_class_type && TYPE_BEING_DEFINED (current_class_type))
+  /* DEFER is set by every caller that parses the seq at its grammar
+     position -- after the complete declarator -- because the function's
+     parameter scope has been left by then, and in a declarator like
+     `int (*f (int i)) (int) pre (i > 0)' it was left two steps earlier,
+     before the parameter list the contract follows was even seen.  There is
+     no point in the parse at which the right parameters are in scope, so the
+     predicate is token-cached and replayed by cp_parser_late_contracts once
+     the FUNCTION_DECL exists and inject_parm_decls can put them back.
+
+     A lambda-declarator is the exception and passes false: its parameter
+     list IS the declarator, so the scope is still open and the predicate is
+     parsed here exactly as before.  */
+  if (defer_p)
     {
       /* Defer the parsing of pre/post contracts inside class definitions.  */
       cp_token *first = cp_lexer_peek_token (parser->lexer);
@@ -34256,13 +34500,14 @@ cp_parser_function_contract_specifier (cp_parser *parser)
     function-contract-specifier function-contract-specifier-seq.  */
 
 static tree
-cp_parser_function_contract_specifier_seq (cp_parser *parser)
+cp_parser_function_contract_specifier_seq (cp_parser *parser, bool defer)
 {
   releasing_vec contract_specs;
 
   while (true)
     {
-      tree contract_spec = cp_parser_function_contract_specifier (parser);
+      tree contract_spec = cp_parser_function_contract_specifier (parser,
+								      defer);
 
       /* If there are no more contracts, done.  */
       if (contract_spec == NULL_TREE)
@@ -34277,6 +34522,103 @@ cp_parser_function_contract_specifier_seq (cp_parser *parser)
     }
 
   return build_contract_specifiers (contract_specs);
+}
+
+/* Diagnose and consume a function-contract-specifier-seq written somewhere
+   the grammar has no room for one at all, naming the construct as WHAT.
+
+   The four positions that carry a seq all have a declarator that could
+   declare a function, so grokdeclarator can say which declarator kind it
+   objected to.  A defining-type-id and a parameter-declaration have no such
+   declarator, and a seq is simply not part of their grammar -- so without
+   this the tokens are left in the stream and come back as "expected ';'",
+   which tells the reader nothing about contracts.  Consuming them also lets
+   the rest of the declaration parse, so one misplaced contract produces one
+   error rather than a cascade.  */
+
+static void
+cp_parser_reject_contracts (cp_parser *parser, const char *what)
+{
+  if (!flag_contracts || !cp_maybe_function_contract_specifier (parser))
+    return;
+
+  error_at (cp_lexer_peek_token (parser->lexer)->location,
+	    "a function-contract-specifier cannot appear on %s", what);
+  cp_parser_function_contract_specifier_seq (parser, /*defer=*/true);
+}
+
+
+/* The function declarator that DECLARATOR declares, if it declares one:
+   the LAST cdk_function on the way in to the declarator-id, which is the
+   last one grokdeclarator visits and so the one whose parameters become the
+   function's.  Every cdk_function outside it belongs to the return type --
+   in `int (*f (int)) (int)' the inner list is f's and the outer one is part
+   of `int (*) (int)'.
+
+   Returns NULL when the declarator declares no function at all, which is
+   not an error here: a contract on a typedef, an alias-declaration, a
+   pointer to function or a bit-field is diagnosed by grokdeclarator, from a
+   point where typedef_p, decl_context and the final type are all known.  */
+
+static cp_declarator *
+declared_function_declarator (cp_declarator *declarator)
+{
+  cp_declarator *found = NULL;
+
+  for (; declarator; declarator = declarator->declarator)
+    {
+      if (declarator->kind == cdk_error)
+	return NULL;
+      if (declarator->kind == cdk_function)
+	found = declarator;
+      if (declarator->kind == cdk_id)
+	break;
+    }
+
+  return found;
+}
+
+/* Parse an optional function-contract-specifier-seq at one of the four
+   grammar positions that carry one -- init-declarator, function-definition,
+   member-declarator and lambda-declarator -- and record it on DECLARATOR.
+
+   The seq follows the complete declarator, so it is stored on the
+   cdk_function that declares the function rather than on whichever parameter
+   list the parser happened to see last.  When the declarator declares no
+   function the seq is stored on the outermost cdk_function if there is one,
+   purely so grokdeclarator finds it and can say which declarator kind it
+   objected to; with no cdk_function at all there is nowhere to put it and it
+   is diagnosed here.
+
+   Returns the seq, or NULL_TREE when there was none.  */
+
+static tree
+cp_parser_declarator_contracts_opt (cp_parser *parser,
+				    cp_declarator *declarator)
+{
+  if (!flag_contracts)
+    return NULL_TREE;
+
+  tree contracts
+    = cp_parser_function_contract_specifier_seq (parser, /*defer=*/true);
+
+  if (contracts == NULL_TREE || contracts == error_mark_node)
+    return contracts;
+
+  if (cp_declarator *fn = declared_function_declarator (declarator))
+    fn->u.function.contract_specifiers
+      = contract_specifiers_concat (fn->u.function.contract_specifiers,
+				    contracts);
+  else
+    {
+      gcc_checking_assert (TREE_VEC_LENGTH (contracts) > 0);
+      error_at (EXPR_LOCATION (TREE_VEC_ELT (contracts, 0)),
+		"a function-contract-specifier cannot appear on a "
+		"declaration of non-function type");
+      return NULL_TREE;
+    }
+
+  return contracts;
 }
 
 /* Parse a standard C++-11 attribute specifier.
@@ -36345,7 +36687,17 @@ cp_parser_function_definition_from_specifiers_and_declarator
   bool success_p;
 
   /* Begin the function-definition.  */
-  success_p = start_function (decl_specifiers, declarator, attributes);
+  {
+    /* start_function reaches start_function_contracts, which is where a
+       deferred predicate is replayed.  Flag that this is the parse of a
+       definition, so that the replay does not also fire for a template
+       INSTANTIATION: that reaches start_function_contracts too, with
+       contracts copied from the pattern, and there is no token cache of its
+       own to read -- replaying there walked unrelated lexer state and built
+       garbage trees.  */
+    temp_override<bool> ovr (parsing_function_definition_p, true);
+    success_p = start_function (decl_specifiers, declarator, attributes);
+  }
 
   /* The things we're about to see are not directly qualified by any
      template headers we've seen thus far.  */
