@@ -41,6 +41,9 @@ __handle_contract_violation_default
 {
 #if _GLIBCXX_HOSTED && _GLIBCXX_VERBOSE
 
+  if (const char* __r = violation.report(); __r && __r[0] != '\0')
+    std::cerr << __r << '\n';
+
   std::cerr << "contract violation in function "
     << violation.location().function_name()
     << " at " << violation.location().file_name() << ':'
@@ -208,6 +211,27 @@ contract_violation::message() const noexcept
   // message (""), so a violation with no diagnostic-message field at all (a
   // P3290 API/C-assert violation, or a C++26 TU) reports nullptr.
   return __p ? *__p : nullptr;
+}
+
+const char*
+contract_violation::report() const noexcept
+{
+  using namespace __cxxabiv1;
+  auto __p = __cxa_find_field_ptr<__cxa_contract_report_populator>(
+      _M_chain, CXA_FIELD_REPORT);
+  if (!__p || !__p->populate)
+    return nullptr;
+  // D4301: report() is noexcept, but a populator may allocate and could
+  // throw.  Guard it so a throwing populator cannot escape.  The literal
+  // has static storage duration, so returning it as const char* is safe.
+  try
+    {
+      return __p->populate(__p->ctx);
+    }
+  catch (...)
+    {
+      return "Error generating report";
+    }
 }
 
 std::source_location

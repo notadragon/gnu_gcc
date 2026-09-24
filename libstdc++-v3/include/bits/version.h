@@ -2776,6 +2776,16 @@
 #endif /* !defined(__cpp_lib_replaceable_contract_violation_handler) */
 #undef __glibcxx_want_replaceable_contract_violation_handler
 
+#if !defined(__cpp_lib_contracts_report)
+# if (__cplusplus >= 202002L) && defined(__cpp_contracts_report)
+#  define __glibcxx_contracts_report 202607L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_contracts_report)
+#   define __cpp_lib_contracts_report 202607L
+#  endif
+# endif
+#endif /* !defined(__cpp_lib_contracts_report) */
+#undef __glibcxx_want_contracts_report
+
 #if !defined(__cpp_lib_simd)
 # if (__cplusplus >  202302L) && _GLIBCXX_HOSTED && (__cpp_structured_bindings >= 202411L && __cpp_expansion_statements >= 202411L && __SSE2__)
 #  define __glibcxx_simd 202506L

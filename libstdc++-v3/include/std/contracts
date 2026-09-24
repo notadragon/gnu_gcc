@@ -38,6 +38,7 @@
 #define __glibcxx_want_contracts_implicit
 #define __glibcxx_want_contracts_labels
 #define __glibcxx_want_replaceable_contract_violation_handler
+#define __glibcxx_want_contracts_report
 #include <bits/version.h>
 
 #ifdef __cpp_lib_contracts
@@ -153,6 +154,13 @@ namespace contracts
     contracts::detection_mode detection_mode() const noexcept;
     const char* comment() const noexcept;
     const char* message() const noexcept;
+#if defined(__cpp_lib_contracts_report)
+    // D4301: report() renders the ASan/UBSan diagnostic on demand.  It is
+    // noexcept -- the definition guards the (potentially allocating,
+    // potentially throwing) populator call and returns a fixed diagnostic
+    // string if it throws.
+    const char* report() const noexcept;
+#endif
     std::source_location location() const noexcept;
     bool is_terminating() const noexcept;
     void* query_control_object(const void* __key,
