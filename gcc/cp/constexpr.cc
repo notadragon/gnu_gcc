@@ -1365,6 +1365,57 @@ public:
   }
 };
 
+/* Helper class for constexpr_global_ctx.  Some evaluations are speculative:
+   their result is thrown away, either because the construct being evaluated
+   is unevaluated in the first place (the operand of [[assume]]) or because
+   the evaluation is a trial that will be redone (the side-effect-free
+   attempt at a contract predicate, below).  Their *evaluation* failure is
+   already discarded -- those callers pass a local non_constant_p -- but a
+   contract assertion reached along the way records itself on the shared
+   constexpr_global_ctx, and that escapes.
+
+   The consequences are a rejected program and a duplicated diagnostic
+   respectively, so save the reporting state on the way in and restore it on
+   the way out, exactly as modifiable_tracker does for the modifiable set.
+   Call dismiss () to keep what was recorded, for the case where the trial
+   turns out to be the real evaluation after all.  */
+
+class contract_report_tracker
+{
+  constexpr_global_ctx *global;
+  tree previous_statement;
+  bool previous_condition_non_const;
+  unsigned previous_violations;
+  unsigned previous_extra_violations;
+  bool dismissed;
+public:
+  explicit contract_report_tracker (constexpr_global_ctx *g)
+    : global (g),
+      previous_statement (g->contract_statement),
+      previous_condition_non_const (g->contract_condition_non_const),
+      previous_violations (g->contract_violations.length ()),
+      previous_extra_violations (g->contract_extra_violations),
+      dismissed (false)
+  { }
+  /* Keep whatever was recorded; the evaluation turned out to be real.  */
+  void dismiss () { dismissed = true; }
+  /* Roll back now rather than at end of scope, and stop tracking, so that
+     what follows records for real.  */
+  void restore ()
+  {
+    if (dismissed)
+      return;
+    global->contract_statement = previous_statement;
+    global->contract_condition_non_const = previous_condition_non_const;
+    /* truncate () is a no-op when nothing was pushed, which is the common
+       case; violations recorded by this evaluation are the tail.  */
+    global->contract_violations.truncate (previous_violations);
+    global->contract_extra_violations = previous_extra_violations;
+    dismissed = true;
+  }
+  ~contract_report_tracker () { restore (); }
+};
+
 /* The constexpr expansion context.  CALL is the current function
    expansion, CTOR is the current aggregate initializer, OBJECT is the
    object being initialized by CTOR, either a VAR_DECL or a _REF.    */
@@ -3634,6 +3685,14 @@ cxx_eval_assert (const constexpr_ctx *ctx, tree arg, const char *msg,
       bool new_non_constant_p = false, new_overflow_p = false;
       /* Avoid modification of existing values.  */
       modifiable_tracker ms (new_ctx.global);
+      /* The operand of [[assume]] is not evaluated ([dcl.attr.assume]), so
+	 an implementation that cannot evaluate it cleanly simply does not
+	 get to assume anything -- nothing about this evaluation may reach
+	 the program.  new_non_constant_p above discards the evaluation
+	 failure; this discards any contract assertion reached along the
+	 way, which would otherwise be reported by
+	 check_for_failed_contracts and reject a well-formed program.  */
+      contract_report_tracker cs (new_ctx.global);
       eval = cxx_eval_constant_expression (&new_ctx, arg, vc_prvalue,
 					   &new_non_constant_p,
 					   &new_overflow_p, &jmp_target);
@@ -11279,6 +11338,11 @@ cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
 	tree eval;
 	bool modifies_outside = false;
 	tree modified_obj = NULL_TREE;
+	/* Spans the re-run decision below, not just the trial: if the trial
+	   is thrown away, so must be anything a nested contract recorded
+	   during it, or the re-run reports it a second time.  Dismissed as
+	   soon as we know the trial's result is the one we are keeping.  */
+	contract_report_tracker cs (ctx->global);
 	{
 	  constexpr_ctx new_ctx = *ctx;
 	  new_ctx.quiet = true;
@@ -11293,6 +11357,10 @@ cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
 	  modifies_outside = ms.rejected ();
 	  modified_obj = ms.rejected_obj ();
 	}
+	if (!(ctrct_non_const_p && modifies_outside))
+	  /* No re-run: this trial IS the evaluation, so keep its records.  */
+	  cs.dismiss ();
+
 	if (ctrct_non_const_p && modifies_outside)
 	  {
 	    /* No such side-effect-free evaluation exists: the predicate
@@ -11304,6 +11372,10 @@ cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
 	    ctrct_non_const_p = false;
 	    ctrct_overflow_p = false;
 	    jmp_target = NULL_TREE;
+	    /* Roll the trial's records back before the real evaluation
+	       re-records them; restore () also stops tracking, so what
+	       follows counts.  */
+	    cs.restore ();
 	    constexpr_ctx new_ctx = *ctx;
 	    new_ctx.quiet = true;
 	    eval = cxx_eval_constant_expression (&new_ctx, cond, vc_prvalue,
