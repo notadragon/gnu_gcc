@@ -316,6 +316,8 @@ extern tree build_implicit_flow_off_check
   (tree, location_t, contract_evaluation_semantic);
 extern tree build_implicit_coroutine_flow_off_check
   (tree, location_t, contract_evaluation_semantic);
+extern tree cp_build_assume_check
+  (location_t, tree, contract_evaluation_semantic);
 extern tree build_implicit_divide_check
   (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
 extern tree build_implicit_shift_check
