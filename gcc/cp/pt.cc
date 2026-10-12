@@ -23228,6 +23228,12 @@ tsubst_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 
 	      if (r)
 		/* OK */;
+	      else if (seen_error () && is_capture_proxy (t))
+		/* A capture the pattern had and the instantiation does not:
+		   it was diagnosed as ill-formed, for example as a capture
+		   used only in a contract assertion.  A copy of the proxy
+		   would have no context to be a proxy in.  */
+		r = error_mark_node;
 	      else
 		{
 		  /* This can happen for a variable used in a
@@ -23630,9 +23636,7 @@ tsubst_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 	  /* force_paren_expr can also create a VIEW_CONVERT_EXPR.  */
 	  RETURN (finish_parenthesized_expr (op));
 
-	check_param_in_postcondition (op, EXPR_LOCATION (t));
-
-	if (flag_contracts && processing_contract_condition)
+	if (flag_contracts && constify_in_contract_predicate_p (op))
 	    op = constify_contract_access (op);
 
 	/* Otherwise, we're dealing with a wrapper to make a C++20 template
