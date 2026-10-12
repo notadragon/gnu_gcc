@@ -7482,6 +7482,7 @@ extern bool in_immediate_context		();
 extern bool immediate_invocation_p		(tree);
 extern tree build_cxx_call			(tree, int, tree *,
 						 tsubst_flags_t,
+						 tree = NULL_TREE,
 						 tree = NULL_TREE);
 extern bool is_std_init_list			(tree);
 extern bool is_list_ctor			(tree);

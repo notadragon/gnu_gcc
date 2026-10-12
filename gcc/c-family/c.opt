@@ -1996,6 +1996,10 @@ fcontracts-definition-check=
 C++ ObjC++ Joined RejectNegative Enum(on_off) Var(flag_contracts_definition_check) Init(1)
 -fcontracts-definition-check=[on|off]	Enable or disable contract checks on the definition side for all functions (default on).
 
+fcontracts-p3097
+C++ ObjC++ Var(flag_contracts_p3097) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3097 contract assertions on virtual functions.
+
 fcontracts-p3850
 C++ ObjC++ Var(flag_contracts_p3850) Init(0)
 Enable all P3850 contract extensions for C++29.
