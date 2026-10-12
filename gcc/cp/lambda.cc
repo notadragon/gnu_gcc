@@ -273,6 +273,26 @@ lambda_capture_field_type (tree expr, bool explicit_init_p,
 	  gcc_assert (TREE_CODE (DECL_VALUE_EXPR (expr)) == COMPONENT_REF);
 	  expr = TREE_OPERAND (DECL_VALUE_EXPR (expr), 1);
 	}
+      else if (!by_reference_p && flag_contracts && REFERENCE_REF_P (expr))
+	{
+	  /* Capturing by copy what an enclosing lambda captured by reference:
+	     the member has the type of the entity captured.  The enclosing
+	     capture may be const although that entity is not, because it was
+	     made inside a contract predicate (see add_capture), and that does
+	     not reach a copy of the entity made in turn: a mutable lambda in
+	     the predicate may modify its own copy (notadragon_wg21 DECISIONS.md
+	     E32).  Only a const the entity does not have is dropped.  */
+	  tree proxy = TREE_OPERAND (expr, 0);
+	  STRIP_ANY_LOCATION_WRAPPER (proxy);
+	  if (is_normal_capture_proxy (proxy)
+	      && TYPE_REF_P (TREE_TYPE (proxy))
+	      && CP_TYPE_CONST_P (TREE_TYPE (TREE_TYPE (proxy))))
+	    {
+	      tree var = strip_normal_capture_proxy (proxy);
+	      if (!CP_TYPE_CONST_P (non_reference (TREE_TYPE (var))))
+		expr = var;
+	    }
+	}
 
       type = non_reference (unlowered_expr_type (expr));
 
