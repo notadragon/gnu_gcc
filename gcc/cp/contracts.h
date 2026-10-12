@@ -288,31 +288,6 @@ extern contract_evaluation_semantic ensure_evaluation_semantic
    never change, whatever its evaluation semantic.  */
 
 
-/* Will this contract be ignored.  */
-
-inline bool
-contract_ignored_p (const_tree contract)
-{
-  return (get_evaluation_semantic (contract) <= CES_IGNORE);
-}
-
-/* Will this contract be evaluated?  */
-
-inline bool
-contract_evaluated_p (const_tree contract)
-{
-  return (get_evaluation_semantic (contract) >= CES_OBSERVE);
-}
-
-/* Is the contract terminating?  */
-
-inline bool
-contract_terminating_p (const_tree contract)
-{
-  return (get_evaluation_semantic (contract) == CES_ENFORCE
-	  || get_evaluation_semantic (contract) == CES_QUICK);
-}
-
 /* Contract data-block ABI constants.
 
    This is a mirror of libcontracts/contracts-abi.h, which is the source of
