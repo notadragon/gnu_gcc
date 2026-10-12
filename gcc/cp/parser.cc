@@ -34937,9 +34937,10 @@ cp_parser_contract_assert (cp_parser *parser, cp_token *token)
   gcc_checking_assert (scope_chain && scope_chain->bindings
 		       && scope_chain->bindings->kind == sk_contract);
   /* Build the contract.  */
-  tree contract = grok_contract (cont_assert, /*mode*/NULL_TREE,
-			    /*result*/NULL_TREE, condition, loc);
-  processing_postcondition = old_pc;
+  tree contract = grok_contract (cont_assert,
+			    /*result*/NULL_TREE, condition, loc, message,
+			    label, requires_clause, comment);
+  processing_postcondition_predicate = old_pc;
   pop_bindings_and_leave_scope ();
 
   /* Revert (any) constification of the current class object.  */
@@ -35384,8 +35385,50 @@ cp_parser_function_contract_specifier (cp_parser *parser, bool defer)
 
       if (identifier)
 	identifier.maybe_add_location_wrapper ();
-      contract = grok_contract (contract_name, /*mode*/NULL_TREE, identifier,
-				condition, loc);
+      contract = grok_contract (contract_name, identifier,
+				condition, loc, /*message*/NULL_TREE, label,
+				requires_clause);
+
+      /* Carry any attribute-specifier-seq written on the result name to the
+	 late parse, which is where the result VAR_DECL is built.  Before
+	 this the deferred path had nowhere to put them and silently dropped
+	 them; now that every non-lambda contract is deferred, dropping them
+	 would lose `post (r [[deprecated]] : ...)' on ordinary functions
+	 too.  */
+      if (result_attrs
+	  && contract != error_mark_node
+	  && POSTCONDITION_P (CONTRACT_CHECK (contract)))
+	POSTCONDITION_RESULT_ATTRS (CONTRACT_CHECK (contract)) = result_attrs;
+
+      /* Save pending capture data for late parsing (P3098), as a TREE_LIST
+	 in POSTCONDITION_CAPTURES: see the encoding below.  */
+      if (contract != error_mark_node && !captures_error
+	  && !pending_captures.is_empty ()
+	  && POSTCONDITION_P (CONTRACT_CHECK (contract)))
+	{
+	  tree cap_list = NULL_TREE;
+	  for (int i = pending_captures.length () - 1; i >= 0; i--)
+	    {
+	      pending_capture &pc = pending_captures[i];
+	      /* Encode: TREE_PURPOSE = a DEFERRED_PARSE holding the
+		 initializer's tokens, TREE_VALUE = name.  For plain captures
+		 (no init_tokens), TREE_PURPOSE is NULL.  TREE_LANG_FLAG_0
+		 encodes pack_expansion.  The DEFERRED_PARSE keeps the token
+		 cache reachable by the garbage collector until the late parse,
+		 as for default arguments and NSDMIs.  */
+	      tree purpose = NULL_TREE;
+	      if (pc.init_tokens)
+		{
+		  purpose = make_node (DEFERRED_PARSE);
+		  DEFPARSE_TOKENS (purpose) = pc.init_tokens;
+		  DEFPARSE_INSTANTIATIONS (purpose) = nullptr;
+		}
+	      tree node = tree_cons (purpose, pc.name, cap_list);
+	      TREE_LANG_FLAG_0 (node) = pc.pack_expansion;
+	      cap_list = node;
+	    }
+	  POSTCONDITION_CAPTURES (CONTRACT_CHECK (contract)) = cap_list;
+	}
     }
   else
     {
@@ -35471,9 +35514,17 @@ cp_parser_function_contract_specifier (cp_parser *parser, bool defer)
       cp_expr condition = cp_parser_conditional_expression (parser);
       cp_token *end = cp_lexer_peek_token (parser->lexer);
       char *comment = cp_parser_contract_comment (first, end, end->location);
-      /* Build the contract.  */
-      contract = grok_contract (contract_name, /*mode*/NULL_TREE, result,
-				condition, loc);
+      tree message = cp_parser_contract_message (parser);
+
+      contract = grok_contract (contract_name, result,
+				condition, loc, message, label,
+				requires_clause, comment);
+
+      /* Store captures on the postcondition node.  */
+      if (!captures_error && captures && contract != error_mark_node
+	  && POSTCONDITION_P (contract))
+	POSTCONDITION_CAPTURES (CONTRACT_CHECK (contract)) = captures;
+
       if (identifier)
 	--processing_template_decl;
       processing_postcondition_predicate = old_pc;
