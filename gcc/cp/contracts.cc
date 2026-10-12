@@ -562,6 +562,32 @@ struct pch_traits
 static GTY(()) hash_map<tree, contract_decl, contract_decl_traits>
   *contract_decl_map;
 
+/* True if a use of `this' at the current point is in a contract predicate,
+   where [expr.prim.this] combines const with the cv-qualifiers of its type --
+   and so of the object it points to, whether reached explicitly or through an
+   implicit member access.  */
+
+bool
+contract_this_is_const_p (void)
+{
+  return flag_contracts && processing_contract_condition;
+}
+
+/* Return PTR, a value of `this', as a pointer to const: the type `this' has
+   within a contract predicate.  */
+
+tree
+contract_const_this (tree ptr)
+{
+  if (ptr == NULL_TREE || ptr == error_mark_node)
+    return ptr;
+  tree type = TREE_TYPE (ptr);
+  if (!type || !TYPE_PTR_P (type) || CP_TYPE_CONST_P (TREE_TYPE (type)))
+    return ptr;
+  tree obj = TREE_TYPE (type);
+  obj = cp_build_qualified_type (obj, cp_type_quals (obj) | TYPE_QUAL_CONST);
+  return build_nop (build_pointer_type (obj), ptr);
+}
 
 /* Converts a contract condition to bool and ensures it has a location.  */
 

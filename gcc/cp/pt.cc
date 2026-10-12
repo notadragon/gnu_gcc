@@ -21337,6 +21337,10 @@ tsubst_lambda_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl)
   LAMBDA_EXPR_LOCATION (r) = LAMBDA_EXPR_LOCATION (t);
   LAMBDA_EXPR_CONSTEVAL_BLOCK_P (r) = LAMBDA_EXPR_CONSTEVAL_BLOCK_P (t);
   LAMBDA_EXPR_DEFAULT_CAPTURE_MODE (r) = LAMBDA_EXPR_DEFAULT_CAPTURE_MODE (t);
+  /* Captures added at instantiation -- of a parameter pack, or of `this' --
+     are const-qualified like those made in the template (add_capture).  */
+  LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (r)
+    = LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (t);
   if (tree ti = LAMBDA_EXPR_REGEN_INFO (t))
     LAMBDA_EXPR_REGEN_INFO (r)
       = build_template_info (t, add_to_template_args (TI_ARGS (ti),
