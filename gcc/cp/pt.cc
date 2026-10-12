@@ -12408,7 +12408,17 @@ tsubst_contract (tree decl, tree t, tree args, tsubst_flags_t complain,
 
   /* Instantiate the condition.  If the postcondition has a result binding
      whose type is undeduced, process the expression as if inside a template to
-     avoid spurious type errors.  */
+     avoid spurious type errors.
+
+     NEWVAR is set only for a postcondition that has a result identifier, so
+     this deliberately excludes a precondition, whose condition can only ever
+     reference parameters and never the return type.  Raising the flag there
+     too left an ordinary, fully-resolvable subexpression (e.g. a scalar `T()`
+     value-initialization) looking template-dependent when substituted below,
+     so it came out of tsubst_expr as an un-instantiated placeholder instead of
+     a digested value -- the same class of bug fixed for the label just below
+     ("the label has nothing to do with the return type"), but for the
+     condition itself.  */
   begin_scope (sk_contract, decl);
   bool old_pc = processing_postcondition;
   processing_postcondition = POSTCONDITION_P (t);

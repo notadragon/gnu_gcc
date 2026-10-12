@@ -181,15 +181,26 @@ mismatched_contracts_p (tree old_contract, tree new_contract)
   if (CONTRACT_CONDITION_DEFERRED_P (new_contract))
     return false;
 
-  /* Compare the conditions of the contracts.  */
-  tree t1 = cp_fully_fold_init (CONTRACT_CONDITION (old_contract));
-  tree t2 = cp_fully_fold_init (CONTRACT_CONDITION (new_contract));
+  /* A postcondition's result-name-introducer is part of the token sequence
+     the one-definition rule compares: both have one, or neither does.  */
+  if (POSTCONDITION_P (old_contract)
+      && ((POSTCONDITION_IDENTIFIER (old_contract) == NULL_TREE)
+	  != (POSTCONDITION_IDENTIFIER (new_contract) == NULL_TREE)))
+    {
+      auto_diagnostic_group d;
+      error_at (EXPR_LOCATION (new_contract),
+		"mismatched postcondition result name in declaration");
+      inform (EXPR_LOCATION (old_contract), "previous contract here");
+      return true;
+    }
 
-  /* Compare the contracts. */
-
+  /* Compare the conditions of the contracts as written, not folded: the
+     one-definition rule compares token sequences, and two conditions that
+     fold to the same value need not be the same.  */
   bool saved_comparing_contracts = comparing_contracts;
   comparing_contracts = true;
-  bool matching_p = cp_tree_equal (t1, t2);
+  bool matching_p = cp_tree_equal (CONTRACT_CONDITION (old_contract),
+				   CONTRACT_CONDITION (new_contract));
   comparing_contracts = saved_comparing_contracts;
 
   if (!matching_p)
@@ -828,6 +839,34 @@ build_contract_condition_function (tree fndecl, bool pre)
       last = &TREE_CHAIN (*last);
     }
 
+  /* P3098: For each active postcondition with captures, append a reference
+     parameter for the capture-state struct.  Both __pre_fn and __post_fn
+     get the same struct reference parameters.  */
+  if (tree contracts = get_fn_contract_specifiers (fndecl))
+    {
+      unsigned cap_idx = 0;
+      for (tree contract : tree_vec_range (contracts))
+	{
+	  if (!active_postcondition_with_captures_p (contract, fndecl))
+	    continue;
+
+	  tree struct_type = get_postcondition_capture_struct_type (contract);
+	  tree ref_type
+	    = cp_build_reference_type (struct_type, /*rval=*/false);
+
+	  char buf[32];
+	  snprintf (buf, sizeof buf, "__captures_%u", cap_idx++);
+	  tree parm = build_lang_decl (PARM_DECL, get_identifier (buf),
+				       ref_type);
+	  DECL_CONTEXT (parm) = fn;
+	  DECL_ARTIFICIAL (parm) = true;
+	  suppress_warning (parm);
+	  DECL_ARGUMENTS (fn) = chainon (DECL_ARGUMENTS (fn), parm);
+	  *last = build_tree_list (NULL_TREE, ref_type);
+	  last = &TREE_CHAIN (*last);
+	}
+    }
+
   *last = void_list_node;
 
   tree adjusted_type = NULL_TREE;
@@ -840,8 +879,18 @@ build_contract_condition_function (tree fndecl, bool pre)
   else
     adjusted_type = build_function_type (void_type_node, arg_types);
 
-  /* If the original function is noexcept, build a noexcept function.  */
-  if (flag_exceptions && type_noexcept_p (TREE_TYPE (fndecl)))
+  /* If the original function is noexcept, build a noexcept function.
+     Also build a noexcept function (P4298) when every contract this
+     outlined function actually checks -- preconditions, and postconditions
+     with captures to initialize, for the .pre function; postconditions for
+     the .post function -- has a statically nonthrowing semantic, even if the
+     original function itself may throw.  */
+  if (flag_exceptions
+      && (type_noexcept_p (TREE_TYPE (fndecl))
+	  || (flag_contracts_p4298
+	      && all_contracts_statically_nonthrowing
+		   (get_fn_contract_specifiers (fndecl), fndecl,
+		    pre ? PRECONDITION_STMT : POSTCONDITION_STMT))))
     adjusted_type = build_exception_variant (adjusted_type, noexcept_true_spec);
 
   TREE_TYPE (fn) = adjusted_type;
@@ -887,7 +936,8 @@ build_contract_condition_function (tree fndecl, bool pre)
   return fn;
 }
 
-/* Build the precondition checking function for FNDECL.  */
+/* Build the precondition checking function for FNDECL.  Also needed when
+   postconditions have captures, since __pre_fn handles capture init.  */
 
 static tree
 build_precondition_function (tree fndecl)
@@ -1082,39 +1132,10 @@ start_function_contracts (tree fndecl)
      function parameter.  */
   if (tree specs = get_fn_contract_specifiers (fndecl))
     for (tree ca : tree_vec_range (specs))
-      if (POSTCONDITION_P (ca))
-	if (tree id = POSTCONDITION_IDENTIFIER (ca))
-	  {
-	    if (id == error_mark_node)
-	      {
-		CONTRACT_CONDITION (ca) = error_mark_node;
-		continue;
-	      }
-	    tree r_name = tree_strip_any_location_wrapper (id);
-	    if (TREE_CODE (id) == PARM_DECL)
-	      r_name = DECL_NAME (id);
-	    gcc_checking_assert (r_name
-				 && TREE_CODE (r_name) == IDENTIFIER_NODE);
-	    tree seen = lookup_name (r_name);
-	    if (seen
-		&& TREE_CODE (seen) == PARM_DECL
-		&& DECL_CONTEXT (seen) == fndecl)
-	      {
-		auto_diagnostic_group d;
-		location_t id_l = location_wrapper_p (id)
-				  ? EXPR_LOCATION (id)
-				  : DECL_SOURCE_LOCATION (id);
-		location_t co_l = EXPR_LOCATION (ca);
-		if (id_l != UNKNOWN_LOCATION)
-		  co_l = make_location (id_l, co_l, co_l);
-		error_at (co_l, "contract postcondition result name shadows a"
-			  " function parameter");
-		inform (DECL_SOURCE_LOCATION (seen),
-			"parameter declared here");
-		POSTCONDITION_IDENTIFIER (ca) = error_mark_node;
-		CONTRACT_CONDITION (ca) = error_mark_node;
-	      }
-	  }
+      if (POSTCONDITION_P (ca)
+	  && POSTCONDITION_IDENTIFIER (ca) == error_mark_node)
+	CONTRACT_CONDITION (ca) = error_mark_node;
+
 
   /* If we are expanding contract assertions inline then no need to declare
      the outline function decls.  */
@@ -1377,13 +1398,10 @@ apply_preconditions (tree fndecl)
 static void
 apply_postconditions (tree fndecl)
 {
-  if (flag_contract_checks_outlined)
-    add_post_condition_fn_call (fndecl);
-  else
+  if (flag_contract_checks_outlined && DECL_POST_FN (fndecl))
     {
-      if (tree contract_copy = copy_contracts (fndecl, cmk_post))
-	for (tree contract : tree_vec_range (contract_copy))
-	  emit_contract_statement (contract);
+      add_post_condition_fn_call (fndecl);
+      return;
     }
 }
 
@@ -1992,6 +2010,73 @@ invalidate_contract (tree contract)
    We use a PARM_DECL instead of a VAR_DECL so that tsubst forces a lookup
    in local specializations when we instantiate these things later.  */
 
+/* [basic.scope.contract]/2: a result name that is not name-independent
+   may not potentially conflict with a declaration whose target scope is the
+   function parameter scope of the function, or, for a lambda, the nearest
+   enclosing lambda scope.  DECL is the result name, not yet pushed into the
+   contract scope.  This holds whatever the evaluation semantic and whether
+   or not the declaration is a definition, so it is checked here, where the
+   result name is made.  */
+
+static void
+check_result_name_conflict (tree decl)
+{
+  /* A result-name-introducer _ is name-independent ([basic.scope.scope]);
+     name_independent_decl_p does not know PARM_DECLs.  */
+  if (id_equal (DECL_NAME (decl), "_"))
+    return;
+  tree seen = lookup_name (DECL_NAME (decl));
+  if (!seen)
+    return;
+
+  /* The scope the contract's function declares its parameters in is the
+     nearest one outside the contract scope.  */
+  cp_binding_level *scope = current_binding_level;
+  while (scope && scope->kind == sk_contract)
+    scope = scope->level_chain;
+
+  bool parm_p = false;
+  if (TREE_CODE (seen) == PARM_DECL && !DECL_ARTIFICIAL (seen) && scope)
+    {
+      if (scope->kind == sk_function_parms)
+	{
+	  for (cxx_binding *b = IDENTIFIER_BINDING (DECL_NAME (decl)); b;
+	       b = b->previous)
+	    if (b->value == seen)
+	      {
+		parm_p = b->scope == scope;
+		break;
+	      }
+	}
+      else
+	/* A lambda's contracts are parsed once its captures are in scope,
+	   inside its body; its parameters are then those of the function
+	   being defined.  */
+	parm_p = (current_function_decl
+		  && LAMBDA_FUNCTION_P (current_function_decl)
+		  && DECL_CONTEXT (seen) == current_function_decl);
+    }
+  /* An init-capture of the lambda whose contract this is.  A simple capture
+     declares nothing, so its proxy does not count.  */
+  bool init_capture_p
+    = (!parm_p && current_function_decl
+       && LAMBDA_FUNCTION_P (current_function_decl)
+       && is_capture_proxy (seen) && !is_normal_capture_proxy (seen)
+       && DECL_CONTEXT (seen) == current_function_decl);
+  if (!parm_p && !init_capture_p)
+    return;
+
+  auto_diagnostic_group d;
+  error_at (DECL_SOURCE_LOCATION (decl),
+	    parm_p
+	    ? G_("contract postcondition result name shadows a function "
+		 "parameter")
+	    : G_("contract postcondition result name shadows a lambda "
+		 "capture"));
+  inform (DECL_SOURCE_LOCATION (seen),
+	  parm_p ? G_("parameter declared here") : G_("capture declared here"));
+}
+
 tree
 make_postcondition_variable (cp_expr id, tree type)
 {
@@ -2003,6 +2088,7 @@ make_postcondition_variable (cp_expr id, tree type)
   tree decl = build_lang_decl (PARM_DECL, id, type);
   DECL_ARTIFICIAL (decl) = true;
   DECL_SOURCE_LOCATION (decl) = id.get_location ();
+  check_result_name_conflict (decl);
   return pushdecl (decl);
 }
 
@@ -2097,15 +2183,23 @@ rebuild_postconditions (tree fndecl)
       tree newvar = copy_node (oldvar);
       TREE_TYPE (newvar) = type;
 
-      /* Make parameters and result available for substitution.  */
+      /* Make parameters, result, and captures available for substitution.  */
       local_specialization_stack stack (lss_copy);
       for (tree t = DECL_ARGUMENTS (fndecl); t != NULL_TREE; t = TREE_CHAIN (t))
 	register_local_identity (t);
       register_local_specialization (newvar, oldvar);
 
+      /* Register captures as identity mappings so tsubst_expr handles
+	 capture references correctly (especially pack captures, which
+	 remain unexpanded during this substitution).  */
+      tree caps = POSTCONDITION_CAPTURES (contract);
+      if (caps && TREE_CODE (TREE_VALUE (caps)) == VAR_DECL)
+	for (tree cap = caps; cap; cap = TREE_CHAIN (cap))
+	  register_local_identity (TREE_VALUE (cap));
+
       begin_scope (sk_contract, fndecl);
-      bool old_pc = processing_postcondition;
-      processing_postcondition = true;
+      bool old_pc = processing_postcondition_predicate;
+      processing_postcondition_predicate = true;
 
       condition = tsubst_expr (condition, make_tree_vec (0),
 			       tf_warning_or_error, fndecl);
@@ -2119,6 +2213,9 @@ rebuild_postconditions (tree fndecl)
       pop_bindings_and_leave_scope ();
     }
 }
+
+/* Extract a STRING_CST from a constant-evaluated const char* result.
+   The result may be NOP_EXPR(ADDR_EXPR(STRING_CST)) or similar.  */
 
 /* Make a string of the contract condition, if it is available.  */
 
@@ -2226,6 +2323,13 @@ update_late_contract (tree contract, tree result, cp_expr condition)
     POSTCONDITION_IDENTIFIER (contract) = result;
 
   /* Generate the comment from the original condition.  */
+
+  /* Apply compute_comment facet (P3400) if present.  */
+  tree label = CONTRACT_LABEL (contract);
+  CONTRACT_COMMENT (contract)
+    = apply_label_string_facet (label, "compute_comment",
+				CONTRACT_COMMENT (contract),
+				EXPR_LOCATION (contract));
   CONTRACT_COMMENT (contract) = build_comment (condition);
 
   /* The condition is converted to bool.  */
