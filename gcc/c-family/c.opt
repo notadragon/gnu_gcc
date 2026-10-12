@@ -2048,6 +2048,10 @@ fcontracts-p4299
 C ObjC C++ ObjC++ Var(flag_contracts_p4299) Init(0)
 Enable P4299 contract assertions for C.
 
+fcontracts-p4301
+C++ ObjC++ Var(flag_contracts_p4301) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P4301 contract_violation::report() ASan/UBSan diagnostic accessor.
+
 fcoroutines
 C++ ObjC++ LTO Var(flag_coroutines)
 Enable C++ coroutines (experimental).

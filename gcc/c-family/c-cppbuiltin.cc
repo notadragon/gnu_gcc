@@ -1159,6 +1159,8 @@ c_cpp_builtins (cpp_reader *pfile)
 	cpp_define (pfile, "__cpp_contracts_requires=202610L");
       if (flag_contracts && flag_contracts_p4298)
 	cpp_define (pfile, "__cpp_contracts_nonthrowing_semantics=202610L");
+      if (flag_contracts && flag_contracts_p4301)
+	cpp_define (pfile, "__cpp_contracts_report=202610L");
       /* P4299's keywords, _Pre, _Post and _ContractAssert, are usable in C++
 	 too; vendor-prefixed, as WG14 has no feature-test macros for language
 	 features (<contracts.h> defines __STDC_VERSION_CONTRACTS_H__).  */
