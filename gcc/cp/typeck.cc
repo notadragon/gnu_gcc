@@ -3033,6 +3033,7 @@ build_class_member_access_expr (cp_expr object, tree member,
       /* A static data member.  */
       result = member;
       mark_exp_read (object);
+      check_postcondition_object_odr_use (object);
 
       if (tree wrap = maybe_get_tls_wrapper_call (result))
 	/* Replace an evaluated use of the thread_local variable with
@@ -3176,6 +3177,7 @@ build_class_member_access_expr (cp_expr object, tree member,
     {
       /* The member is an enumerator.  */
       result = member;
+      check_postcondition_object_odr_use (object);
       /* If OBJECT has side-effects, they are supposed to occur.  */
       if (TREE_SIDE_EFFECTS (object))
 	result = build2 (COMPOUND_EXPR, TREE_TYPE (result),
@@ -3652,6 +3654,7 @@ finish_class_member_access_expr (cp_expr object, tree name, bool template_p,
 		  return error_mark_node;
 		}
 
+	      check_postcondition_object_odr_use (object);
 	      if (TREE_SIDE_EFFECTS (object))
 		val = build2 (COMPOUND_EXPR, TREE_TYPE (val), object, val);
 	      return val;
