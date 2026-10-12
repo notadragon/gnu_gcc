@@ -291,6 +291,7 @@ extern contract_evaluation_semantic ensure_evaluation_semantic
    generates no code -- and whose noexcept result an implicit assertion must
    never change, whatever its evaluation semantic.  */
 
+extern void maybe_instantiate_contracts (tree, bool = false);
 
 /* Contract data-block ABI constants.
 
