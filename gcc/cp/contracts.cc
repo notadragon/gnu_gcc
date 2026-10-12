@@ -2777,7 +2777,48 @@ remap_contract (tree src, tree dst, tree contract, bool duplicate_p)
   if (!do_remap)
     return;
 
+  /* A lambda's capture proxy is a local whose DECL_VALUE_EXPR reads the
+     capture through the closure parameter.  Copying the proxy keeps that
+     expression, still naming SRC's parameter; replace the proxy by its
+     value expression, remapped like the rest.  */
+  if (!duplicate_p && LAMBDA_FUNCTION_P (src))
+    {
+      hash_set<tree> proxies;
+      auto collect = [] (tree *tp, int *, void *data) -> tree
+	{
+	  if (VAR_P (*tp) && is_capture_proxy (*tp))
+	    static_cast<hash_set<tree> *> (data)->add (*tp);
+	  return NULL_TREE;
+	};
+      cp_walk_tree_without_duplicates (&CONTRACT_CONDITION (contract),
+				       collect, &proxies);
+      for (tree proxy : proxies)
+	{
+	  tree ve = unshare_expr (DECL_VALUE_EXPR (proxy));
+	  walk_tree (&ve, copy_tree_body_r, &id, NULL);
+	  insert_decl_map (&id, proxy, ve);
+	}
+    }
+
+  /* The generic walker does not enter a lambda, but the capture initializers
+     of a lambda in the condition name parameters too; remap those
+     separately.  (A cp_walk_tree of the whole condition would also remap
+     the C++ trees the generic walk deliberately leaves alone, such as pack
+     expansions.)  */
+  auto_vec<tree> lambdas;
+  auto collect_lambdas = [] (tree *tp, int *, void *data) -> tree
+    {
+      if (TREE_CODE (*tp) == LAMBDA_EXPR)
+	static_cast<auto_vec<tree> *> (data)->safe_push (*tp);
+      return NULL_TREE;
+    };
+  cp_walk_tree_without_duplicates (&CONTRACT_CONDITION (contract),
+				   collect_lambdas, &lambdas);
   walk_tree (&CONTRACT_CONDITION (contract), copy_tree_body_r, &id, NULL);
+  for (tree lambda : lambdas)
+    for (tree cap = LAMBDA_EXPR_CAPTURE_LIST (lambda); cap;
+	 cap = TREE_CHAIN (cap))
+      walk_tree (&TREE_VALUE (cap), copy_tree_body_r, &id, NULL);
 }
 
 /* Returns a copy of SOURCE contracts where any references to SOURCE's
