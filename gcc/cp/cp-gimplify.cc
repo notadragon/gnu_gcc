@@ -1963,7 +1963,8 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 
   if (TREE_CODE (stmt) == INTEGER_CST
       && TYPE_REF_P (TREE_TYPE (stmt))
-      && (flag_sanitize & (SANITIZE_NULL | SANITIZE_ALIGNMENT))
+      && ((flag_sanitize & (SANITIZE_NULL | SANITIZE_ALIGNMENT))
+	  || flag_contracts_p3100)
       && !wtd->no_sanitize_p)
     {
       ubsan_maybe_instrument_reference (stmt_p);
@@ -2444,15 +2445,17 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 	}
 
       if (!wtd->no_sanitize_p
-	  && sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT)
+	  && (sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT)
+	      || flag_contracts_p3100)
 	  && TYPE_REF_P (TREE_TYPE (stmt)))
 	ubsan_maybe_instrument_reference (stmt_p);
       break;
 
     case CALL_EXPR:
       if (!wtd->no_sanitize_p
-	  && sanitize_flags_p ((SANITIZE_NULL
-				| SANITIZE_ALIGNMENT | SANITIZE_VPTR)))
+	  && (sanitize_flags_p ((SANITIZE_NULL
+				 | SANITIZE_ALIGNMENT | SANITIZE_VPTR))
+	      || flag_contracts_p3100))
 	{
 	  tree fn = CALL_EXPR_FN (stmt);
 	  if (fn != NULL_TREE
@@ -2464,7 +2467,8 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 		= TREE_CODE (fn) == ADDR_EXPR
 		  && TREE_CODE (TREE_OPERAND (fn, 0)) == FUNCTION_DECL
 		  && DECL_CONSTRUCTOR_P (TREE_OPERAND (fn, 0));
-	      if (sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT))
+	      if (sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT)
+		  || flag_contracts_p3100)
 		ubsan_maybe_instrument_member_call (stmt, is_ctor);
 	      if (sanitize_flags_p (SANITIZE_VPTR) && !is_ctor)
 		cp_ubsan_maybe_instrument_member_call (stmt);

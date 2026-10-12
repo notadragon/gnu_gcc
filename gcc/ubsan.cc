@@ -822,6 +822,73 @@ ubsan_expand_bounds_ifn (gimple_stmt_iterator *gsi)
   return true;
 }
 
+/* P3100: the reaction (enum implicit_ub_reaction, mapped from the resolved
+   semantic as described at its declaration) for an implicit contract assertion
+   of configuration group GROUP at LOC in FNDECL, or IMPLICIT_UB_NONE when P3100
+   is off.  Resolution is per site (LOC feeds per-file/line configuration
+   matching) and per enclosing namespace (from FNDECL); see
+   cp_resolve_implicit_ub_semantic.  */
+
+int
+resolve_implicit_ub_reaction (tree fndecl, location_t loc, const char *group)
+{
+  if (!flag_contracts_p3100)
+    return IMPLICIT_UB_NONE;
+  return lang_hooks.resolve_implicit_ub_semantic (fndecl, loc, group);
+}
+
+/* P3100: if REACTION calls the nothrow contract-violation handler
+   (noexcept_enforce or noexcept_observe), have the language build the
+   handler's entry point and data block for the implicit contract assertion
+   of group GROUP at LOC in FNDECL, set *ENTRY to the entry point's
+   FUNCTION_DECL and *DATA_ADDR to the data block's address, and return true.
+   Otherwise, or if the language builds none, return false.  */
+
+static bool
+build_implicit_ub_handler (tree fndecl, location_t loc, const char *group,
+			   int reaction, tree *entry, tree *data_addr)
+{
+  return ((reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE
+	   || reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE)
+	  && lang_hooks.build_implicit_ub_handler (fndecl, loc, group, reaction,
+						   entry, data_addr));
+}
+
+/* P3100: the handler operands of an IFN_UBSAN_NULL reaction (see
+   build_implicit_ub_handler): set *ENTRY to the address of the handler entry
+   point and *DATA_ADDR to the data block's, or both to null_pointer_node when
+   REACTION calls no handler.  */
+
+void
+implicit_ub_handler_operands (tree fndecl, location_t loc, const char *group,
+			      int reaction, tree *entry, tree *data_addr)
+{
+  tree fn, data;
+  if (build_implicit_ub_handler (fndecl, loc, group, reaction, &fn, &data))
+    {
+      *entry = build_fold_addr_expr (fn);
+      *data_addr = data;
+    }
+  else
+    *entry = *data_addr = null_pointer_node;
+}
+
+/* P3100: the call reacting to a violated implicit contract assertion of
+   group GROUP at LOC in FNDECL whose reaction REACTION is a trap or a call
+   to the nothrow handler (see build_implicit_ub_handler); a trap as well if
+   the language builds no handler.  */
+
+static gimple *
+build_implicit_ub_reaction_call (tree fndecl, location_t loc,
+				 const char *group, int reaction)
+{
+  tree entry, data_addr;
+  if (build_implicit_ub_handler (fndecl, loc, group, reaction,
+				 &entry, &data_addr))
+    return gimple_build_call (entry, 1, data_addr);
+  return gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
+}
+
 /* Expand UBSAN_NULL internal call.  The type is kept on the ckind
    argument which is a constant, because the middle-end treats pointer
    conversions as useless and therefore the type of the first argument
@@ -833,12 +900,40 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
   gimple_stmt_iterator gsi = *gsip;
   gimple *stmt = gsi_stmt (gsi);
   location_t loc = gimple_location (stmt);
-  gcc_assert (gimple_call_num_args (stmt) == 3);
-  tree ptr = gimple_call_arg (stmt, 0);
-  tree ckind = gimple_call_arg (stmt, 1);
-  tree align = gimple_call_arg (stmt, 2);
+  gcc_assert (gimple_call_num_args (stmt) == UBSAN_NULL_NUM_OPS);
+  tree ptr = gimple_call_arg (stmt, UBSAN_NULL_PTR);
+  tree ckind = gimple_call_arg (stmt, UBSAN_NULL_CKIND);
+  tree align = gimple_call_arg (stmt, UBSAN_NULL_ALIGN);
   tree check_align = NULL_TREE;
   bool check_null;
+
+  /* P3100: does an implicit ub:expr.unary.dereference.nullptr contract
+     assertion apply at this site?  The reaction was resolved once at pass_ubsan
+     (pre-inline), where cfun->decl was the true enclosing function whose
+     namespace the contract config matched, and carried here as
+     UBSAN_NULL_REACTION.  We
+     must not re-resolve it against the current cfun->decl: after inlining this
+     statement may live in a caller in a different namespace, where the config
+     would no longer match and the check would be wrongly dropped.  When it
+     does apply, its reaction takes precedence over the sanitizer's on the null
+     edge.  IMPLICIT_UB_NONE (0) means no contract -- the pure-sanitizer path,
+     byte-for-byte as before.  */
+  int p3100_reaction
+    = tree_to_shwi (gimple_call_arg (stmt, UBSAN_NULL_REACTION));
+  bool have_contract = (p3100_reaction != IMPLICIT_UB_NONE);
+  /* P3100: the alignment sub-condition carries its own reaction
+     (UBSAN_NULL_ALIGN_REACTION) and handler entry/data (UBSAN_NULL_ALIGN_ENTRY,
+     UBSAN_NULL_ALIGN_DATA), resolved independently of the null one at
+     pass_ubsan.  IMPLICIT_UB_NONE means "no alignment contract" (sanitizer or
+     nothing).  */
+  int align_reaction
+    = tree_to_shwi (gimple_call_arg (stmt, UBSAN_NULL_ALIGN_REACTION));
+  bool have_align_contract = (align_reaction != IMPLICIT_UB_NONE);
+  /* Read the alignment handler entry/data now, while STMT is still the IFN call:
+     the null-check lowering below reassigns STMT to the GIMPLE_COND it replaces
+     the call with, after which gimple_call_arg would no longer work.  */
+  tree align_entry = gimple_call_arg (stmt, UBSAN_NULL_ALIGN_ENTRY);
+  tree align_data = gimple_call_arg (stmt, UBSAN_NULL_ALIGN_DATA);
 
   basic_block cur_bb = gsi_bb (gsi);
 
@@ -854,7 +949,7 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
 	  gsi_insert_before (&gsi, g, GSI_SAME_STMT);
 	}
     }
-  check_null = sanitize_flags_p (SANITIZE_NULL);
+  check_null = sanitize_flags_p (SANITIZE_NULL) || have_contract;
   if (check_null && POINTER_TYPE_P (TREE_TYPE (ptr)))
     {
       addr_space_t as = TYPE_ADDR_SPACE (TREE_TYPE (TREE_TYPE (ptr)));
@@ -904,15 +999,57 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
   if (dom_info_available_p (CDI_DOMINATORS))
     set_immediate_dominator (CDI_DOMINATORS, then_bb, cond_bb);
 
-  /* Put the ubsan builtin call into the newly created BB.  */
-  if (flag_sanitize_trap & ((check_align ? SANITIZE_ALIGNMENT + 0 : 0)
-			    | (check_null ? SANITIZE_NULL + 0 : 0)))
-    g = gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
-  else
+  /* P3100: a contract assertion on this dereference uses the contract reaction,
+     taking precedence over the sanitizer.  This then_bb is the NULL edge's
+     reaction (null contract, operands 3/4/5) -- or, in the alignment-only case
+     (no null edge), the alignment reaction (operands 6/7/8).  In the both-edges
+     case the ALIGNMENT edge gets its own separate then-block further below, so a
+     null-deref contract and an alignment contract at the same access each fire
+     with their own semantic.  */
+  bool null_contract_edge = (have_contract && check_null);
+  bool align_contract_edge
+    = (have_align_contract && check_align != NULL_TREE && !check_null);
+  bool use_contract_reaction = null_contract_edge || align_contract_edge;
+
+  /* Build the reaction gimple for one edge of the check.  When REACTION is a
+     P3100 contract reaction it is a nothrow handler call (noexcept_enforce/
+     observe) or a trap (quick_enforce); when REACTION is IMPLICIT_UB_NONE it
+     is the stock -fsanitize= reaction (trap, or the
+     __ubsan_handle_type_mismatch_v1[_abort] handler) selected by
+     SANITIZE_MASK.  ENTRY/DATA_ADDR are the handler entry point and static
+     data-block address carried on the IFN (built at pass_ubsan while the C++
+     langhook was still available); PTR_ARG is the pointer operand the
+     sanitizer handler wants.  The null and alignment edges share this builder
+     so their reactions stay in lockstep.  */
+  auto build_reaction = [&] (int reaction, tree entry, tree data_addr,
+			     sanitize_code_type sanitize_mask,
+			     tree ptr_arg) -> gimple *
     {
+      if (reaction != IMPLICIT_UB_NONE)
+	{
+	  /* The entry/data were built at pass_ubsan (front-end present,
+	     pre-inline cfun->decl) and carried on the IFN.  We must not
+	     rebuild them here via the langhook: this runs post-inline and,
+	     under LTO, at LTRANS where no C++ langhook exists (it would return
+	     false and degrade to a trap).  A null entry means quick_enforce /
+	     no handler -> trap.  */
+	  if ((reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE
+	       || reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE)
+	      && entry != NULL_TREE && !integer_zerop (entry))
+	    /* noexcept_enforce / noexcept_observe: call the nothrow contract
+	       handler entry point (the decl encodes noreturn for enforce; for
+	       observe it returns and the then-block falls through to the real
+	       access -- "report then proceed").  No EH region needed.  */
+	    return gimple_build_call (entry, 1, data_addr);
+	  /* IMPLICIT_UB_TRAP (quick_enforce).  Throwing enforce/observe are
+	     excluded from this check's allowed set on the front-end side and
+	     clamped away, so they never reach here.  */
+	  return gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
+	}
+      if (flag_sanitize_trap & sanitize_mask)
+	return gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
       enum built_in_function bcode
-	= (flag_sanitize_recover & ((check_align ? SANITIZE_ALIGNMENT + 0 : 0)
-				    | (check_null ? SANITIZE_NULL + 0 : 0)))
+	= (flag_sanitize_recover & sanitize_mask)
 	  ? BUILT_IN_UBSAN_HANDLE_TYPE_MISMATCH_V1
 	  : BUILT_IN_UBSAN_HANDLE_TYPE_MISMATCH_V1_ABORT;
       tree fn = builtin_decl_implicit (bcode);
@@ -927,10 +1064,33 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
 			     fold_convert (unsigned_char_type_node, ckind),
 			     NULL_TREE);
       data = build_fold_addr_expr_loc (loc, data);
-      g = gimple_build_call (fn, 2, data,
-			     check_align ? check_align
-			     : build_zero_cst (pointer_sized_int_node));
-    }
+      return gimple_build_call (fn, 2, data, ptr_arg);
+    };
+
+  /* Put the reaction for the first edge (null, or -- in the alignment-only
+     case -- alignment) into the newly created then_bb.  STMT is still the IFN
+     call here, so its per-edge entry/data operands are readable.  */
+  {
+    int reaction = use_contract_reaction
+		   ? (align_contract_edge ? align_reaction : p3100_reaction)
+		   : IMPLICIT_UB_NONE;
+    tree entry = use_contract_reaction
+		 ? gimple_call_arg (stmt, align_contract_edge
+					  ? UBSAN_NULL_ALIGN_ENTRY
+					  : UBSAN_NULL_ENTRY)
+		 : NULL_TREE;
+    tree data_addr = use_contract_reaction
+		     ? gimple_call_arg (stmt, align_contract_edge
+					      ? UBSAN_NULL_ALIGN_DATA
+					      : UBSAN_NULL_DATA)
+		     : NULL_TREE;
+    sanitize_code_type sanitize_mask
+      = ((check_align ? SANITIZE_ALIGNMENT + 0 : 0)
+	 | (check_null ? SANITIZE_NULL + 0 : 0));
+    tree ptr_arg = check_align ? check_align
+			       : build_zero_cst (pointer_sized_int_node);
+    g = build_reaction (reaction, entry, data_addr, sanitize_mask, ptr_arg);
+  }
   gimple_stmt_iterator gsi2 = gsi_start_bb (then_bb);
   gimple_set_location (g, loc);
   gsi_insert_after (&gsi2, g, GSI_NEW_STMT);
@@ -951,12 +1111,13 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
 
   if (check_align)
     {
+      basic_block cond2_bb = NULL;
       if (check_null)
 	{
 	  /* Split the block with the condition again.  */
 	  e = split_block (cond_bb, stmt);
 	  basic_block cond1_bb = e->src;
-	  basic_block cond2_bb = e->dest;
+	  cond2_bb = e->dest;
 
 	  /* Make an edge coming from the 'cond1 block' into the 'then block';
 	     this edge is unlikely taken, so set up the probability
@@ -998,6 +1159,40 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
       else
 	/* Replace the UBSAN_NULL with a GIMPLE_COND stmt.  */
 	gsi_replace (&gsi, g, false);
+
+      /* P3100: in the both-edges case the alignment condition's TRUE edge was
+	 inherited pointing at the shared then_bb (which holds the NULL edge's
+	 reaction).  When a contract applies to either edge, give the alignment
+	 edge its own then-block with its own reaction, so a null-deref contract
+	 and an alignment contract at the same access each fire independently.
+	 When neither edge is a contract the two share then_bb -- the stock
+	 -fsanitize= codegen, unchanged.  */
+      if (cond2_bb != NULL && (have_contract || have_align_contract))
+	{
+	  basic_block then_align_bb = create_empty_bb (cond2_bb);
+	  add_bb_to_loop (then_align_bb, cond2_bb->loop_father);
+	  loops_state_set (LOOPS_NEED_FIXUP);
+	  make_single_succ_edge (then_align_bb, fallthru_bb, EDGE_FALLTHRU);
+	  edge te = find_edge (cond2_bb, then_bb);
+	  redirect_edge_and_branch (te, then_align_bb);
+	  te->probability = profile_probability::very_unlikely ();
+	  then_align_bb->count = te->count ();
+	  if (dom_info_available_p (CDI_DOMINATORS))
+	    set_immediate_dominator (CDI_DOMINATORS, then_align_bb, cond2_bb);
+
+	  /* Build the alignment edge's reaction with the shared builder: its own
+	     contract reaction (operands 6/7/8, captured above as align_entry/
+	     align_data since STMT is no longer the IFN call) or, when the alignment
+	     edge is a pure sanitizer check, the stock type-mismatch handler.  */
+	  gimple *ag
+	    = build_reaction (have_align_contract ? align_reaction
+						  : IMPLICIT_UB_NONE,
+			      align_entry, align_data, SANITIZE_ALIGNMENT,
+			      check_align);
+	  gimple_set_location (ag, loc);
+	  gimple_stmt_iterator agsi = gsi_start_bb (then_align_bb);
+	  gsi_insert_after (&agsi, ag, GSI_NEW_STMT);
+	}
     }
   return false;
 }
@@ -1444,16 +1639,44 @@ instrument_mem_ref (tree mem, tree base, gimple_stmt_iterator *iter,
 		    bool is_lhs)
 {
   enum ubsan_null_ckind ikind = is_lhs ? UBSAN_STORE_OF : UBSAN_LOAD_OF;
+  location_t site_loc = gimple_location (gsi_stmt (*iter));
+  /* A P3100 ub:expr.unary.dereference.nullptr assertion also wants the null
+     check on this dereference, even when -fsanitize=null is not enabled.
+     Resolve the reaction HERE, at pass_ubsan (pre-inline), where cfun->decl is
+     the true enclosing function whose namespace the contract config matches.
+     The value is carried as IFN_UBSAN_NULL's UBSAN_NULL_REACTION so it survives
+     inlining and LTO -- ubsan_expand_null_ifn (post-inline) must not re-resolve
+     it, since cfun->decl there may be a caller in a different namespace.  When
+     no contract applies the reaction is IMPLICIT_UB_NONE (0), which every
+     consumer treats exactly as the old "no contract, sanitizer only" path.  */
+  int p3100_reaction
+    = resolve_implicit_ub_reaction (cfun->decl, site_loc,
+				    "ub:expr.unary.dereference.nullptr");
+  bool p3100_null = (p3100_reaction != IMPLICIT_UB_NONE);
+  /* A P3100 ub:basic.align.object.alignment assertion wants the alignment edge
+     generated even when -fsanitize=alignment is not enabled.  Its reaction is
+     carried independently (operands 6/7/8), and ubsan_expand_null_ifn routes the
+     null and alignment edges to separate then-blocks, so both a null-deref
+     contract and an alignment contract can apply at the same access.  */
+  int p3100_align_reaction
+    = resolve_implicit_ub_reaction (cfun->decl, site_loc,
+				    "ub:basic.align.object.alignment");
+  bool want_align_contract = (p3100_align_reaction != IMPLICIT_UB_NONE);
   unsigned int align = 0;
-  if (sanitize_flags_p (SANITIZE_ALIGNMENT))
+  if (sanitize_flags_p (SANITIZE_ALIGNMENT) || want_align_contract)
     {
       align = min_align_of_type (TREE_TYPE (base));
       if (align <= 1)
 	align = 0;
     }
+  /* Only a type that actually needs alignment (> 1) has an alignment edge; if
+     none, the align contract has nothing to check.  This differs from
+     want_align_contract, which is true whenever a config selects an alignment
+     reaction regardless of whether this access has an alignment edge.  */
+  bool p3100_align_active = (want_align_contract && align != 0);
   if (align == 0)
     {
-      if (!sanitize_flags_p (SANITIZE_NULL))
+      if (!sanitize_flags_p (SANITIZE_NULL) && !p3100_null)
 	return;
       addr_space_t as = TYPE_ADDR_SPACE (TREE_TYPE (base));
       if (!ADDR_SPACE_GENERIC_P (as)
@@ -1467,8 +1690,37 @@ instrument_mem_ref (tree mem, tree base, gimple_stmt_iterator *iter,
     ikind = UBSAN_MEMBER_ACCESS;
   tree kind = build_int_cst (build_pointer_type (TREE_TYPE (base)), ikind);
   tree alignt = build_int_cst (pointer_sized_int_node, align);
-  gcall *g = gimple_build_call_internal (IFN_UBSAN_NULL, 3, t, kind, alignt);
-  gimple_set_location (g, gimple_location (gsi_stmt (*iter)));
+  tree reactiont = build_int_cst (unsigned_type_node, p3100_reaction);
+  tree align_reactiont
+    = build_int_cst (unsigned_type_node,
+		     p3100_align_active ? p3100_align_reaction
+					: IMPLICIT_UB_NONE);
+  /* For a P3100 noexcept_enforce/observe check, build the contract violation
+     handler entry point and its static data block HERE, at pass_ubsan, while
+     the C++ front-end langhook is still available and cfun->decl is the true
+     (pre-inline) enclosing function.  The handler entry decl and data-block
+     address are carried on the IFN so ubsan_expand_null_ifn (which runs at
+     sanopt, post-inline and -- crucially -- at LTRANS where no C++ langhook
+     exists) can emit the call by reading the IR instead of re-deriving it.
+     quick_enforce (trap) and the pure-sanitizer path carry null operands and
+     fall back to a trap / the sanitizer handler at expansion time.  The null
+     reaction uses UBSAN_NULL_ENTRY/UBSAN_NULL_DATA; the alignment reaction
+     UBSAN_NULL_ALIGN_ENTRY/UBSAN_NULL_ALIGN_DATA.  */
+  tree entryt, data_addrt;
+  implicit_ub_handler_operands (cfun->decl, site_loc,
+				"ub:expr.unary.dereference.nullptr",
+				p3100_reaction, &entryt, &data_addrt);
+  tree align_entryt, align_data_addrt;
+  implicit_ub_handler_operands (cfun->decl, site_loc,
+				"ub:basic.align.object.alignment",
+				p3100_align_active
+				? p3100_align_reaction : IMPLICIT_UB_NONE,
+				&align_entryt, &align_data_addrt);
+  gcall *g = gimple_build_call_internal (IFN_UBSAN_NULL, UBSAN_NULL_NUM_OPS,
+					 t, kind, alignt, reactiont, entryt,
+					 data_addrt, align_reactiont,
+					 align_entryt, align_data_addrt);
+  gimple_set_location (g, site_loc);
   gsi_safe_insert_before (iter, g);
 }
 

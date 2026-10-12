@@ -28,6 +28,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "stor-layout.h"
 #include "builtins.h"
 #include "gimplify.h"
+#include "langhooks.h"
 #include "stringpool.h"
 #include "attribs.h"
 #include "asan.h"
@@ -909,8 +910,28 @@ static tree
 ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
 					  enum ubsan_null_ckind ckind)
 {
+  if (current_function_decl == NULL_TREE)
+    return NULL_TREE;
+
+  /* P3100 routes null-dereference and misalignment to the contract-violation
+     machinery.  This gate covers two of the three syntactic shapes of that UB
+     -- a reference binding (int &r = *p) and a null-this member call
+     (p->f ()); the third, a plain *p, is handled by the sibling gates.  All
+     three must consult the routed reaction, or a configured check applies to
+     some spellings of one dereference and not others.
+
+     Resolve both reactions up front so they can widen the gate below.  */
+  int p3100_null_reaction
+    = resolve_implicit_ub_reaction (current_function_decl, loc,
+				    "ub:expr.unary.dereference.nullptr");
+  int p3100_align_reaction
+    = resolve_implicit_ub_reaction (current_function_decl, loc,
+				    "ub:basic.align.object.alignment");
+  bool p3100_null = (p3100_null_reaction != IMPLICIT_UB_NONE);
+  bool p3100_align = (p3100_align_reaction != IMPLICIT_UB_NONE);
+
   if (!sanitize_flags_p (SANITIZE_ALIGNMENT | SANITIZE_NULL)
-      || current_function_decl == NULL_TREE)
+      && !p3100_null && !p3100_align)
     return NULL_TREE;
 
   tree type = TREE_TYPE (ptype);
@@ -918,7 +939,7 @@ ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
   bool instrument = false;
   unsigned int mina = 0;
 
-  if (sanitize_flags_p (SANITIZE_ALIGNMENT))
+  if (sanitize_flags_p (SANITIZE_ALIGNMENT) || p3100_align)
     {
       mina = min_align_of_type (type);
       if (mina <= 1)
@@ -936,7 +957,8 @@ ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
     }
   else
     {
-      if (sanitize_flags_p (SANITIZE_NULL) && TREE_CODE (op) == ADDR_EXPR)
+      if ((sanitize_flags_p (SANITIZE_NULL) || p3100_null)
+	  && TREE_CODE (op) == ADDR_EXPR)
 	{
 	  /* tree_single_nonzero_p will not return true for non-weak
 	     non-automatic decls with -fno-delete-null-pointer-checks,
@@ -950,7 +972,7 @@ ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
 	  flag_delete_null_pointer_checks
 	    = save_flag_delete_null_pointer_checks;
 	}
-      else if (sanitize_flags_p (SANITIZE_NULL))
+      else if (sanitize_flags_p (SANITIZE_NULL) || p3100_null)
 	instrument = true;
       if (mina && mina > 1)
 	{
@@ -967,9 +989,36 @@ ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
     ptype = build_pointer_type (TREE_TYPE (ptype));
   tree kind = build_int_cst (ptype, ckind);
   tree align = build_int_cst (pointer_sized_int_node, mina);
+  /* UBSAN_NULL_REACTION is the P3100 implicit-UB null reaction,
+     UBSAN_NULL_ENTRY/UBSAN_NULL_DATA the null contract handler entry point and
+     its static data-block address; the UBSAN_NULL_ALIGN_* operands the same
+     for alignment.  Carry the resolved reactions
+     and handlers, mirroring instrument_mem_ref -- the reaction has to
+     travel as an operand rather than be re-derived later, because by
+     expansion time cfun->decl may be an inlined-into function with a
+     different configuration.  */
+  tree reaction = build_int_cst (unsigned_type_node, p3100_null_reaction);
+  /* Only an access with an alignment edge (MINA != 0) has an alignment
+     check to react to; carry NONE otherwise, as instrument_mem_ref does.  */
+  if (!mina)
+    p3100_align_reaction = IMPLICIT_UB_NONE;
+  tree align_reaction
+    = build_int_cst (unsigned_type_node, p3100_align_reaction);
+  tree entryt, data_addrt;
+  implicit_ub_handler_operands (current_function_decl, loc,
+				"ub:expr.unary.dereference.nullptr",
+				p3100_null_reaction, &entryt, &data_addrt);
+  tree align_entryt, align_data_addrt;
+  implicit_ub_handler_operands (current_function_decl, loc,
+				"ub:basic.align.object.alignment",
+				p3100_align_reaction, &align_entryt,
+				&align_data_addrt);
   tree call
     = build_call_expr_internal_loc (loc, IFN_UBSAN_NULL, void_type_node,
-				    3, op, kind, align);
+				    UBSAN_NULL_NUM_OPS, op, kind, align,
+				    reaction, entryt, data_addrt,
+				    align_reaction, align_entryt,
+				    align_data_addrt);
   TREE_SIDE_EFFECTS (call) = 1;
   return fold_build2 (COMPOUND_EXPR, TREE_TYPE (op), call, op);
 }
