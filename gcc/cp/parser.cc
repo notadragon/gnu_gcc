@@ -10322,6 +10322,32 @@ cp_parser_reflect_expression (cp_parser *parser)
   return error_mark_node;
 }
 
+/* True if the expression being parsed is in a contract predicate, and not
+   within a lambda in it: [expr.await]/2 and [expr.yield] allow an
+   await-expression or a yield-expression there only within a lambda.  A
+   statement expression's block is part of the predicate; a lambda's body
+   starts a function scope of its own.  */
+
+static bool
+cp_parser_in_contract_predicate_p ()
+{
+  if (!flag_contracts)
+    return false;
+  for (cp_binding_level *b = current_binding_level; b; b = b->level_chain)
+    switch (b->kind)
+      {
+      case sk_contract:
+	return true;
+      case sk_function_parms:
+      case sk_class:
+      case sk_namespace:
+	return false;
+      default:
+	break;
+      }
+  return false;
+}
+
 /* Parse a unary-expression.
 
    unary-expression:
@@ -10569,6 +10595,13 @@ cp_parser_unary_expression (cp_parser *parser, cp_id_kind * pidk,
 	      {
 		error_at (kw_loc,
 			  "%<co_await%> cannot be used in default arguments");
+		return error_mark_node;
+	      }
+	    /* ... nor in a contract predicate.  */
+	    if (cp_parser_in_contract_predicate_p ())
+	      {
+		error_at (kw_loc,
+			  "%<co_await%> cannot be used in a contract predicate");
 		return error_mark_node;
 	      }
 
@@ -32910,6 +32943,14 @@ cp_parser_yield_expression (cp_parser* parser)
     {
       error_at (kw_loc,
 		"%<co_yield%> cannot be used in default arguments");
+      return error_mark_node;
+    }
+
+  /* Nor in a contract predicate.  */
+  if (cp_parser_in_contract_predicate_p ())
+    {
+      error_at (kw_loc,
+		"%<co_yield%> cannot be used in a contract predicate");
       return error_mark_node;
     }
 
