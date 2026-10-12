@@ -727,6 +727,7 @@ cp_common_init_ts (void)
   MARK_TS_EXP (ASSERTION_STMT);
   MARK_TS_EXP (PRECONDITION_STMT);
   MARK_TS_EXP (POSTCONDITION_STMT);
+  MARK_TS_EXP (CONTRACT_CONTROL_EXPR);
 
   c_common_init_ts ();
 }
