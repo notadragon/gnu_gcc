@@ -1278,6 +1278,9 @@ UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-checks-outlined)
 fcontract-disable-optimized-checks
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-disable-optimized-checks)
 
+fcontract-bypass-rethrowing-local-handler
+UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-bypass-rethrowing-local-handler)
+
 fcontract-comment-from-expression
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-comment-from-expression)
 
