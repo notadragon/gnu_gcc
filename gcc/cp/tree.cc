@@ -4167,7 +4167,17 @@ cp_tree_equal (tree t1, tree t2)
       /* When comparing contracts, one declaration may already be
 	 genericized. Check for invisible references and unravel them
 	 for comparison purposes. Remember that a parameter is an invisible
-	 reference so we can compare the parameter types accordingly.  */
+	 reference so we can compare the parameter types accordingly.
+
+	 The same view of a parameter can be an invisible reference on one
+	 side only: a redeclaration's predicate is parsed against a copy of
+	 the parameter with the rewrite undone (cp_parser_late_parse_for_match).
+	 Two views of parameters are compared as the parameters, which match
+	 by position whatever their types.  */
+      if (code1 == VIEW_CONVERT_EXPR && code2 == VIEW_CONVERT_EXPR
+	  && TREE_CODE (TREE_OPERAND (t1, 0)) == PARM_DECL
+	  && TREE_CODE (TREE_OPERAND (t2, 0)) == PARM_DECL)
+	return cp_tree_equal (TREE_OPERAND (t1, 0), TREE_OPERAND (t2, 0));
       if (code1 == VIEW_CONVERT_EXPR
 	  && is_invisiref_parm (TREE_OPERAND(t1, 0)))
 	{
