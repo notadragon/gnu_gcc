@@ -22,6 +22,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "cp-tree.h"
+#include "contracts.h"
 #include "timevar.h"
 #include "stringpool.h"
 #include "print-tree.h"
@@ -3764,6 +3765,13 @@ push_local_extern_decl_alias (tree decl)
 		  DECL_CHAIN (*chain) = next;
 		  DECL_CONTEXT (*chain) = alias;
 		}
+
+	      /* This is the first declaration of the function, so its
+		 contract specifiers are the function's: carry them to the
+		 alias that later declarations merge with, onto the alias's
+		 own parameters.  */
+	      if (tree contracts = copy_and_remap_contracts (alias, decl))
+		set_fn_contract_specifiers (alias, contracts);
 
 	      tree type = TREE_TYPE (alias);
 	      for (tree args = TYPE_ARG_TYPES (type);
