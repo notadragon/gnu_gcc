@@ -2794,6 +2794,10 @@ cp_genericize (tree fndecl)
   if (DECL_CLONED_FUNCTION_P (fndecl))
     return;
 
+  /* P3100 (assume): a routed sanitizer check that resolves to assume is not
+     instrumented in this function (c-family/c-ubsan.cc).  */
+  c_apply_contract_sanitizer_assume (fndecl);
+
   /* Allow cp_genericize calls to be nested.  */
   bc_state_t save_state;
   save_bc_state (&save_state);

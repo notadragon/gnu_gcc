@@ -35,6 +35,10 @@ extern tree cp_get_global_decls ();
 extern tree cp_pushdecl (tree);
 extern void cp_register_dumps (gcc::dump_manager *);
 extern void cp_register_features ();
+extern int cp_resolve_implicit_ub_semantic (tree, location_t, const char *);
+extern bool cp_build_implicit_ub_handler (tree, location_t, const char *, int,
+					  tree *, tree *);
+extern tree cp_build_implicit_bounds_check (tree, location_t, tree, tree);
 extern bool cp_handle_option (size_t, const char *, HOST_WIDE_INT, int,
 			      location_t, const struct cl_option_handlers *);
 extern tree cxx_make_type_hook			(tree_code);
@@ -215,4 +219,10 @@ static const scoped_attribute_specs *const cp_objcp_attribute_table[] =
 #define LANG_HOOKS_GETDECLS cp_get_global_decls
 #undef LANG_HOOKS_PUSHDECL
 #define LANG_HOOKS_PUSHDECL cp_pushdecl
+#undef LANG_HOOKS_RESOLVE_IMPLICIT_UB_SEMANTIC
+#define LANG_HOOKS_RESOLVE_IMPLICIT_UB_SEMANTIC cp_resolve_implicit_ub_semantic
+#undef LANG_HOOKS_BUILD_IMPLICIT_UB_HANDLER
+#define LANG_HOOKS_BUILD_IMPLICIT_UB_HANDLER cp_build_implicit_ub_handler
+#undef LANG_HOOKS_BUILD_IMPLICIT_BOUNDS_CHECK
+#define LANG_HOOKS_BUILD_IMPLICIT_BOUNDS_CHECK cp_build_implicit_bounds_check
 #endif /* GCC_CP_OBJCP_COMMON */

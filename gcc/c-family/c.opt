@@ -1937,6 +1937,10 @@ Enum(contract_semantic) String(enforce) Value(3)
 EnumValue
 Enum(contract_semantic) String(quick_enforce) Value(4)
 
+EnumValue
+Enum(contract_semantic) String(assume) Value(5)
+
+EnumValue
 Enum(contract_semantic) String(noexcept_observe) Value(6)
 
 EnumValue
@@ -1979,6 +1983,10 @@ C C++ ObjC ObjC++ Joined RejectNegative
 fcontract-group-evaluation-semantic=
 C C++ ObjC ObjC++ Joined RejectNegative
 -fcontract-group-evaluation-semantic=<group>:<semantic>[,...]	Set the evaluation semantic for contracts in the named groups.
+
+fcontracts-allow-assume
+C C++ ObjC ObjC++ Var(flag_contracts_allow_assume) Init(0)
+Allow the assume contract evaluation semantic to be used; a resolved assume is otherwise treated as ignore.
 
 Enum
 Name(client_contract_check) Type(int)  UnknownError(unrecognized client contract check option %qs)
@@ -2024,6 +2032,10 @@ Enable P3099 user-defined diagnostic messages for contract assertions.
 ; Not streamed into the LTO options section: lto-streamer-in.cc re-arms it
 ; when a contract null check survives to LTRANS, so that pass_sanopt, which
 ; gates on it, expands the check.
+fcontracts-p3100
+C ObjC C++ ObjC++ Var(flag_contracts_p3100) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3100 implicit contract assertions for undefined behaviour.
+
 fcontracts-p3290
 C++ ObjC++ Var(flag_contracts_p3290) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P3290 contract violation trigger API and assert integration.

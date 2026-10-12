@@ -464,6 +464,7 @@ extern GTY(()) tree cp_global_trees[CPTI_MAX];
       TI_PENDING_TEMPLATE_FLAG.
       TEMPLATE_PARMS_FOR_INLINE.
       DELETE_EXPR_USE_VEC (in DELETE_EXPR).
+      COND_EXPR_IMPLICIT_UB_GUARD_P (in COND_EXPR)
       ICS_ELLIPSIS_FLAG (in _CONV)
       DECL_INITIALIZED_P (in VAR_DECL)
       TYPENAME_TYPE_TAG_BIT_1 (in TYPENAME_TYPE)
@@ -806,6 +807,13 @@ typedef struct ptrmem_cst * ptrmem_cst_t;
 
 #define COND_EXPR_IS_VEC_DELETE(NODE) \
   TREE_LANG_FLAG_0 (COND_EXPR_CHECK (NODE))
+
+/* Nonzero if this COND_EXPR guards an operation that a P3100 implicit
+   contract assertion checks for undefined behavior; see
+   build_implicit_op_guard and cp_build_assume_check.  Constant evaluation
+   evaluates the operation, not the reaction.  */
+#define COND_EXPR_IMPLICIT_UB_GUARD_P(NODE) \
+  TREE_LANG_FLAG_1 (COND_EXPR_CHECK (NODE))
 
 /* Nonzero if this NOP_EXPR is a reinterpret_cast.  Such conversions
    are not constexprs.  Other NOP_EXPRs are.  */

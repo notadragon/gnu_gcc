@@ -233,6 +233,7 @@ in the following sections.
 -fcontracts-definition-check=@r{[}on@r{|}off@r{]}
 -fcontract-group-evaluation-semantic=@var{group}:@var{semantic}@r{[},@dots{}@r{]}
 -fcontract-configuration=@var{json}  -fcontract-configuration-file=@var{file}
+-fcontracts-allow-assume
 -fcoroutines  -fdiagnostics-all-candidates
 -fno-elide-constructors
 -fno-enforce-eh-specs
@@ -716,6 +717,8 @@ Objective-C and Objective-C++ Dialects}.
 -fprofile-reproducible=@r{[}multithreaded@r{|}parallel-runs@r{|}serial@r{]}
 -fsanitize=@var{style}  -fsanitize-recover  -fsanitize-recover=@var{style}
 -fsanitize-trap   -fsanitize-trap=@var{style}
+-fsanitize-semantic=@var{check}:@var{semantic}@r{[},@dots{}@r{]}
+-fsanitize-noncontract-callbacks
 -fasan-shadow-offset=@var{number}  -fsanitize-sections=@var{s1},@var{s2},...
 -fsanitize-undefined-trap-on-error  -fcf-protection
 -fcf-protection=@r{[}full@r{|}branch@r{|}return@r{|}none@r{|}check@r{]}
@@ -2786,6 +2789,9 @@ In C++, together with @option{-fcontracts}, this option makes @code{_Pre},
 @code{__gcc_contracts_p4299} likewise.  @option{-fcontracts-p3850} does not
 enable it.
 
+@option{-fcontracts-p3100} is accepted for C as well, with or without
+this option (@pxref{C++ Dialect Options}).
+
 @opindex fdeps-
 @opindex fdeps-file
 @opindex fdeps-format
@@ -3421,6 +3427,12 @@ fails, the execution is terminated immediately (without calling any handler).
 At compile-time there is no difference in behaviour between this option and
 the @code{enforce} case, since no handler is invoked at compile time.
 
+'@code{assume}' The predicate is not evaluated and the compiler may assume it
+holds, eliding code on the assumption that a violation cannot occur.  A
+violated predicate is therefore undefined behaviour.  For a contract written
+in the source this requires @option{-fcontracts-allow-assume}; without it,
+@code{ignore} is used instead.
+
 '@code{noexcept_enforce}' As @code{enforce}, except that the handler is
 invoked in a non-throwing context: a handler that exits by throwing
 terminates rather than propagating.  Requires @option{-fcontracts-p4298};
@@ -3506,6 +3518,10 @@ may be a comma-separated list of @var{group}:@var{semantic} elements, and
 the option may be given more than once.  Groups are attached to an
 assertion by an assertion-control label.
 
+Under @option{-fcontracts-p3100} each implicit contract assertion belongs
+to a group named @samp{ub:} followed by the undefined behaviour it guards
+against, such as @samp{ub:expr.mul.div.by.zero.int}.
+
 @opindex fcontract-configuration
 @item -fcontract-configuration=@var{json}
 @opindex fcontract-configuration-file
@@ -3525,6 +3541,18 @@ entries implied by @option{-fcontracts-client-check} and
 assertion no earlier entry matched, wherever it appears on the command
 line.
 
+Under @option{-fcontracts-p3100}, an entry giving implicit contract
+assertions the @code{assume} semantic comes just before that last one.
+
+@opindex fcontracts-allow-assume
+@opindex fno-contracts-allow-assume
+@item -fcontracts-allow-assume
+Permit the @code{assume} evaluation semantic to be selected for contract
+assertions written in the source.  Because @code{assume} makes a violated
+predicate undefined behaviour rather than a diagnosed error, it must be
+opted into explicitly.  Where contracts are enabled, this option defines
+the macro @code{__gcc_contracts_allow_assume}.
+
 @opindex fcontracts-p3850
 @opindex fno-contracts-p3850
 @item -fcontracts-p3850
@@ -3540,6 +3568,8 @@ also enable @option{-fcontracts}, in any C++ dialect.
 @opindex fno-contracts-p3098
 @opindex fcontracts-p3099
 @opindex fno-contracts-p3099
+@opindex fcontracts-p3100
+@opindex fno-contracts-p3100
 @opindex fcontracts-p3290
 @opindex fno-contracts-p3290
 @opindex fcontracts-p3400
@@ -3553,6 +3583,7 @@ also enable @option{-fcontracts}, in any C++ dialect.
 @item -fcontracts-p3097
 @itemx -fcontracts-p3098
 @itemx -fcontracts-p3099
+@itemx -fcontracts-p3100
 @itemx -fcontracts-p3290
 @itemx -fcontracts-p3400
 @itemx -fcontracts-p4283
@@ -18073,6 +18104,44 @@ If @code{-fsanitize-trap=undefined} or @code{-fsanitize-trap=all} is used
 and @code{-fsanitize=vptr} is enabled on the command line, the
 instrumentation is silently ignored as the instrumentation always needs
 @code{libubsan} support, @option{-fsanitize-trap=vptr} is not allowed.
+
+@opindex fsanitize-semantic
+@item -fsanitize-semantic=@var{check}:@var{semantic}@r{[},@dots{}@r{]}
+Route the sanitizer check @var{check} to the contract-violation handler
+with the evaluation semantic @var{semantic} (@pxref{C++ Dialect Options,,
+@option{-fcontract-evaluation-semantic}}), instead of reporting it through
+the sanitizer runtime.  The argument is a comma-separated list of
+@var{check}:@var{semantic} pairs, and the option may be given more than
+once.  @var{check} is any name accepted by @option{-fsanitize=}, including
+@code{undefined} and @code{all}.  Requires @option{-fcontracts-p3100};
+without it the option has no effect and a warning is issued.
+
+A check's report is routed only if it is @code{address},
+@code{pointer-compare}, @code{pointer-subtract}, @code{thread}, or a check
+of the undefined behavior sanitizer.  A routed check reports from inside
+the sanitizer runtime, where a throwing handler cannot propagate, so it
+takes only @code{assume}, @code{quick_enforce}, @code{noexcept_enforce}
+and @code{noexcept_observe}, the last two with @option{-fcontracts-p4298}.
+Any other check takes @code{assume} and @code{enforce}, @code{observe} if
+it can recover (@option{-fsanitize-recover=}) and @code{quick_enforce} if
+it can trap (@option{-fsanitize-trap=}).  No check takes @code{ignore}.
+A semantic that a named check does not take is an error, except that a
+member of @code{undefined} or @code{all} that does not take it is left
+alone; if no member takes it, that is an error too.
+
+A routed check given no semantic takes one from the other sanitizer
+options: @code{quick_enforce} under @option{-fsanitize-trap=};
+@code{noexcept_observe} under @option{-fsanitize-recover=}, which is an
+error without @option{-fcontracts-p4298}; and otherwise
+@code{noexcept_enforce} with @option{-fcontracts-p4298} and
+@code{quick_enforce} without it.
+
+@opindex fsanitize-noncontract-callbacks
+@opindex fno-sanitize-noncontract-callbacks
+@item -fsanitize-noncontract-callbacks
+Suppress routing of sanitizer checks to the contract-violation handler
+even under @option{-fcontracts-p3100}, restoring the ordinary sanitizer
+reporting path.
 
 @opindex fsanitize-undefined-trap-on-error
 @opindex fno-sanitize-undefined-trap-on-error

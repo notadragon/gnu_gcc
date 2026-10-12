@@ -1157,6 +1157,11 @@ c_cpp_builtins (cpp_reader *pfile)
 	cpp_define (pfile, "__cpp_contracts_postcondition_captures=202610L");
       if (flag_contracts && flag_contracts_p4283)
 	cpp_define (pfile, "__cpp_contracts_requires=202610L");
+      /* P3100, like P3290, specifies no language feature-test macro, so its
+	 macro is vendor-prefixed; __gcc_contracts_allow_assume names a
+	 configuration rather than a feature, so it has no value.  */
+      if (flag_contracts && flag_contracts_p3100)
+	cpp_define (pfile, "__gcc_contracts_p3100=202610L");
       if (flag_contracts && flag_contracts_p4298)
 	cpp_define (pfile, "__cpp_contracts_nonthrowing_semantics=202610L");
       if (flag_contracts && flag_contracts_p4301)
@@ -1166,6 +1171,8 @@ c_cpp_builtins (cpp_reader *pfile)
 	 features (<contracts.h> defines __STDC_VERSION_CONTRACTS_H__).  */
       if (flag_contracts && flag_contracts_p4299)
 	cpp_define (pfile, "__gcc_contracts_p4299=202610L");
+      if (flag_contracts && flag_contracts_allow_assume)
+	cpp_define (pfile, "__gcc_contracts_allow_assume");
       if (flag_modules)
 	/* The std-defined value is 201907L, but I don't think we can
 	   claim victory yet.  201810 is the p1103 date. */
@@ -1221,6 +1228,9 @@ c_cpp_builtins (cpp_reader *pfile)
   /* P4299's vendor macro, as for C++ above.  */
   if (!c_dialect_cxx () && flag_contracts_p4299)
     cpp_define (pfile, "__gcc_contracts_p4299=202610L");
+  /* P4299 C contracts honour -fcontracts-allow-assume too.  */
+  if (!c_dialect_cxx () && flag_contracts_p4299 && flag_contracts_allow_assume)
+    cpp_define (pfile, "__gcc_contracts_allow_assume");
   /* Note that we define this for C as well, so that we know if
      __attribute__((cleanup)) will interface with EH.  */
   if (flag_exceptions)

@@ -48,6 +48,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "intl.h"
 #include "c-family/c-ada-spec.h"
 #include "asan.h"
+#include "opts.h"
+#include "c-family/c-ubsan.h"
 #include "optabs-query.h"
 #include "omp-general.h"
 #include "tree-inline.h"
@@ -6122,6 +6124,11 @@ c_parse_final_cleanups (void)
       emit_contract_wrapper_func (/*done*/true);
       maybe_emit_violation_handler_wrappers ();
     }
+
+  /* P3100: emit this TU's sanitizer contract-routing descriptors while
+     the front-end flags are still live, so they stream through LTO like any
+     preserved global (c-family/c-ubsan.cc).  */
+  c_emit_contract_sanitizer_descriptors ();
 
   /* All templates have been instantiated.  */
   at_eof = 2;

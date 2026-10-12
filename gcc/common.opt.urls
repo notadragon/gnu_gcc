@@ -665,6 +665,12 @@ UrlSuffix(gcc/Instrumentation-Options.html#index-fno-sanitize-trap)
 fsanitize-trap
 UrlSuffix(gcc/Instrumentation-Options.html#index-fno-sanitize-trap)
 
+fsanitize-semantic=
+UrlSuffix(gcc/Instrumentation-Options.html#index-fsanitize-semantic)
+
+fsanitize-noncontract-callbacks
+UrlSuffix(gcc/Instrumentation-Options.html#index-fno-sanitize-noncontract-callbacks)
+
 fsanitize-address-use-after-scope
 UrlSuffix(gcc/Instrumentation-Options.html#index-fno-sanitize-address-use-after-scope)
 

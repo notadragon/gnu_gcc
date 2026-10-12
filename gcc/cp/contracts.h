@@ -301,6 +301,17 @@ extern contract_evaluation_semantic ensure_evaluation_semantic
    generates no code -- and whose noexcept result an implicit assertion must
    never change, whatever its evaluation semantic.  */
 
+inline bool
+implicit_ub_check_context_p ()
+{
+  return (flag_contracts_p3100 && !processing_template_decl
+	  && !cp_unevaluated_operand);
+}
+
+/* P3100 implicit contract assertions guarding core-language UB.  Each is
+   documented where it is defined, in contracts.cc.  */
+extern contract_evaluation_semantic resolve_implicit_contract_semantic
+  (tree, location_t, const char *, uint16_t = CES_ALL_ALLOWED);
 extern void maybe_instantiate_contracts (tree, bool = false);
 
 /* Contract data-block ABI constants.

@@ -11699,6 +11699,9 @@ finish_function (location_t end_loc)
       if (!decl_function_context (fndecl))
 	{
 	  invoke_plugin_callbacks (PLUGIN_PRE_GENERICIZE, fndecl);
+	  /* P3100 (assume): a routed sanitizer check that resolves to
+	     assume is not instrumented in this function.  */
+	  c_apply_contract_sanitizer_assume (fndecl);
 	  c_genericize (fndecl);
 
 	  /* ??? Objc emits functions after finalizing the compilation unit.
@@ -13966,6 +13969,12 @@ c_parse_final_cleanups (void)
      lists etc).  */
   if (c_dialect_objc ())
     objc_write_global_declarations ();
+
+  /* P3100: the per-TU sanitizer contract-routing descriptors, while the
+     front-end flags are still live (c-family/c-ubsan.cc).  */
+  c_emit_contract_sanitizer_descriptors ();
+  /* P3595: the weak defaults of dynamic evaluation-semantic selectors.  */
+  c_emit_contract_weak_selectors ();
 
   /* Close the external scope.  */
   ext_block = pop_scope ();
