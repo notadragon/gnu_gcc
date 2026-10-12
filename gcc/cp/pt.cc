@@ -12448,6 +12448,15 @@ tsubst_contract (tree decl, tree t, tree args, tsubst_flags_t complain,
      why no per-element deferral is needed during the expansion above.  */
   if (POSTCONDITION_P (r))
     check_postcondition_param_odr_uses (CONTRACT_CONDITION (r), decl, cond_l);
+  /* That walk can be the first to find a parameter odr-used, so judge the
+     declarations merged away against it now (GCC-663).  */
+  if (POSTCONDITION_P (r) && DECL_TEMPLATE_INFO (decl)
+      && DECL_TEMPLATE_INSTANTIATION (decl)
+      && TREE_CODE (DECL_TI_TEMPLATE (decl)) == TEMPLATE_DECL)
+    check_postcondition_redecl_parm_types
+      (DECL_TEMPLATE_RESULT (DECL_TI_TEMPLATE (decl)), decl,
+       DECL_TI_ARGS (decl));
+
   /* At present, the semantic, kind and comment cannot be dependent.  */
   gcc_checking_assert
     (!type_dependent_expression_p (CONTRACT_EVALUATION_SEMANTIC (r))
@@ -15601,6 +15610,13 @@ tsubst_function_decl (tree t, tree args, tsubst_flags_t complain,
 
   /* The parms have now been substituted, check for incorrect const cases.  */
   check_postconditions_in_redecl (t, r);
+
+  /* [dcl.contract.func]/7 constrains the corresponding parameter on all
+     declarations, and a declaration whose parameter type was dependent could
+     not be judged when it was merged away.  Now that the arguments are known,
+     finish those (PR c++/127196).  */
+  if (flag_contracts)
+    check_postcondition_redecl_parm_types (t, r, args);
 
   if (DECL_FRIEND_CONTEXT (t))
     SET_DECL_FRIEND_CONTEXT (r,

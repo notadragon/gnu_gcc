@@ -175,6 +175,7 @@ extern tree make_postcondition_variable		(cp_expr, tree);
 extern void check_postcondition_param_odr_uses	(tree, tree, location_t);
 extern void check_postcondition_object_odr_use	(tree);
 extern void check_postconditions_in_redecl	(tree, tree);
+extern void check_postcondition_redecl_parm_types (tree, tree, tree);
 extern void maybe_update_postconditions		(tree);
 extern void rebuild_postconditions		(tree);
 extern bool check_postcondition_result		(tree, tree, location_t);
