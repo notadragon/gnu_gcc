@@ -3814,13 +3814,8 @@ rebuild_postconditions (tree fndecl)
 /* Make a string of the contract condition, if it is available.  */
 
 static tree
-build_comment (cp_expr condition)
+build_comment (cp_expr condition, char *str)
 {
-  /* Try to get the actual source text for the condition; if that fails pretty
-     print the resulting tree.  */
-  char *str = get_source_text_between (global_dc->get_file_cache (),
-				       condition.get_start (),
-				       condition.get_finish ());
   /* -fcontract-comment-from-expression: use the pretty-printed form even
      when the source text is available.  */
   if (str && flag_contract_comment_from_expression)
@@ -3846,7 +3841,10 @@ grok_contract (tree contract_spec, tree mode, tree result, cp_expr condition,
 	       location_t loc)
 {
   if (condition == error_mark_node)
-    return error_mark_node;
+    {
+      free (comment);
+      return error_mark_node;
+    }
 
   tree_code code;
   contract_assertion_kind kind = CAK_INVALID;
@@ -3896,12 +3894,13 @@ grok_contract (tree contract_spec, tree mode, tree result, cp_expr condition,
   /* If the contract is deferred, don't do anything with the condition.  */
   if (TREE_CODE (condition) == DEFERRED_PARSE)
     {
+      free (comment);
       CONTRACT_CONDITION (contract) = condition;
       return contract;
     }
 
   /* Generate the comment from the original condition.  */
-  CONTRACT_COMMENT (contract) = build_comment (condition);
+  CONTRACT_COMMENT (contract) = build_comment (condition, comment);
 
   /* The condition is converted to bool.  */
   condition = finish_contract_condition (condition);
@@ -3925,6 +3924,7 @@ update_late_contract (tree contract, tree fndecl, tree result,
     POSTCONDITION_IDENTIFIER (contract) = result;
 
   /* Generate the comment from the original condition.  */
+  CONTRACT_COMMENT (contract) = build_comment (condition, comment);
 
   /* Apply compute_comment facet (P3400) if present.  */
   tree label = CONTRACT_LABEL (contract);
@@ -3932,7 +3932,6 @@ update_late_contract (tree contract, tree fndecl, tree result,
     = apply_label_string_facet (label, "compute_comment",
 				CONTRACT_COMMENT (contract),
 				EXPR_LOCATION (contract));
-  CONTRACT_COMMENT (contract) = build_comment (condition);
 
   /* The condition is converted to bool.  */
   condition = finish_contract_condition (condition);
