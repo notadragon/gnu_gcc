@@ -504,6 +504,11 @@ finish_contract_condition (cp_expr condition)
       EXPR_LOCATION_WRAPPER_P (condition) = true;
     }
 
+  /* A parameter pack named in the predicate must be expanded within it, as in
+     any other expression.  */
+  if (check_for_bare_parameter_packs (condition))
+    return error_mark_node;
+
   if (type_dependent_expression_p (condition))
     return condition;
 
