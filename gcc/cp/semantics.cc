@@ -4695,15 +4695,53 @@ outer_automatic_var_p (tree decl)
 	  && !TREE_STATIC (decl));
 }
 
-/* Note whether capture proxy D is only used in a contract condition.  */
+/* Whether a lambda in a contract predicate lies between the current
+   function and the lambda function FN that encloses it, so that a use here
+   of one of FN's captures is still a use only by a contract assertion.  */
 
-static void
+static bool
+contract_predicate_lambda_between_p (tree fn)
+{
+  for (tree f = current_function_decl;
+       f && f != fn && LAMBDA_FUNCTION_P (f);
+       f = decl_function_context (f))
+    if (LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P
+	  (CLASSTYPE_LAMBDA_EXPR (DECL_CONTEXT (f))))
+      return true;
+  return false;
+}
+
+/* Note whether capture D -- a capture proxy, or the closure's capture field
+   itself -- is only used in a contract condition.  */
+
+void
 set_contract_capture_flag (tree d, bool val)
 {
+  if (TREE_CODE (d) == FIELD_DECL)
+    {
+      DECL_CONTRACT_CAPTURE_P (d) = val;
+      return;
+    }
   gcc_checking_assert (DECL_HAS_VALUE_EXPR_P (d));
+  /* Usually the value expression is the closure's capture field itself, but
+     a VLA's rebuilds the array from the {pointer, bound} capture struct and
+     a *this capture's takes the address of the copy (build_capture_proxy),
+     so look through those for the member of the closure.  */
   tree proxy = DECL_VALUE_EXPR (d);
-  gcc_checking_assert (TREE_CODE (proxy) == COMPONENT_REF
-		       && TREE_CODE (TREE_OPERAND (proxy, 1)) == FIELD_DECL);
+  while (true)
+    {
+      STRIP_NOPS (proxy);
+      /* Test the field, not the object: in a lambda with an explicit object
+	 parameter the object may have a dependent type.  */
+      if (TREE_CODE (proxy) == COMPONENT_REF
+	  && TREE_CODE (TREE_OPERAND (proxy, 1)) == FIELD_DECL
+	  && LAMBDA_TYPE_P (DECL_CONTEXT (TREE_OPERAND (proxy, 1))))
+	break;
+      gcc_checking_assert (TREE_CODE (proxy) == COMPONENT_REF
+			   || TREE_CODE (proxy) == ADDR_EXPR);
+      proxy = TREE_OPERAND (proxy, 0);
+    }
+  gcc_checking_assert (TREE_CODE (TREE_OPERAND (proxy, 1)) == FIELD_DECL);
   DECL_CONTRACT_CAPTURE_P (TREE_OPERAND (proxy, 1)) = val;
 }
 
@@ -5020,6 +5058,18 @@ finish_id_expression_1 (tree id_expression,
 	  && (cp_unevaluated_operand
 	      || generic_lambda_fn_p (current_function_decl)))
 	mark_type_use (decl);
+
+      /* Name lookup finds a VLA's capture proxy itself rather than the VLA,
+	 in the lambda that captured it and in a lambda nested in that one,
+	 so process_outer_var_ref never sees the VLA and cannot clear the
+	 mark of a capture first made by a contract assertion.  A use of the
+	 proxy outside a predicate clears it here instead.  */
+      if (flag_contracts
+	  && !processing_contract_condition
+	  && is_normal_capture_proxy (decl)
+	  && variably_modified_type_p (TREE_TYPE (decl), NULL_TREE)
+	  && !contract_predicate_lambda_between_p (DECL_CONTEXT (decl)))
+	set_contract_capture_flag (decl, false);
 
       /* Disallow uses of local variables from containing functions, except
 	 within lambda-expressions.  */
