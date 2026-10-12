@@ -1486,6 +1486,42 @@ constexpr_global_ctx::note_modification (tree t)
     r->save (t);
 }
 
+/* Helper class for constexpr_global_ctx.  The operand of an [[assume]] is
+   not evaluated ([dcl.attr.assume]); cxx_eval_assert evaluates it
+   speculatively, and throws the result away if it cannot be had cleanly.
+   Its *evaluation* failure is already discarded -- the caller passes a local
+   non_constant_p -- but a contract assertion reached along the way records
+   itself on the shared constexpr_global_ctx, and that would escape and
+   reject a well-formed program.  So save the reporting state on the way in
+   and restore it on the way out, exactly as modifiable_tracker does for the
+   modifiable set.  */
+
+class contract_report_tracker
+{
+  constexpr_global_ctx *global;
+  tree previous_statement;
+  bool previous_condition_non_const;
+  unsigned previous_violations;
+  unsigned previous_extra_violations;
+public:
+  explicit contract_report_tracker (constexpr_global_ctx *g)
+    : global (g),
+      previous_statement (g->contract_statement),
+      previous_condition_non_const (g->contract_condition_non_const),
+      previous_violations (g->contract_violations.length ()),
+      previous_extra_violations (g->contract_extra_violations)
+  { }
+  ~contract_report_tracker ()
+  {
+    global->contract_statement = previous_statement;
+    global->contract_condition_non_const = previous_condition_non_const;
+    /* truncate () is a no-op when nothing was pushed, which is the common
+       case; violations recorded by this evaluation are the tail.  */
+    global->contract_violations.truncate (previous_violations);
+    global->contract_extra_violations = previous_extra_violations;
+  }
+};
+
 /* The constexpr expansion context.  CALL is the current function
    expansion, CTOR is the current aggregate initializer, OBJECT is the
    object being initialized by CTOR, either a VAR_DECL or a _REF.    */
@@ -3769,6 +3805,14 @@ cxx_eval_assert (const constexpr_ctx *ctx, tree arg, const char *msg,
       bool new_non_constant_p = false, new_overflow_p = false;
       /* Avoid modification of existing values.  */
       modifiable_tracker ms (new_ctx.global);
+      /* The operand of [[assume]] is not evaluated ([dcl.attr.assume]), so
+	 an implementation that cannot evaluate it cleanly simply does not
+	 get to assume anything -- nothing about this evaluation may reach
+	 the program.  new_non_constant_p above discards the evaluation
+	 failure; this discards any contract assertion reached along the
+	 way, which would otherwise be reported by
+	 check_for_failed_contracts and reject a well-formed program.  */
+      contract_report_tracker cs (new_ctx.global);
       eval = cxx_eval_constant_expression (&new_ctx, arg, vc_prvalue,
 					   &new_non_constant_p,
 					   &new_overflow_p, &jmp_target);
