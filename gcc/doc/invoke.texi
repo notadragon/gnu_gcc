@@ -3475,11 +3475,14 @@ also enable @option{-fcontracts}, in any C++ dialect.
 
 @opindex fcontracts-p3097
 @opindex fno-contracts-p3097
+@opindex fcontracts-p3098
+@opindex fno-contracts-p3098
 @opindex fcontracts-p3099
 @opindex fno-contracts-p3099
 @opindex fcontracts-p3290
 @opindex fno-contracts-p3290
 @item -fcontracts-p3097
+@itemx -fcontracts-p3098
 @itemx -fcontracts-p3099
 @itemx -fcontracts-p3290
 @opindex fcoroutines

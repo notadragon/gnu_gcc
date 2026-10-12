@@ -4380,6 +4380,17 @@ cp_tree_equal (tree t1, tree t2)
 	return cp_tree_equal (TREE_TYPE (t1), TREE_TYPE (t2));
       /* Fall through.  */
     case VAR_DECL:
+      /* When comparing contracts, two artificial VAR_DECLs with the same
+	 name are taken to be corresponding postcondition captures (P3098):
+	 the only artificial variables a contract condition names are its
+	 captures and its result name, and a capture's initializer is
+	 compared separately in mismatched_contracts_p.  */
+      if (comparing_contracts
+	  && DECL_ARTIFICIAL (t1) && DECL_ARTIFICIAL (t2)
+	  && DECL_NAME (t1) && DECL_NAME (t2)
+	  && DECL_NAME (t1) == DECL_NAME (t2))
+	return true;
+      /* Fall through.  */
     case CONST_DECL:
     case FIELD_DECL:
     case FUNCTION_DECL:
