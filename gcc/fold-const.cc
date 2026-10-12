@@ -9837,9 +9837,12 @@ maybe_canonicalize_comparison_1 (location_t loc, enum tree_code code, tree type,
   int sgn0;
 
   /* Match A +- CST code arg1.  We can change this only if overflow
-     is undefined.  */
+     is undefined -- and not preserved for a P3100 implicit contract
+     assertion, which A +- CST may overflow into: A + 1 > A would become
+     A >= A.  */
   if (!((ANY_INTEGRAL_TYPE_P (TREE_TYPE (arg0))
-	 && TYPE_OVERFLOW_UNDEFINED (TREE_TYPE (arg0)))
+	 && TYPE_OVERFLOW_UNDEFINED (TREE_TYPE (arg0))
+	 && !(flag_contracts_p3100 && TYPE_OVERFLOW_SANITIZED (TREE_TYPE (arg0))))
 	/* In principle pointers also have undefined overflow behavior,
 	   but that causes problems elsewhere.  */
 	&& !POINTER_TYPE_P (TREE_TYPE (arg0))
