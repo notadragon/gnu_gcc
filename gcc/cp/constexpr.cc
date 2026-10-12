@@ -4626,6 +4626,53 @@ cxx_eval_call_expression (const constexpr_ctx *ctx, tree t,
 		  if (DECL_NAME (var) == heap_uninit_identifier
 		      || DECL_NAME (var) == heap_identifier)
 		    {
+		      /* The operand's static type, just inside its conversion
+			 to void *.  A delete-expression whose static type
+			 differs from the object's dynamic type is undefined
+			 unless the destructor is virtual ([expr.delete]), and
+			 then the deleting destructor passes the complete
+			 object, whose type matches.  */
+		      tree static_type = NULL_TREE;
+		      if (CALL_FROM_NEW_OR_DELETE_P (t)
+			  && DECL_NAME (var) == heap_identifier
+			  && TREE_CODE (TREE_TYPE (var)) == ARRAY_TYPE
+			  && integer_zerop
+			       (array_type_nelts_minus_one (TREE_TYPE (var))))
+			for (tree op = CALL_EXPR_ARG (t, 0); ;
+			     op = TREE_OPERAND (op, 0))
+			  {
+			    if (INDIRECT_TYPE_P (TREE_TYPE (op))
+				&& CLASS_TYPE_P (TREE_TYPE (TREE_TYPE (op))))
+			      {
+				static_type = TREE_TYPE (TREE_TYPE (op));
+				break;
+			      }
+			    if (!CONVERT_EXPR_P (op)
+				&& TREE_CODE (op) != NON_LVALUE_EXPR
+				&& TREE_CODE (op) != SAVE_EXPR)
+			      break;
+			  }
+		      tree dynamic_type
+			= (static_type ? TREE_TYPE (TREE_TYPE (var))
+			   : NULL_TREE);
+		      if (static_type
+			  && CLASS_TYPE_P (dynamic_type)
+			  && !same_type_ignoring_top_level_qualifiers_p
+				(static_type, dynamic_type))
+			{
+			  if (!ctx->quiet)
+			    {
+			      auto_diagnostic_group d;
+			      error_at (loc, "delete of an object of dynamic "
+					"type %qT through a pointer to %qT, "
+					"whose destructor is not virtual",
+					dynamic_type, static_type);
+			      inform (DECL_SOURCE_LOCATION (var),
+				      "allocation performed here");
+			    }
+			  *non_constant_p = true;
+			  return t;
+			}
 		      if (IDENTIFIER_OVL_OP_FLAGS (DECL_NAME (fun))
 			  & OVL_OP_FLAG_VEC)
 			{
@@ -8204,6 +8251,11 @@ outside_lifetime_error (location_t loc, tree r)
 		"in a constant expression");
       inform (DECL_SOURCE_LOCATION (r), "allocated here");
     }
+  else if (DECL_NAME (r) == heap_identifier)
+    {
+      error_at (loc, "accessing an allocated object outside its lifetime");
+      inform (DECL_SOURCE_LOCATION (r), "allocated here");
+    }
   else
     {
       error_at (loc, "accessing %qE outside its lifetime", r);
@@ -8604,6 +8656,16 @@ cxx_eval_store_expression (const constexpr_ctx *ctx, tree t,
 		     "is not a constant expression");
 	      inform (DECL_SOURCE_LOCATION (object), "allocated here");
 	    }
+	  else if (DECL_P (object) && ctx->global->is_outside_lifetime (object)
+		   && DECL_NAME (object) == heap_identifier)
+	    {
+	      if (TREE_CLOBBER_P (init))
+		error ("destroying an allocated object outside its lifetime");
+	      else
+		error ("modification of an allocated object outside its "
+		       "lifetime is not a constant expression");
+	      inform (DECL_SOURCE_LOCATION (object), "allocated here");
+	    }
 	  else if (DECL_P (object) && ctx->global->is_outside_lifetime (object))
 	    {
 	      if (TREE_CLOBBER_P (init))
@@ -8635,6 +8697,24 @@ cxx_eval_store_expression (const constexpr_ctx *ctx, tree t,
 	{
 	  ctx->global->destroy_value (object, (CLOBBER_KIND (init)
 					       > CLOBBER_OBJECT_END));
+	  return void_node;
+	}
+
+      /* A non-array new-expression's object is element 0 of its heap
+	 variable, a one-element array.  Ending that element's lifetime ends
+	 the object's, although its storage remains until it is
+	 deallocated.  (An allocator's storage for several objects is an array
+	 of several elements, each with a lifetime of its own.)  */
+      if (CLOBBER_KIND (init) >= CLOBBER_OBJECT_END
+	  && DECL_NAME (object) == heap_identifier
+	  && TREE_CODE (TREE_TYPE (object)) == ARRAY_TYPE
+	  && integer_zerop (array_type_nelts_minus_one (TREE_TYPE (object)))
+	  && refs->length () == 3
+	  && integer_zerop ((*refs)[1])
+	  && same_type_ignoring_top_level_qualifiers_p
+	       ((*refs)[2], TREE_TYPE (TREE_TYPE (object))))
+	{
+	  ctx->global->destroy_value (object, /*past_storage_end=*/false);
 	  return void_node;
 	}
 

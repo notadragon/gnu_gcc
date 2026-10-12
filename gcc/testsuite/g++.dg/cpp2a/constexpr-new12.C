@@ -4,6 +4,8 @@
 
 struct A {
   constexpr A () : a (0) {}
+  /* Deleting a B through an A * needs this ([expr.delete]/3).  */
+  constexpr virtual ~A () {}
   constexpr virtual int foo () { return 1 + a * 4; }
   int a;
 };
