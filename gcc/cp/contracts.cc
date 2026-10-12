@@ -1228,8 +1228,18 @@ copy_contracts_list (tree contracts, tree fndecl,
 
       tree c = copy_node (contract);
 
-      copy_body_data id;
+      /* Parameters, the result binding and captures stay as they are, but a
+	 variable the predicate declares itself -- in a statement expression
+	 -- gets a copy of its own.  remap_decls rebuilds a BIND_EXPR's
+	 variable list from the declarations it newly made, so a retained one
+	 would silently drop out of it, and the gimplifier would then meet a
+	 variable that no BIND_EXPR declares.  */
+      struct predicate_copy_data : copy_body_data
+      {
+	hash_set<tree> *locals;
+      } id;
       hash_map<tree, tree> decl_map;
+      hash_set<tree> locals;
 
       memset (&id, 0, sizeof (id));
 
@@ -1238,7 +1248,22 @@ copy_contracts_list (tree contracts, tree fndecl,
       id.src_cfun = DECL_STRUCT_FUNCTION (fndecl);
       id.decl_map = &decl_map;
 
-      id.copy_decl = retain_decl;
+      auto collect_locals = [] (tree *tp, int *, void *data) -> tree
+	{
+	  if (TREE_CODE (*tp) == BIND_EXPR)
+	    for (tree var = BIND_EXPR_VARS (*tp); var; var = DECL_CHAIN (var))
+	      static_cast<hash_set<tree> *> (data)->add (var);
+	  return NULL_TREE;
+	};
+      cp_walk_tree_without_duplicates (&CONTRACT_CONDITION (c),
+				       collect_locals, &locals);
+      id.locals = &locals;
+      id.copy_decl = [] (tree decl, copy_body_data *cb) -> tree
+	{
+	  if (static_cast<predicate_copy_data *> (cb)->locals->contains (decl))
+	    return copy_decl_no_change (decl, cb);
+	  return decl;
+	};
 
       id.transform_call_graph_edges = CB_CGE_DUPLICATE;
       id.transform_new_cfg = false;
