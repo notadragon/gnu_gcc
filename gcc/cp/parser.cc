@@ -12835,6 +12835,20 @@ cp_parser_lambda_expression (cp_parser* parser,
   LAMBDA_EXPR_LOCATION (lambda_expr) = token->location;
   LAMBDA_EXPR_CONSTEVAL_BLOCK_P (lambda_expr) = consteval_block_p;
 
+  /* Remember whether this lambda lexically appears within a contract
+     predicate: either the introducer is being parsed directly in a
+     contract-condition scope, or it is nested inside a lambda that is
+     itself in a contract predicate.  This is used later to const-qualify
+     by-reference captures of entities declared outside the predicate.  */
+  if (flag_contracts)
+    {
+      tree enclosing = current_lambda_expr ();
+      if (processing_contract_condition
+	  || (enclosing
+	      && LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (enclosing)))
+	LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (lambda_expr) = true;
+    }
+
   if (cxx_dialect >= cxx20)
     /* C++20 allows lambdas in unevaluated context.  */;
   else if (cp_unevaluated_operand)

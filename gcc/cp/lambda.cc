@@ -570,6 +570,61 @@ vla_capture_type (tree array_type)
   return finish_struct (type, NULL_TREE);
 }
 
+/* Return true if INIT -- the initializer of a by-reference lambda capture
+   being formed inside a contract predicate -- ultimately designates an
+   entity that is declared *outside* the predicate.  Such an entity is const
+   within the predicate (P2900), so a by-reference capture of it should be
+   const-qualified.
+
+   Entities declared within the predicate are not const: a local of a lambda
+   that is itself in the predicate, and the by-value capture proxy of an
+   in-predicate lambda (a by-value capture creates a fresh in-predicate copy,
+   which "cuts the chain").  Const-ness of pure by-reference proxy chains
+   within the predicate is propagated automatically by the normal
+   capture-type machinery.  A capture proxy of a lambda that is not in the
+   predicate -- the contract assertion is in that lambda's body -- names an
+   entity declared outside the predicate, whether it captured by reference
+   or by copy.  */
+
+static bool
+capture_reaches_outside_predicate (tree init)
+{
+  if (!init || init == error_mark_node)
+    return false;
+
+  STRIP_ANY_LOCATION_WRAPPER (init);
+  init = tree_strip_nop_conversions (init);
+  if (REFERENCE_REF_P (init))
+    init = TREE_OPERAND (init, 0);
+  STRIP_ANY_LOCATION_WRAPPER (init);
+
+  if (TREE_CODE (init) == PARM_DECL)
+    /* A parameter of the contracted function (or the artificial
+       return-value parameter of a postcondition) is declared outside the
+       predicate.  */
+    return true;
+
+  if (VAR_P (init))
+    {
+      tree ctx = DECL_CONTEXT (init);
+      if (ctx && TREE_CODE (ctx) == FUNCTION_DECL && LAMBDA_FUNCTION_P (ctx))
+	{
+	  tree le = CLASSTYPE_LAMBDA_EXPR (CP_DECL_CONTEXT (ctx));
+	  /* A local variable or a capture proxy of an in-predicate lambda is
+	     declared inside the predicate; anything reached only through a
+	     by-value capture proxy of one is an in-predicate copy.  */
+	  if (le && LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (le))
+	    return false;
+	}
+
+      /* Otherwise it is a local (or parameter) of an enclosing scope that
+	 is not in the predicate, i.e. declared outside the predicate.  */
+      return true;
+    }
+
+  return false;
+}
+
 /* From an ID and INITIALIZER, create a capture (by reference if
    BY_REFERENCE_P is true), add it to the capture-list for LAMBDA,
    and return it.  If ID is `this', BY_REFERENCE_P says whether
@@ -606,6 +661,16 @@ add_capture (tree lambda, tree id, tree orig_init, bool by_reference_p,
       if (!by_reference_p)
 	error ("array of runtime bound cannot be captured by copy, "
 	       "only by reference");
+
+      /* P2900: a VLA declared outside a contract predicate is const in it,
+	 so a lambda in the predicate that captures one by reference captures
+	 a pointer to const elements (as for any other array; see below).  */
+      if (flag_contracts
+	  && by_reference_p
+	  && LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (lambda)
+	  && capture_reaches_outside_predicate (initializer))
+	type = cp_build_qualified_type (type, (cp_type_quals (type)
+					       | TYPE_QUAL_CONST));
 
       /* For a VLA, we capture the address of the first element and the
 	 maximum index, and then reconstruct the VLA for the proxy.  */
@@ -678,6 +743,36 @@ add_capture (tree lambda, tree id, tree orig_init, bool by_reference_p,
 			  "captured structured bindings are a C++20 extension"))
 	    inform (DECL_SOURCE_LOCATION (stripped_init), "declared here");
 	}
+    }
+
+  /* P2900: within a contract predicate an entity declared outside the
+     predicate is const.  When such an entity is captured by reference by a
+     lambda that lexically appears in the predicate, const-qualify the
+     capture so that uses in the lambda body are const and any attempt to
+     mutate it is diagnosed.  */
+  if (flag_contracts
+      && by_reference_p
+      && id != this_identifier
+      && LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (lambda)
+      && capture_reaches_outside_predicate (initializer))
+    {
+      if (TREE_CODE (type) == REFERENCE_TYPE
+	  && !CP_TYPE_CONST_P (TREE_TYPE (type)))
+	{
+	  tree referent = TREE_TYPE (type);
+	  referent = cp_build_qualified_type (referent,
+					      cp_type_quals (referent)
+					      | TYPE_QUAL_CONST);
+	  type = build_reference_type (referent);
+	}
+      else if (TREE_CODE (type) == DECLTYPE_TYPE
+	       && DECLTYPE_FOR_REF_CAPTURE (type))
+	/* A dependent by-reference capture -- e.g. an implicit [&] capture in
+	   a lambda that lexically appears in a contract predicate in a
+	   templated function.  The referent type is not yet known, so record
+	   that it must be const-qualified when the DECLTYPE is resolved at
+	   instantiation (see tsubst).  */
+	DECLTYPE_FOR_CONST_REF_CAPTURE (type) = 1;
     }
 
   /* Add __ to the beginning of the field name so that user code
