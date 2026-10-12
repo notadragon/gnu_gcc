@@ -30245,10 +30245,13 @@ cp_parser_class_specifier (cp_parser* parser)
       vec_safe_truncate (unparsed_nsdmis, 0);
 
       /* Now contract specifiers.  */
-      FOR_EACH_VEC_SAFE_ELT (unparsed_contracts, ix, decl)
+      FOR_EACH_VEC_SAFE_ELT (unparsed_contracts, ix, e)
 	{
-	  tree ctx = DECL_CONTEXT (decl);
-	  switch_to_class (ctx);
+	  decl = e->decl;
+	  /* The class the function is declared in, not DECL_CONTEXT: a
+	     friend's predicates are looked up in the scope of the class
+	     that declares it ([basic.lookup.unqual]).  */
+	  switch_to_class (e->class_type);
 
 	  temp_override<tree> cfd (current_function_decl, decl);
 
@@ -37293,7 +37296,10 @@ cp_parser_save_default_args (cp_parser* parser, tree decl)
 
   /* Contracts are deferred.  */
   if (DECL_HAS_CONTRACTS_P (decl))
-    vec_safe_push (unparsed_contracts, decl);
+    {
+      cp_default_arg_entry entry = {current_class_type, decl};
+      vec_safe_push (unparsed_contracts, entry);
+    }
 }
 
 /* DEFAULT_ARG contains the saved tokens for the initializer of DECL,

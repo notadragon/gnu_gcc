@@ -183,8 +183,10 @@ struct GTY(()) cp_unparsed_functions_entry {
   /* Functions with noexcept-specifiers that require post-processing.  */
   vec<cp_default_arg_entry, va_gc> *noexcepts;
 
-  /* Functions with contract attributes that require post-processing.  */
-  vec<tree, va_gc> *contracts;
+  /* Functions with contract specifiers that require post-processing.  The
+     class is the one a friend is declared in, whose scope its predicates
+     are looked up in.  */
+  vec<cp_default_arg_entry, va_gc> *contracts;
 };
 
 
