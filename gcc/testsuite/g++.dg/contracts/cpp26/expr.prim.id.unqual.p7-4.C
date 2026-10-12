@@ -7,7 +7,6 @@
 // This tests modifications to the constified things
 // { dg-do run { target c++23 } }
 // { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe -O2 -g" }
-// { dg-xfail-run-if "PRXXXXXX" { *-*-* } { "-fcontract-checks-outlined" } "" }
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 
 #include <cassert>
