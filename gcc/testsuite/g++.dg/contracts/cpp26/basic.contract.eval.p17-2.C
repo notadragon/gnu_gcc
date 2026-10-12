@@ -6,7 +6,7 @@
 // catch the exception. If the function has a non-throwing exception specification, the function std::terminate is
 // invoked (14.6.2). — end note]
 // { dg-do run { target c++26 } }
-// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe " }
+// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe" }
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 
 #include <contracts>
