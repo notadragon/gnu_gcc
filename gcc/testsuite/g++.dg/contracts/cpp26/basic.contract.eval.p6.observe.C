@@ -4,7 +4,7 @@
 // (evaluation of a contract assertion ) A such that any other operation O
 // that happens before A also happens before C
 // { dg-do compile { target c++26 } }
-// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe -fdump-tree-gimple " }
+// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe -fdump-tree-gimple" }
 
 int main(int ac, char *av[])
 {
@@ -13,4 +13,4 @@ int main(int ac, char *av[])
   return i;
 }
 
-// { dg-final { scan-tree-dump "__builtin_observable.*__tu_has_violation.*__builtin_observable" "gimple" } }
+// { dg-final { scan-tree-dump "__builtin_observable.*__cxa_contract_violation.*__builtin_observable" "gimple" } }
