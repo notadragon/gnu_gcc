@@ -213,6 +213,7 @@ bits_headers = \
 	${bits_srcdir}/chrono.h \
 	${bits_srcdir}/chrono_io.h \
 	${bits_srcdir}/codecvt.h \
+	${bits_srcdir}/contracts_abi.h \
 	${bits_srcdir}/cow_string.h \
 	${bits_srcdir}/cpyfunc_impl.h \
 	${bits_srcdir}/deque.tcc \

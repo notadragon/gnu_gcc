@@ -558,6 +558,11 @@ libstdc___la_LIBADD = \
 	$(top_builddir)/src/c++20/libc++20convenience.la \
 	$(top_builddir)/src/c++23/libmodulesconvenience.la
 
+
+# The C++26 contracts runtime (libc++26convenience) is intentionally NOT
+# folded into libstdc++.so: contracts are an experimental feature and the C++
+# runtime lives only in libstdc++exp (see src/experimental/Makefile.am).  The
+# pure-C ABI core lives in the separate libcontracts library.
 libstdc___la_DEPENDENCIES = \
 	${version_dep} \
 	$(top_builddir)/libsupc++/libsupc++convenience.la \
