@@ -3377,6 +3377,11 @@ check_explicit_specialization (tree declarator,
 	  if (tsk == tsk_template && !was_template_id)
 	    {
 	      tree result = DECL_TEMPLATE_RESULT (tmpl);
+	      /* The contracts of DECL are those of the specialization RESULT
+		 becomes, or a redeclaration's if it already is one.  */
+	      if (flag_contracts)
+		member_template_spec_contracts
+		  (decl, result, DECL_TEMPLATE_SPECIALIZATION (tmpl), have_def);
 	      SET_DECL_TEMPLATE_SPECIALIZATION (tmpl);
 	      DECL_INITIAL (result) = NULL_TREE;
 	      if (have_def)
@@ -3394,8 +3399,6 @@ check_explicit_specialization (tree declarator,
 		}
 	      decl = register_specialization (tmpl, gen_tmpl, targs,
 					      is_friend, 0);
-	      if (flag_contracts)
-		remove_fn_contract_specifiers (result);
 	      return decl;
 	    }
 
@@ -3487,11 +3490,6 @@ check_explicit_specialization (tree declarator,
 	      decl = register_specialization (decl, gen_tmpl, targs,
 					      is_friend, 0);
 	    }
-
-	  if (flag_contracts
-	      && decl != error_mark_node
-	      && DECL_TEMPLATE_SPECIALIZATION (decl))
-	    remove_fn_contract_specifiers (decl);
 
 	  /* A 'structor should already have clones.  */
 	  gcc_assert (decl == error_mark_node

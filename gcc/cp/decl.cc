@@ -12799,6 +12799,13 @@ grokfndecl (tree ctype,
 
   set_originating_module (decl);
 
+  /* An explicit specialization is merged with an earlier declaration inside
+     check_explicit_specialization; its contracts have to be in place by
+     then, for duplicate_decls to compare them or carry them over.  */
+  tree unmerged = decl;
+  if (contract_specifiers)
+    set_fn_contract_specifiers (decl, contract_specifiers);
+
   decl = check_explicit_specialization (orig_declarator, decl,
 					template_count,
 					2 * funcdef_flag +
@@ -12816,13 +12823,16 @@ grokfndecl (tree ctype,
       *attrlist = NULL_TREE;
     }
 
-  /* Update now we have a decl and maybe know the return type.  */
+  /* Update now we have a decl and maybe know the return type.  A merged
+     specialization that has contracts already has the ones duplicate_decls
+     settled.  */
   if (contract_specifiers)
     {
       tree t = decl;
       if (TREE_CODE (decl) == TEMPLATE_DECL)
 	t = DECL_TEMPLATE_RESULT (decl);
-      set_fn_contract_specifiers (t, contract_specifiers);
+      if (decl == unmerged || !get_fn_contract_specifiers (t))
+	set_fn_contract_specifiers (t, contract_specifiers);
       rebuild_postconditions (t);
     }
 
