@@ -1159,6 +1159,11 @@ c_cpp_builtins (cpp_reader *pfile)
 	cpp_define (pfile, "__cpp_contracts_requires=202610L");
       if (flag_contracts && flag_contracts_p4298)
 	cpp_define (pfile, "__cpp_contracts_nonthrowing_semantics=202610L");
+      /* P4299's keywords, _Pre, _Post and _ContractAssert, are usable in C++
+	 too; vendor-prefixed, as WG14 has no feature-test macros for language
+	 features (<contracts.h> defines __STDC_VERSION_CONTRACTS_H__).  */
+      if (flag_contracts && flag_contracts_p4299)
+	cpp_define (pfile, "__gcc_contracts_p4299=202610L");
       if (flag_modules)
 	/* The std-defined value is 201907L, but I don't think we can
 	   claim victory yet.  201810 is the p1103 date. */
@@ -1211,6 +1216,9 @@ c_cpp_builtins (cpp_reader *pfile)
       if (flag_implicit_constexpr)
 	cpp_define (pfile, "__cpp_implicit_constexpr=20211111L");
     }
+  /* P4299's vendor macro, as for C++ above.  */
+  if (!c_dialect_cxx () && flag_contracts_p4299)
+    cpp_define (pfile, "__gcc_contracts_p4299=202610L");
   /* Note that we define this for C as well, so that we know if
      __attribute__((cleanup)) will interface with EH.  */
   if (flag_exceptions)

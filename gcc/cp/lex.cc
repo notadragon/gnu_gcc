@@ -277,6 +277,21 @@ init_reswords (void)
 	set_identifier_kind (id, cik_keyword);
     }
 
+  /* With -fcontracts-p4299, P4299's C spellings _Pre and _Post are keywords
+     in C++ too.  The contract-specifier parsing accepts them beside the
+     contextual pre and post, which stay ordinary identifiers.  */
+  if (flag_contracts_p4299)
+    {
+      id = get_identifier ("_Pre");
+      C_SET_RID_CODE (id, RID_C_PRE);
+      ridpointers [RID_C_PRE] = id;
+      set_identifier_kind (id, cik_keyword);
+      id = get_identifier ("_Post");
+      C_SET_RID_CODE (id, RID_C_POST);
+      ridpointers [RID_C_POST] = id;
+      set_identifier_kind (id, cik_keyword);
+    }
+
   for (i = 0; i < NUM_INT_N_ENTS; i++)
     {
       char name[50];

@@ -204,6 +204,7 @@ in the following sections.
 @xref{C Dialect Options,,Options Controlling C Dialect}.
 @gccoptlist{-ansi  --ansi  -std=@var{standard}  -aux-info @var{filename}
 -fno-asm  -fno-builtin  -fno-builtin-@var{function}  -fcond-mismatch
+-fcontracts-p4299
 -fdeps-file=@var{file}  -fdeps-format=@var{format}  -fdeps-target=@var{file}
 -ffreestanding  -fgimple  -fgnu-tm  -fgnu89-inline  -fhosted
 -flax-vector-conversions  -fms-extensions
@@ -2749,6 +2750,41 @@ built-in functions selectively when using @option{-fno-builtin} or
 Allow conditional expressions with mismatched types in the second and
 third arguments.  The value of such an expression is void.  This option
 is not supported for C++.
+
+@opindex fcontracts-p4299
+@opindex fno-contracts-p4299
+@item -fcontracts-p4299
+Enable contract assertions for C, as proposed in WG21 paper P4299: the
+keywords @code{_Pre} and @code{_Post} introduce a precondition and a
+postcondition of a function, and @code{_ContractAssert} a contract
+assertion statement.  A violation calls the contract-violation handler,
+which a program may replace by defining, with @code{contract_violation_t}
+from @code{<contracts.h>},
+@smallexample
+void handle_contract_violation (const contract_violation_t *);
+@end smallexample
+@noindent
+This option defines the macro @code{__gcc_contracts_p4299} to a date of
+the form @code{YYYYMML}, and @code{<contracts.h>} defines
+@code{__STDC_VERSION_CONTRACTS_H__}.  A program compiled with it is
+linked with the contracts runtime library.
+
+These options, described with C++ contracts (@pxref{C++ Dialect Options}),
+apply to C contract assertions too: @option{-fcontract-evaluation-semantic},
+@option{-fcontract-configuration}, @option{-fcontract-configuration-file},
+@option{-fcontracts-allow-assume}, @option{-fcontracts-definition-check}
+and @option{-fcontracts-p4298}, as do the warnings
+@option{-Wno-contract-configuration} and
+@option{-Wno-contract-invalid-label-facet} (@pxref{Warning Options}).
+@option{-fcontracts-client-check} and
+@option{-fcontract-group-evaluation-semantic} are accepted but have no
+effect, C having neither caller-side checks nor assertion-control labels.
+
+In C++, together with @option{-fcontracts}, this option makes @code{_Pre},
+@code{_Post} and @code{_ContractAssert} usable as spellings of
+@code{pre}, @code{post} and @code{contract_assert}, and defines
+@code{__gcc_contracts_p4299} likewise.  @option{-fcontracts-p3850} does not
+enable it.
 
 @opindex fdeps-
 @opindex fdeps-file
