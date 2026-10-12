@@ -3795,6 +3795,13 @@ build_comment (cp_expr condition)
   char *str = get_source_text_between (global_dc->get_file_cache (),
 				       condition.get_start (),
 				       condition.get_finish ());
+  /* -fcontract-comment-from-expression: use the pretty-printed form even
+     when the source text is available.  */
+  if (str && flag_contract_comment_from_expression)
+    {
+      free (str);
+      str = NULL;
+    }
   if (!str)
     {
       const char *str = expr_to_string (condition);

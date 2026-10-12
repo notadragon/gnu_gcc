@@ -1946,6 +1946,11 @@ fcontract-disable-optimized-checks
 C++ ObjC++ Var(flag_contract_disable_optimized_checks) Init(0)
 -fcontract-disable-optimized-checks	Disable optimisation of contract checks.
 
+fcontract-comment-from-expression
+C++ ObjC++ Var(flag_contract_comment_from_expression) Init(0)
+-fcontract-comment-from-expression	Form the comment of a contract violation
+by printing the predicate, not from its source text.
+
 Enum
 Name(client_contract_check) Type(int)  UnknownError(unrecognized client contract check option %qs)
 
