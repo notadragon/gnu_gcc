@@ -3385,6 +3385,15 @@ fails, the execution is terminated immediately (without calling any handler).
 At compile-time there is no difference in behaviour between this option and
 the @code{enforce} case, since no handler is invoked at compile time.
 
+'@code{noexcept_enforce}' As @code{enforce}, except that the handler is
+invoked in a non-throwing context: a handler that exits by throwing
+terminates rather than propagating.  Requires @option{-fcontracts-p4298};
+without it, @code{enforce} is used instead and a warning is issued.
+
+'@code{noexcept_observe}' As @code{observe}, with the same non-throwing
+handler context.  Requires @option{-fcontracts-p4298}; without it,
+@code{observe} is used instead and a warning is issued.
+
 The semantic selected for a contract assertion, by this option or by the
 options below, is also limited to those its assertion-control label allows
 (P3400).  A semantic that is not allowed is replaced by the nearest allowed
@@ -3501,12 +3510,15 @@ also enable @option{-fcontracts}, in any C++ dialect.
 @opindex fno-contracts-p3400
 @opindex fcontracts-p4283
 @opindex fno-contracts-p4283
+@opindex fcontracts-p4298
+@opindex fno-contracts-p4298
 @item -fcontracts-p3097
 @itemx -fcontracts-p3098
 @itemx -fcontracts-p3099
 @itemx -fcontracts-p3290
 @itemx -fcontracts-p3400
 @itemx -fcontracts-p4283
+@itemx -fcontracts-p4298
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines
@@ -10823,6 +10835,10 @@ configuration but not the selector's type,
 that name taking no parameters and returning another type, or a variable of
 that name.  The selector is called with its own type whatever the
 declaration says.
+
+The warning also reports an entry asking for the @code{noexcept_enforce}
+or @code{noexcept_observe} semantic without @option{-fcontracts-p4298}, in
+which case @code{enforce} or @code{observe} is used instead.
 
 @opindex Wcontract-invalid-label-facet
 @opindex Wno-contract-invalid-label-facet

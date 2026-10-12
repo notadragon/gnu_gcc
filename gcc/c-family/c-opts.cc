@@ -1419,6 +1419,36 @@ c_common_post_options (const char **pfilename)
 			     not preprocessed.  */
 			  !cpp_opts->preprocessed);
 
+  /* A contract configuration file changes the generated code, so list it
+     in the -MD output after the main file.  */
+  if (flag_contracts || flag_contracts_p4299)
+    if (mkdeps *deps = cpp_get_deps (parse_in))
+      for (const contract_config_source &src : contracts_config_sources)
+	if (src.kind == CCSK_JSON_FILE)
+	  deps_add_dep (deps, src.arg);
+
+  /* The P4298 noexcept semantics need -fcontracts-p4298 and are otherwise
+     downgraded to their plain counterparts; say so when one is asked for,
+     on the command line or in the contract configuration.  */
+  if (c_dialect_cxx () && flag_contracts && !flag_contracts_p4298)
+    for (contract_evaluation_semantic sem
+	   : { CES_NOEXCEPT_ENFORCE, CES_NOEXCEPT_OBSERVE })
+      {
+	const char *plain
+	  = contract_semantic_name (sem == CES_NOEXCEPT_ENFORCE
+				    ? CES_ENFORCE : CES_OBSERVE);
+	if (contract_evaluation_semantic_explicit
+	    && flag_contract_evaluation_semantic == sem)
+	  warning (0, "%<-fcontract-evaluation-semantic=%s%> requires "
+		   "%<-fcontracts-p4298%>; %qs is used instead",
+		   contract_semantic_name (sem), plain);
+	if (contract_config_names_semantic (sem))
+	  warning (OPT_Wcontract_configuration,
+		   "the contract configuration asks for %qs, which requires "
+		   "%<-fcontracts-p4298%>; %qs is used instead",
+		   contract_semantic_name (sem), plain);
+      }
+
   /* Don't do any compilation or preprocessing if there is no input file.  */
   if (this_input_filename == NULL)
     {
