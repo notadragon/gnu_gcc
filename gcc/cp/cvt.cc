@@ -37,6 +37,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "attribs.h"
 #include "escaped_string.h"
 #include "gcc-urlifier.h"
+#include "contracts.h"
 
 static tree convert_to_pointer_force (tree, tree, tsubst_flags_t);
 static tree build_type_conversion (tree, tree);
@@ -854,8 +855,21 @@ ocp_convert (tree type, tree expr, int convtype, int flags,
 	       && INTEGRAL_OR_ENUMERATION_TYPE_P (intype))
 	      || SCALAR_FLOAT_TYPE_P (intype))
 	    {
-	      e = ocp_convert (ENUM_UNDERLYING_TYPE (type), e, convtype,
-			       flags, complain);
+	      tree utype = ENUM_UNDERLYING_TYPE (type);
+	      /* P3100: without a fixed underlying type, ENUM_UNDERLYING_TYPE
+		 is narrowed to the enumerators' precision.  Convert a
+		 floating-point source through the full-width type instead,
+		 so that {conv.fpint} is checked against the underlying type
+		 and the enumeration's range by the guard below.  */
+	      if (flag_contracts_p3100
+		  && SCALAR_FLOAT_TYPE_P (intype)
+		  && !ENUM_FIXED_UNDERLYING_TYPE_P (type))
+		{
+		  utype = c_common_type_for_mode (TYPE_MODE (utype),
+						  TYPE_UNSIGNED (utype));
+		  intype = utype;
+		}
+	      e = ocp_convert (utype, e, convtype, flags, complain);
 	      if (e == error_mark_node)
 		return error_mark_node;
 	    }
@@ -920,6 +934,63 @@ ocp_convert (tree type, tree expr, int convtype, int flags,
 	    return e2;
 
 	  return e;
+	}
+
+      /* P3100: guard a floating-point -> integer conversion whose truncated
+	 value may not be representable in the destination integer type
+	 ({conv.fpint}).  Resolve the semantic up front so that the status-quo
+	 "assume" leaves the conversion untouched.  Outside a function (a
+	 namespace-scope or default member initializer) it is resolved against
+	 the enclosing namespace, as in cp_build_binary_op.  */
+      if (implicit_ub_check_context_p ()
+	  && SCALAR_FLOAT_TYPE_P (intype)
+	  && TREE_CODE (type) == INTEGER_TYPE)
+	{
+	  /* No implicit UB check in an unevaluated operand: no code is
+	     generated for it, and a P3100 implicit assertion must never change
+	     the result of the noexcept operator (see the parallel gate and
+	     rationale in cp_build_binary_op).  */
+	  contract_evaluation_semantic sem
+	    = resolve_implicit_contract_semantic
+		(current_function_decl, loc,
+		 "ub:conv.fpint.float.not.represented");
+	  if (sem != CES_ASSUME)
+	    {
+	      tree saved = cp_save_expr (e);
+	      converted = convert_to_integer_maybe_fold (type, saved, dofold);
+	      converted
+		= build_implicit_float_cast_check (current_function_decl, loc,
+						   sem, saved, converted);
+	      return ignore_overflows (converted, e);
+	    }
+	}
+
+      /* P3100: guard an integer/enumeration -> enumeration conversion whose
+	 value may be outside the target enum's value range, when the enum
+	 has no fixed underlying type ({expr.static.cast.enum.outside.range}).
+	 A fixed-underlying enum was already converted through the underlying
+	 type above and is not UB; a floating-point source was converted to the
+	 full-width underlying type above, and INTYPE is now that type.  The
+	 unevaluated-operand exclusion is for the same reason as the float-cast
+	 gate above.  */
+      if (implicit_ub_check_context_p ()
+	  && TREE_CODE (type) == ENUMERAL_TYPE
+	  && !ENUM_FIXED_UNDERLYING_TYPE_P (type)
+	  && INTEGRAL_OR_ENUMERATION_TYPE_P (intype))
+	{
+	  contract_evaluation_semantic sem
+	    = resolve_implicit_contract_semantic
+		(current_function_decl, loc,
+		 "ub:expr.static.cast.enum.outside.range");
+	  if (sem != CES_ASSUME)
+	    {
+	      tree saved = cp_save_expr (e);
+	      converted = convert_to_integer_maybe_fold (type, saved, dofold);
+	      converted
+		= build_implicit_enum_cast_check (current_function_decl, loc,
+						  sem, saved, converted, type);
+	      return ignore_overflows (converted, e);
+	    }
 	}
 
       converted = convert_to_integer_maybe_fold (type, e, dofold);

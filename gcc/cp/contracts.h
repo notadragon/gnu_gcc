@@ -322,6 +322,8 @@ extern tree build_implicit_divide_overflow_check
   (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
 extern tree build_implicit_float_cast_check
   (tree, location_t, contract_evaluation_semantic, tree, tree);
+extern tree build_implicit_enum_cast_check
+  (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
 extern tree build_implicit_pure_virtual_terminus (tree);
 extern bool contract_constexpr_ignored_p (const_tree);
 extern bool contract_constexpr_terminating_p (const_tree);
