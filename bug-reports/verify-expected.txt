@@ -1,0 +1,131 @@
+# Measured behaviour of every reproducer in this directory.
+#
+# Regenerate with ./verify.sh --record, and READ THE DIFF: a line
+# that moved in the STOCK column means upstream's behaviour changed,
+# which is the event that retires a row from README.md.  A line that
+# moved in the BRANCH column with stock unchanged is a regression
+# here, or a fix here, and the README Status column should follow.
+#
+# stock:  g++ (Compiler-Explorer-Build-gcc-8802cd9fdbefee623761dbddf93f80685ac53f7b-binutils-2.44) 17.0.0 20261005 (experimental)
+# branch: g++ (GCC) 17.0.0 20261005 (experimental)
+# dated:  2026-10-12
+#
+# id | stock | branch
+GCC-1a|ice[1:12388e11]|clean
+GCC-1b|ice[1:f4203d13]|clean
+GCC-1c|error[2:e41a7277]|clean
+GCC-2|clean|clean
+GCC-10|clean exit:1 out:[]|clean exit:0 out:[]
+GCC-11a|error[2:55c1ac8c]|clean
+GCC-11b|error[11:788fbe23]|clean exit:0 out:[]
+GCC-12|clean exit:134 out:[contract violation in function int value_form() at gcc-12/gcc-12-result-binding-denotes-two-objects.cpp:104: same (r, &r) [assertion_kind: post, semantic: enfor]|clean exit:0 out:[value = 7 &r taken directly = 0xADDR &r via const int& = 0xADDR same object? YES]
+GCC-13|ice[1:4d3dd26c]|clean
+GCC-14|ice[2:db1be632]|error[2:98d08cbe]
+GCC-15a|clean exit:0 out:[]|clean exit:0 out:[]
+GCC-15b|clean exit:19 out:[]|clean exit:0 out:[]
+GCC-152|clean exit:0 out:[mode=1]|clean exit:0 out:[mode=2]
+GCC-16|ice[1:ede8e1fe]|clean
+GCC-17-1|clean|clean
+GCC-17-2|error[1:a638eaa0]|error[1:a638eaa0]
+GCC-17-3|error[1:7daafcdf]|error[1:7daafcdf]
+GCC-17-4|error[2:eeb94009]|error[2:eeb94009]
+GCC-17-5|error[2:b354bd35]|error[2:b354bd35]
+GCC-17-6|error[1:d6b6c423]|error[1:d6b6c423]
+GCC-17-7|error[2:a0cd55b3]|error[2:a0cd55b3]
+GCC-17-8|error[1:43cc3117]|error[1:43cc3117]
+GCC-17-9|clean|clean
+GCC-17-10|clean|clean
+GCC-17-11|error[1:90a44439]|error[1:90a44439]
+GCC-18|error[1:b3c269cd]|error[2:f2ea9536]
+GCC-19|error[48:874a85a0]|error[14:916add75]
+GCC-21|link-error[0:da39a3ee]|clean
+GCC-22|error[5:d856cb2e]|clean
+GCC-23a|clean|error[5:17ae5e08]
+GCC-23b|error[2:a19ac497]|error[2:a19ac497]
+GCC-24|ice[1:cb9a0a0b]|clean
+GCC-25|error[41:cf71600a]|clean[2:129e8c27]
+GCC-26|error[8:baa9eff3]|error[14:f6ce4745]
+GCC-27a|clean|error[2:9fedf4c7]
+GCC-27b|clean|clean
+GCC-28|error[7:7afd2dd9]|error[10:e94f6acb]
+GCC-30|error[2:1fae0a07]|error[6:04d4ba50]
+GCC-31|error[9:e4de6f05]|clean
+GCC-33|ice[1:8ae534c9]|clean
+GCC-36b|error[4:146af8f0]|error[2:3899586e]
+GCC-37a|ice[1:b6dbaca4]|clean
+GCC-37b|ice[2:1ccf84a9]|clean
+GCC-38|clean[1:4a54d28a]|clean
+GCC-39|error[1:79ca4bb7]|error[1:79ca4bb7]
+GCC-42a|error[3:a3e9abdf]|clean
+GCC-42b|error[3:a3e9abdf]|clean exit:1 out:[]
+GCC-43a|error[1:b17d36ce]|clean
+GCC-43b|clean exit:0 out:[]|clean exit:0 out:[]
+GCC-44|clean exit:2 out:[]|clean exit:0 out:[]
+GCC-45a|clean|error[24:12c6c343]
+GCC-45b|clean exit:0 out:[contract violation in function int (* returns_fn_classic(int))(int) at gcc-45/contract-silently-dropped.cpp:38: ok [assertion_kind: pre, semantic: observe, mode]|clean exit:0 out:[contract violation in function int (* returns_fn_classic(int))(int) at gcc-45/contract-silently-dropped.cpp:38: ok [assertion_kind: pre, semantic: observe, mode]
+GCC-45c|error[4:88cf1b35]|clean
+GCC-45d|clean exit:0 out:[contract violation in function long int (* which_type(int))(long int) at gcc-45/contract-predicate-wrong-scope.cpp:43: same_v<decltype (i), int> [assertion_kind]|clean exit:0 out:[contract violation in function long int (* contradiction(int))(long int) at gcc-45/contract-predicate-wrong-scope.cpp:59: i > 0 && i <= 0 [assertion_kind: pre,]
+GCC-47|clean|error[5:7e387c69]
+GCC-49|ice[2:400c7a4b]|error[1:66194a2f]
+GCC-50a|error[4:9dd10f45]|clean
+GCC-50b|clean|clean
+GCC-56|error[2:7fd33ebe]|clean
+GCC-59a|clean|error[2:a8e263df]
+GCC-59b|clean|error[1:5b2333dc]
+GCC-59c|clean|error[1:b79564d1]
+GCC-69|clean|error[3:ce846f77]
+GCC-70|clean|error[3:33a6f9ea]
+GCC-495|ice[1:6adb43f8]|error[2:84e41968]
+GCC-517a|clean|error[2:32c8ec27]
+GCC-517b|clean|error[2:8c4850e0]
+GCC-517c|clean|error[2:169ffa73]
+GCC-518|clean|error[2:66d859a2]
+GCC-521|clean|error[4:6b3ebd11]
+GCC-523|clean[2:1a820f1d]|clean[3:53965ab2]
+GCC-543a|ice[1:4a5c3da7]|clean
+GCC-543b|clean|clean
+GCC-544a|ice[1:f41eeefe]|clean
+GCC-544b|ice[1:53cf6389]|clean
+GCC-544c|error[1:e4880312]|clean
+GCC-569|clean exit:139 out:[]|clean exit:139 out:[gcc-569/ptrmem-null-object-not-checked.cpp:8:52: runtime error: member access within null pointer of type 'struct S']
+GCC-551a|clean exit:0 out:[after]|clean exit:0 out:[contract violation in function void lx(int) at gcc-551/block-scope-first-decl-contract-dropped.cpp:14: x > 0 [assertion_kind: pre, semantic: observe, mode: pred]
+GCC-551b|error[2:4f3391ed]|clean
+GCC-552a|clean exit:0 out:[after]|clean exit:0 out:[contract violation in function void ft(T) [with T = int] at gcc-552/explicit-spec-contract-dropped.cpp:13: x > 5 [assertion_kind: pre, semantic: observe, mode:]
+GCC-552b|clean|error[2:c2d760b7]
+GCC-502|error[2:1c22f8ab]|clean
+GCC-503a|clean|error[4:83ead558]
+GCC-503b|clean|error[2:1ba3a8c8]
+GCC-503c|ice[3:93a80f4c]|error[2:70cf1c3b]
+GCC-504a|ice[1:9fe97e16]|clean
+GCC-504b|error[2:431d962d]|clean
+GCC-506|error[2:d331410d]|clean
+GCC-507|error[1:b1c4c694]|error[2:04f0c963]
+GCC-606|error[1:b48c2872]|clean
+GCC-574a|error[4:80727458]|clean
+GCC-574b|clean|error[2:5b7333c6]
+GCC-610|ice[1:5ff2a313]|clean
+GCC-612|ice[1:a2025786]|clean
+GCC-618a|error[3:ba8520a6]|clean
+GCC-618b|error[1:cbf36e15]|clean
+GCC-620|error[2:3cc13b4f]|error[1:72d8b026]
+GCC-607|error[3:a2eec95b]|clean
+GCC-608|ice[3:28c12d6e]|error[2:8b87efc0]
+GCC-596|ice[2:87e6ff62]|error[1:e578df2a]
+GCC-630|error[2:5a7c4f50]|clean
+GCC-632|ice[1:baa0779c]|clean
+GCC-633|ice[1:87b91628]|clean
+GCC-634|ice[3:a8a01608]|clean
+GCC-641|clean|error[2:87ccf454]
+GCC-644|clean|clean
+GCC-648|error[2:d51ec338]|error[6:936cc874]
+GCC-649|error[4:7baecd37]|clean
+GCC-650|error[6:0f5e58c5]|clean
+GCC-651|other(rc=1)[0:da39a3ee]|error[6:6c7a01bb]
+GCC-652|error[4:f76f2325]|clean
+GCC-656|error[3:237c9ea4]|clean
+GCC-663|error[2:b0a706ec]|clean
+GCC-682|error[3:86eb5ec6]|clean
+GCC-683|error[2:940a8a28]|error[2:940a8a28]
+GCC-689|clean[4:1fd7d013]|clean
+GCC-706|ice[1:8b875307]|clean
+GCC-707|clean exit:0 out:[contract violation in function int f(int) at gcc-707/gcc-707-contract-comment-macro.cpp:10: 0#define LT(a, b) ((a) < (b))#define X x#define ZERO 0#define ID(e)]|clean exit:0 out:[contract violation in function int f(int) at gcc-707/gcc-707-contract-comment-macro.cpp:10: M > x [assertion_kind: pre, semantic: observe, mode: predicate_false]
