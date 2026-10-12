@@ -10012,6 +10012,90 @@ build_implicit_violation_call (location_t loc,
    observes assertion_kind::implicit (P3100).  This helper runs after
    genericization, so it must build GENERIC (not front-end statement) trees.  */
 
+tree
+build_implicit_flow_off_check (tree fndecl, location_t loc,
+			       contract_evaluation_semantic sem)
+{
+  if (sem == CES_ASSUME)
+    return NULL_TREE;
+
+  /* A defined (erroneous) return that zeroes the bytes of the result object, so
+     no indeterminate data is leaked regardless of the return type.  For a
+     scalar this is a zero value; for a class/array the whole object storage is
+     cleared with memset (every byte, including padding) -- well-defined for a
+     trivially-constructible type, and never a data leak otherwise.  */
+  tree defined_return = NULL_TREE;
+  tree res = DECL_RESULT (fndecl);
+  if (res)
+    {
+      tree obj = DECL_BY_REFERENCE (res) ? build_fold_indirect_ref (res) : res;
+      tree objtype = TREE_TYPE (obj);
+      if (SCALAR_TYPE_P (objtype))
+	{
+	  tree modify = build2 (MODIFY_EXPR, objtype, obj,
+				build_zero_cst (objtype));
+	  defined_return = build1 (RETURN_EXPR, void_type_node, modify);
+	}
+      else
+	{
+	  tree memset_call
+	    = build_call_expr (builtin_decl_explicit (BUILT_IN_MEMSET), 3,
+			       build_fold_addr_expr (obj), integer_zero_node,
+			       fold_convert (size_type_node,
+					     TYPE_SIZE_UNIT (objtype)));
+	  tree ret = build1 (RETURN_EXPR, void_type_node, res);
+	  defined_return = build2 (COMPOUND_EXPR, void_type_node,
+				   memset_call, ret);
+	}
+      SET_EXPR_LOCATION (defined_return, loc);
+    }
+
+  if (sem == CES_IGNORE)
+    return defined_return;   /* Zeroed result of any type (NULL only if no
+			       result decl).  */
+
+  if (sem == CES_QUICK)
+    return build_quick_enforce_reaction (loc);
+
+  /* enforce / observe / noexcept_enforce / noexcept_observe: call the
+     corresponding CAK_IMPLICIT entry point.  */
+  tree call = build_implicit_violation_call (loc, sem,
+					     "control reached the end of a "
+					     "value-returning function");
+
+  if (sem == CES_ENFORCE || sem == CES_NOEXCEPT_ENFORCE)
+    /* The entry point is noreturn; nothing follows.  */
+    return call;
+
+  /* observe / noexcept_observe: the handler returns, then continue with a
+     defined return value.  */
+  tree list = NULL_TREE;
+  append_to_statement_list (call, &list);
+  if (defined_return)
+    append_to_statement_list (defined_return, &list);
+  return list;
+}
+
+/* P3100: build the reaction for control flowing off the end of a coroutine
+   whose promise type has no usable return_void
+   ({stmt.return.coroutine.flow.off}), for the resolved semantic SEM.  This is
+   the coroutine analogue of build_implicit_flow_off_check, but there is no
+   return value to substitute: the coroutine's return object was created at
+   get_return_object, so the continuing semantics simply proceed to the final
+   suspend.  Returns
+
+     assume/ignore            -> NULL_TREE (fall through to final
+				 suspend, as today);
+     quick_enforce            -> call the terminate handler (noreturn);
+     enforce/noexcept_enforce -> call the noreturn violation entry point;
+     observe/noexcept_observe -> call the (returning) violation entry
+				 point, then continue.
+
+   The reaction is emitted inside the coroutine's try block, so a throwing
+   enforce/observe is caught by promise.unhandled_exception ().  Reported
+   through the CAK_IMPLICIT entry points (assertion_kind::implicit).  Builds
+   GENERIC.  */
+
 bool
 cp_build_implicit_ub_handler (tree fndecl, location_t loc, const char *group,
 			      int reaction, tree *entry_out,
