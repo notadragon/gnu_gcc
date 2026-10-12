@@ -421,6 +421,9 @@ UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-Wconditionally-supported)
 Wconstant-logical-operand
 UrlSuffix(gcc/Warning-Options.html#index-Wconstant-logical-operand)
 
+Wcontract-configuration
+UrlSuffix(gcc/Warning-Options.html#index-Wcontract-configuration)
+
 Wconversion
 UrlSuffix(gcc/Warning-Options.html#index-Wconversion) LangUrlSuffix_Fortran(gfortran/Error-and-Warning-Options.html#index-Wconversion)
 
@@ -1274,6 +1277,15 @@ UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-disable-optimized
 
 fcontract-comment-from-expression
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-comment-from-expression)
+
+fcontract-configuration=
+UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-configuration)
+
+fcontract-configuration-file=
+UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-configuration-file)
+
+fcontract-group-evaluation-semantic=
+UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-group-evaluation-semantic)
 
 fcontracts-client-check=
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-client-check)

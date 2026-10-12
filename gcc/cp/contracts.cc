@@ -32,6 +32,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "diagnostic.h"
 #include "options.h"
 #include "contracts.h"
+#include "cp/contracts-config.h"
+#include "cp-objcp-common.h"
 #include "tree.h"
 #include "tree-inline.h"
 #include "attribs.h"
@@ -122,10 +124,9 @@ along with GCC; see the file COPYING3.  If not see
 
   In all cases (pre, post, contract_assert) the AST node is lowered to control
   flow and (potentially) calls to the violation handler and/or termination.
-  This is done during `cp_genericize ()`.  In the current implementation, the
-  decision on the control flow is made on the basis of the setting of a command-
-  line flag that determines a TU-wide contract evaluation semantic, which has
-  the following initial set of behaviours:
+  This is done during `cp_genericize ()`.  The control flow depends on the
+  contract's evaluation semantic, resolved for each contract from the P3595
+  configuration and the command line; the semantics behave as follows:
 
     'ignore'	    : contract assertion AST is lowered to 'nothing',
 		      i.e. omitted.
@@ -280,16 +281,73 @@ match_contract_specifiers (location_t oldloc, tree old_contracts,
   return true;
 }
 
-/* Return true if CONTRACT is checked under the current semantic.  */
+/* True if SEM causes no contract check to be emitted.  For now the P3100
+   "assume" semantic behaves identically to "ignore" in codegen, so both
+   are treated the same way at every code-generation decision point.  */
 
-static bool
-contract_active_p (tree contract)
+static inline bool
+contract_semantic_emits_no_check (uint16_t sem)
 {
-  return get_evaluation_semantic (contract) != CES_IGNORE;
+  return sem == CES_IGNORE || sem == CES_ASSUME;
 }
 
-/* Return true if any contract of FNDECL is checked under the
-   current semantic.  */
+/* The values a P3595 dynamic selector may return: every evaluation
+   semantic.  One that is not allowed for the contract -- assume without
+   -fcontracts-allow-assume, a noexcept one without -fcontracts-p4298, or one
+   a label excludes -- is adjusted to the allowed set (D3595R1, "Adjusting a
+   Semantic to the Allowed Set"); any other value is an invalid selection,
+   reported as an enforced violation.  */
+
+static auto_vec<int, 7>
+dynamic_raw_semantics ()
+{
+  auto_vec<int, 7> v;
+  for (int s = CES_IGNORE; s <= CES_NOEXCEPT_ENFORCE; s++)
+    v.quick_push (s);
+  return v;
+}
+
+/* The semantics a dynamically selected check dispatches on once the
+   selector's value is adjusted: the four C++26 semantics, and under
+   -fcontracts-p4298 the two noexcept ones as well.  An allowed assume takes
+   the ignore arm.  */
+
+static auto_vec<int, 6>
+dynamic_dispatch_semantics ()
+{
+  auto_vec<int, 6> v;
+  for (int s = CES_IGNORE; s <= CES_QUICK; s++)
+    v.quick_push (s);
+  return v;
+}
+
+/* True if SEM never permits an exception to escape a handler call: the
+   contract is either unchecked, or checked through a terminating entry
+   point.  Used to decide whether a compiler-synthesized wrapper function
+   (P3097, P3098) can be marked noexcept.  */
+
+static bool
+contract_active_p (tree contract, tree fndecl)
+{
+  /* Resolve the runtime semantic first; this also caches the P3595
+     dynamic-selector descriptor (if any) on the contract node.  */
+  bool runtime_active = !contract_semantic_emits_no_check
+			  (ensure_evaluation_semantic (contract, fndecl,
+						       false));
+
+  /* A dynamic contract is always active at run time regardless of its
+     compile-time default: the selector may return a checking semantic even
+     when the default is "ignore" (P3595).  */
+  if (CONTRACT_DYNAMIC (contract))
+    runtime_active = true;
+
+  return runtime_active
+    || !contract_semantic_emits_no_check
+	   (ensure_evaluation_semantic (contract, fndecl, true));
+}
+
+/* Return true if any contract of FNDECL is checked or assumed under the
+   current build configuration.  */
 
 static bool
 contract_any_active_p (tree fndecl)
@@ -299,7 +357,7 @@ contract_any_active_p (tree fndecl)
     return false;
 
   for (tree contract : tree_vec_range (contracts))
-    if (contract_active_p (contract))
+    if (contract_active_p (contract, fndecl))
       return true;
   return false;
 }
@@ -315,7 +373,7 @@ has_active_contract_condition (tree fndecl, tree_code c)
     return false;
 
   for (tree contract : tree_vec_range (contracts))
-    if (TREE_CODE (contract) == c && contract_active_p (contract))
+    if (TREE_CODE (contract) == c && contract_active_p (contract, fndecl))
       return true;
   return false;
 }
@@ -395,6 +453,25 @@ handle_contracts_p (tree fndecl)
 	  && contract_any_active_p (fndecl));
 }
 
+/* Like handle_contracts_p, but for the caller-side wrapping decision.  A
+   caller may enable checking (P3595 caller-side semantics) even when the
+   callee's own evaluation semantic is "ignore", so gate only on the presence
+   of contracts here; whether any caller-side semantic is actually active at a
+   particular call site is decided per call site in maybe_contract_wrap_call.
+   A constructor or destructor call names a clone, whose contracts are its
+   origin's.  */
+
+static bool
+handle_caller_contracts_p (tree fndecl)
+{
+  return (flag_contracts
+	  && !processing_template_decl
+	  && (CONTRACT_HELPER (fndecl) == ldf_contract_none)
+	  && DECL_HAS_CONTRACTS_P (DECL_CONSTRUCTOR_P (fndecl)
+				   || DECL_DESTRUCTOR_P (fndecl)
+				   ? DECL_ORIGIN (fndecl) : fndecl));
+}
+
 /* For use with the tree inliner. This preserves non-mapped local variables,
    such as postcondition result variables, during remapping.  */
 
@@ -453,11 +530,120 @@ get_contract_assertion_kind (tree contract)
   gcc_unreachable ();
 }
 
+static tree find_std_contracts_type (tree);
+
+/* The argument a compute_semantic facet is called with: a non-const lvalue of
+   std::contracts::evaluation_semantic holding SEM, as in the library concept.
+   Passing that and letting overload resolution choose is what makes a
+   reference or deduced parameter, an explicit object parameter and an
+   overload set all work.  NULL_TREE if <contracts> is not available: the
+   enumeration is only looked for, never injected as lookup_std_contracts_type
+   would inject a class (GCC-676).  */
+
 /* Get contract_evaluation_semantic of the specified contract.  */
 
 contract_evaluation_semantic
 get_evaluation_semantic (const_tree contract)
 {
+contract_evaluation_semantic
+get_constexpr_evaluation_semantic (const_tree contract)
+{
+  tree s = CONTRACT_CONSTEXPR_EVALUATION_SEMANTIC (contract);
+  gcc_checking_assert (s != NULL_TREE);
+  return (contract_evaluation_semantic) tree_to_uhwi (s);
+}
+
+/* The gated base set: the four C++26 semantics, plus P3100 "assume" only
+   when -fcontracts-allow-assume is in effect and the P4298 noexcept variants
+   only under -fcontracts-p4298.  make_contract_query intersects the
+   (flag-independent) label restriction with this set, so a gated semantic can
+   never be present -- from a label or otherwise -- when its flag is off.  */
+
+static contract_query
+make_contract_query (tree contract, tree fndecl)
+{
+  contract_query q;
+  q.fndecl = fndecl;
+  q.loc = EXPR_LOCATION (contract);
+
+  if (TREE_CODE (contract) == PRECONDITION_STMT)
+    q.kind = CAK_PRE;
+  else if (POSTCONDITION_P (contract))
+    q.kind = CAK_POST;
+  else if (TREE_CODE (contract) == ASSERTION_STMT)
+    q.kind = CAK_ASSERT;
+  else
+    q.kind = CAK_INVALID;
+
+  /* CONTRACT_ALLOWED_MASK holds the flag-independent label restriction
+     (the label's allowed_semantics facet intersected with the full semantic
+     set), or NULL_TREE for no restriction.  The -fcontracts-allow-assume gate
+     is applied here, at query construction, by intersecting with the gated
+     base set -- so it applies uniformly to every contract (including template
+     instantiations) regardless of where the mask was computed.  */
+  tree mask_tree = CONTRACT_ALLOWED_MASK (contract);
+  uint16_t label_mask = mask_tree
+    ? (uint16_t) tree_to_uhwi (mask_tree)
+    : (uint16_t) CES_ALL_ALLOWED_WITH_EXTENSIONS;
+  q.allowed_mask = label_mask & contract_base_allowed_mask ();
+
+  q.groups = NULL;
+  return q;
+}
+
+/* P3100: resolve the evaluation semantic for a synthesized implicit contract
+   assertion guarding a core-language undefined behaviour, identified by UB_ID
+   (the P3100 curly-brace identifier, used verbatim as the configuration
+   group).  FNDECL is the enclosing function and LOC the site location.
+
+   The builtin configuration (see contract_config_init) defaults implicit
+   contract assertions to the "assume" semantic -- today's behaviour: no check
+   is emitted and the UB is preserved.  A user configuration may select any
+   other semantic for a given group; the caller is responsible for honouring
+   the returned semantic.
+
+   ALLOWED is the set of semantics the check supports.  "assume" is added to
+   it always -- implicit "assume" is not gated on -fcontracts-allow-assume,
+   since it introduces no new UB (it is the status quo) -- and the P4298
+   noexcept variants under -fcontracts-p4298, but only when ALLOWED already
+   permits a checking semantic.  */
+
+contract_evaluation_semantic
+resolve_implicit_contract_semantic (tree fndecl, location_t loc,
+				    const char *ub_id, uint16_t allowed)
+{
+  auto_vec<const char *> groups;
+  groups.safe_push (ub_id);
+
+  /* ALLOWED is the base set this check supports; add "assume" always and the
+     P4298 noexcept variants under the flag.  A configured semantic outside this
+     set is clamped by contract_config_resolve via the fallback order.  The
+     noexcept variants are the non-throwing counterparts of a *checking*
+     semantic, so only widen with them when ALLOWED already permits some
+     checking semantic -- otherwise a check that supports no checking at all
+     (e.g. an opaque [[assume]], ALLOWED == {ignore}) would have a handler
+     semantic re-admitted under -fcontracts-p4298 and evaluate a predicate it
+     must not.  */
+  uint16_t mask = allowed | (1 << CES_ASSUME);
+  const uint16_t checking_mask
+    = (1 << CES_OBSERVE) | (1 << CES_ENFORCE) | (1 << CES_QUICK);
+  if (flag_contracts_p4298 && (allowed & checking_mask))
+    mask |= (1 << CES_NOEXCEPT_ENFORCE) | (1 << CES_NOEXCEPT_OBSERVE);
+
+  contract_query q;
+  q.fndecl = fndecl;
+  q.kind = CAK_IMPLICIT;
+  q.allowed_mask = mask;
+  q.groups = &groups;
+  q.loc = loc;
+
+  contract_config_result r = contract_config_resolve (&q);
+
+  /* CES_INVALID means the allowed set admitted no semantic (e.g. a label whose
+     allowed_semantics facet excludes everything the check supports).  That is
+     an ill-formed configuration -- diagnose it rather than silently picking
+     one.  */
+  if (r.semantic == CES_INVALID)
   if (CONTRACT_EVALUATION_SEMANTIC (contract))
     {
       tree s = CONTRACT_EVALUATION_SEMANTIC (contract);
@@ -478,6 +664,170 @@ get_evaluation_semantic (const_tree contract)
 	}
     }
 
+/* Populate the groups vec from the contract's cached group names.  */
+
+static void
+fill_query_groups (contract_query *q, tree contract,
+		   auto_vec<const char *> &vec)
+{
+  ensure_contract_groups (contract);
+  tree groups = CONTRACT_GROUPS (contract);
+  if (groups == error_mark_node)
+    return;
+  for (tree g = groups; g; g = TREE_CHAIN (g))
+    vec.safe_push (TREE_STRING_POINTER (TREE_VALUE (g)));
+  if (!vec.is_empty ())
+    q->groups = &vec;
+}
+
+/* Does LABEL have a compute_semantic P3400 facet?  Used by the P3595 dynamic-
+   dispatch path to decide whether a selector's value needs the label's
+   transform (contract_label_transforms_p).  The tests are call_label_method's,
+   short of making the call: a dependent label has no facet yet, and neither
+   does one whose only compute_semantic members are inaccessible.  */
+
+contract_evaluation_semantic
+ensure_evaluation_semantic (tree contract, tree fndecl, bool in_ce)
+{
+  tree *slot = in_ce
+    ? &CONTRACT_CONSTEXPR_EVALUATION_SEMANTIC (contract)
+    : &CONTRACT_EVALUATION_SEMANTIC (contract);
+
+  if (*slot != NULL_TREE)
+    return (contract_evaluation_semantic) tree_to_uhwi (*slot);
+
+  contract_query q = make_contract_query (contract, fndecl);
+  q.caller_side = false;
+  q.in_constant_evaluation = in_ce;
+
+  auto_vec<const char *> groups_vec;
+  fill_query_groups (&q, contract, groups_vec);
+
+  contract_config_result res = contract_config_resolve (&q);
+  uint16_t sem = (uint16_t) res.semantic;
+  bool dynamic_no_default = (!in_ce && res.dyn_name && res.no_static_default);
+  if (sem == CES_INVALID && !dynamic_no_default)
+    {
+      error_at (EXPR_LOCATION (contract),
+		"no valid evaluation semantic for contract assertion");
+      sem = in_ce ? CES_OBSERVE : CES_ENFORCE;
+    }
+
+  if (dynamic_no_default)
+    {
+      /* P3595: the entry asked for a dynamic selector with no compile-time
+	 default, which the config parser accepts deliberately -- the user
+	 supplies the selector themselves and provideweak has already been
+	 forced false, so no weak definition needs a value to return.  The
+	 cached semantic is therefore never used: the descriptor keeps the
+	 contract active and the selector decides at run time.  Mirror what
+	 resolve_caller_semantic already does for the identical config, and
+	 do not run compute_semantic over a placeholder -- the dynamic path
+	 applies transform_semantic to the selector's own result instead.  */
+      sem = CES_IGNORE;
+    }
+  else
+    sem = apply_compute_semantic (contract, sem, q.allowed_mask,
+				  EXPR_LOCATION (contract));
+
+  *slot = build_int_cst (uint16_type_node, sem);
+
+  /* Cache the runtime dynamic-selector descriptor, if any.  A dynamic
+     descriptor only exists for the runtime slot (!in_ce); constant
+     evaluation never has one (P3595 spec 3, enforced in
+     contract_config_resolve).  Store the name as an IDENTIFIER_NODE and
+     pack linkage/provideweak into an INTEGER_CST so the whole thing is
+     GC-safe.  */
+  if (!in_ce && res.dyn_name)
+    {
+      unsigned HOST_WIDE_INT packed
+	= ((unsigned HOST_WIDE_INT) res.dyn_linkage << 1)
+	  | (res.dyn_provideweak ? 1 : 0);
+      CONTRACT_DYNAMIC (contract)
+	= build_tree_list (get_identifier (res.dyn_name),
+			   build_int_cst (uint16_type_node, packed));
+    }
+
+  return (contract_evaluation_semantic) sem;
+}
+
+/* The result of resolving a contract's caller-side semantic for a specific
+   call site: the clamped, compute_semantic-applied SEMANTIC, plus the
+   P3595 dynamic-selector descriptor (DYN_NAME == NULL when the resolution
+   is not dynamic).  */
+
+struct caller_resolution
+{
+  contract_evaluation_semantic semantic;
+  const char *dyn_name;
+  unsigned char dyn_linkage;
+  bool dyn_provideweak;
+};
+
+/* Resolve the caller-side semantic for CONTRACT for a specific call site
+   described by CALLER_LOC and CALLER_FNDECL.  This does not cache into
+   any AST slot -- the result depends on the call site, so it must be
+   recomputed per call.  */
+
+static caller_resolution
+resolve_caller_semantic (tree contract, tree fndecl,
+			 location_t caller_loc, tree caller_fndecl)
+{
+  contract_query q = make_contract_query (contract, fndecl);
+  q.caller_side = true;
+  q.in_constant_evaluation = false;
+  /* IGNORE is the caller-side opt-out default, admitted for the
+     configuration's result; a compute_semantic result is still held to the
+     label's own allowed set.  */
+  uint16_t label_mask = q.allowed_mask;
+  q.allowed_mask |= (1 << CES_IGNORE);
+  q.caller_loc = caller_loc;
+  q.caller_fndecl = caller_fndecl;
+
+  auto_vec<const char *> groups_vec;
+  fill_query_groups (&q, contract, groups_vec);
+
+  contract_config_result r = contract_config_resolve (&q);
+  uint16_t sem = (uint16_t) r.semantic;
+  if (sem == CES_INVALID)
+    sem = CES_IGNORE;
+
+  /* Apply the label's compute_semantic facet only when caller-side checking
+     is actually engaged -- i.e. the resolved caller semantic emits a real
+     check (observe/enforce/quick) -- never to the opt-out default
+     (ignore/assume).  This preserves the caller-side opt-in model: a call
+     site with no matching caller rule resolves to ignore and must stay
+     ignore (no wrapper), so a label whose compute_semantic maps
+     ignore->observe cannot resurrect a caller-side check that the call site
+     never opted into.  Mirrors the callee-side path
+     (ensure_evaluation_semantic), validating against the label's mask.  */
+  if (!contract_semantic_emits_no_check (sem))
+    sem = apply_compute_semantic (contract, sem, label_mask,
+				  EXPR_LOCATION (contract));
+
+  caller_resolution out;
+  out.semantic = (contract_evaluation_semantic) sem;
+  out.dyn_name = r.dyn_name;              /* NULL unless dynamic */
+  out.dyn_linkage = r.dyn_linkage;
+  out.dyn_provideweak = r.dyn_provideweak;
+  return out;
+}
+
+/* Constexpr-semantic predicate helpers.  Valid after
+   ensure_evaluation_semantic(contract, fndecl, true).  */
+
+bool
+contract_constexpr_ignored_p (const_tree contract)
+{
+  contract_evaluation_semantic s = get_constexpr_evaluation_semantic (contract);
+  return s <= CES_IGNORE || contract_semantic_emits_no_check (s);
+}
+
+bool
+contract_constexpr_terminating_p (const_tree contract)
+{
+  contract_evaluation_semantic s = get_constexpr_evaluation_semantic (contract);
+  return s == CES_ENFORCE || s == CES_QUICK || s == CES_NOEXCEPT_ENFORCE;
   gcc_unreachable ();
 }
 
@@ -1241,6 +1591,8 @@ check_contract_on_defaulted_or_deleted (tree decl, bool deleted_p)
 
    See check_postcondition_redecl_parm_types.  */
 
+static GTY(()) hash_map<tree, tree, pch_traits> *postcondition_redecl_parms;
+
 static GTY(()) hash_set<tree> *postcondition_redecl_parms_checked;
 
 static void record_postcondition_redecl_parm (tree, unsigned, tree);
@@ -1795,17 +2147,89 @@ build_contract_function_decls (tree fndecl)
       set_postcondition_function (fndecl, post);
 }
 
-/* Map from FUNCTION_DECL to a FUNCTION_DECL for contract wrapper.  */
+/* Map from a callee FUNCTION_DECL to a TREE_LIST of (tuple, wrapdecl) pairs.
+   A single callee may have several caller-side wrappers, one per distinct
+   resolved caller-semantic tuple (P3595).  Each list node uses:
+     TREE_PURPOSE = the caller-semantic tuple (see below), and
+     TREE_VALUE   = the wrapper FUNCTION_DECL.
+   The tuple is itself a TREE_LIST whose Nth TREE_VALUE is an INTEGER_CST
+   giving the resolved caller-side semantic for the Nth contract in the
+   callee's full contract-specifier list; NULL_TREE is the sentinel empty
+   tuple used for virtual (P3097) wrappers, which share a single wrapper.  */
 
-static GTY(()) hash_map<tree, tree> *decl_wrapper_fn = nullptr;
+static GTY(()) hash_map<tree, tree, pch_traits> *decl_wrapper_fn = nullptr;
 
 /* Map from the function decl of a wrapper to the function that it wraps.  */
 
 static GTY(()) hash_map<tree, tree, pch_traits> *decl_for_wrapper = nullptr;
 
-/* Makes wrapper the precondition function for FNDECL.  */
+/* Map from a wrapper FUNCTION_DECL to its caller-semantic tuple (a TREE_LIST
+   of INTEGER_CSTs, or NULL_TREE for the virtual sentinel).  Read by the
+   definition pass to set each copied contract's evaluation semantic.  */
+
+static GTY(()) hash_map<tree, tree, pch_traits> *decl_wrapper_tuple = nullptr;
+
+/* Return true if two caller-semantic tuples are element-wise equal.  Each
+   entry's TREE_VALUE is the resolved semantic (INTEGER_CST); its TREE_PURPOSE
+   is the P3595 dynamic descriptor (NULL_TREE when the entry is not dynamic,
+   else a TREE_LIST whose TREE_PURPOSE is the selector name IDENTIFIER and
+   whose TREE_VALUE is the packed linkage/provideweak INTEGER_CST).  Two call
+   sites that resolve to different descriptors must key distinct wrappers, so
+   the descriptor is part of the comparison.  */
+
+static bool
+wrapper_tuples_equal (tree a, tree b)
+{
+  for (; a && b; a = TREE_CHAIN (a), b = TREE_CHAIN (b))
+    {
+      if (tree_to_uhwi (TREE_VALUE (a)) != tree_to_uhwi (TREE_VALUE (b)))
+	return false;
+      tree da = TREE_PURPOSE (a), db = TREE_PURPOSE (b);
+      if ((da == NULL_TREE) != (db == NULL_TREE))
+	return false;
+      /* IDENTIFIER_NODEs are interned, so the name compares by pointer.  */
+      if (da && db
+	  && (TREE_PURPOSE (da) != TREE_PURPOSE (db)
+	      || (tree_to_uhwi (TREE_VALUE (da))
+		  != tree_to_uhwi (TREE_VALUE (db)))))
+	return false;
+    }
+  return a == NULL_TREE && b == NULL_TREE;
+}
+
+/* Store TUPLE as the caller-semantic tuple for wrapper WRAPDECL.  */
 
 static void
+set_wrapper_tuple (tree wrapdecl, tree tuple)
+{
+  hash_map_maybe_create<hm_ggc> (decl_wrapper_tuple);
+  decl_wrapper_tuple->put (wrapdecl, tuple);
+}
+
+/* Return the caller-semantic tuple stored for wrapper WRAPDECL.  */
+
+static tree
+get_wrapper_tuple (tree wrapdecl)
+{
+  tree *result = hash_map_safe_get (decl_wrapper_tuple, wrapdecl);
+  return result ? *result : NULL_TREE;
+}
+
+/* True if WRAPDECL was created for a virtual dispatch (P3097): its stored
+   tuple is the NULL_TREE sentinel.  A qualified call to a virtual function
+   gets a caller-tuple wrapper instead, which calls the function directly and
+   evaluates its contracts caller-side.  */
+
+static bool
+wrapper_for_virtual_dispatch_p (tree wrapdecl)
+{
+  tree *result = hash_map_safe_get (decl_wrapper_tuple, wrapdecl);
+  return result && *result == NULL_TREE;
+}
+
+/* Return the resolved caller-side semantic for the contract at (full-list)
+   position POSITION in WRAPDECL's stored tuple, or CES_IGNORE if absent.  */
+
 static unsigned char
 get_wrapper_tuple_at (tree wrapdecl, unsigned position)
 {
@@ -1832,12 +2256,42 @@ get_wrapper_tuple_at (tree wrapdecl, unsigned position)
    linkage/provideweak INTEGER_CST -- the same layout the callee-side
    CONTRACT_DYNAMIC cache uses.  */
 
-set_contract_wrapper_function (tree fndecl, tree wrapper)
+static tree
+get_wrapper_dyn_at (tree wrapdecl, unsigned position)
+{
+  tree tuple = get_wrapper_tuple (wrapdecl);
+  gcc_checking_assert (!tuple || position < (unsigned) list_length (tuple));
+  for (unsigned i = 0; tuple; tuple = TREE_CHAIN (tuple), i++)
+    if (i == position)
+      return TREE_PURPOSE (tuple);
+  return NULL_TREE;
+}
+
+/* Find an existing wrapper of FNDECL whose stored tuple equals TUPLE, or
+   NULL_TREE if none.  */
+
+static tree
+find_wrapper_for_tuple (tree fndecl, tree tuple)
+{
+  tree *listp = hash_map_safe_get (decl_wrapper_fn, fndecl);
+  if (!listp)
+    return NULL_TREE;
+  for (tree p = *listp; p; p = TREE_CHAIN (p))
+    if (wrapper_tuples_equal (TREE_PURPOSE (p), tuple))
+      return TREE_VALUE (p);
+  return NULL_TREE;
+}
+
+/* Record WRAPPER as the wrapper of FNDECL for caller-semantic tuple TUPLE.  */
+
+static void
+set_wrapper_for_tuple (tree fndecl, tree tuple, tree wrapper)
 {
   gcc_checking_assert (wrapper && fndecl);
   hash_map_maybe_create<hm_ggc> (decl_wrapper_fn);
-  gcc_checking_assert (decl_wrapper_fn && !decl_wrapper_fn->get (fndecl));
-  decl_wrapper_fn->put (fndecl, wrapper);
+  tree *listp = decl_wrapper_fn->get (fndecl);
+  tree node = tree_cons (tuple, wrapper, listp ? *listp : NULL_TREE);
+  decl_wrapper_fn->put (fndecl, node);
 
   /* We need to know the wrapped function when composing the diagnostic.  */
   hash_map_maybe_create<hm_ggc> (decl_for_wrapper);
@@ -1845,19 +2299,9 @@ set_contract_wrapper_function (tree fndecl, tree wrapper)
   decl_for_wrapper->put (wrapper, fndecl);
 }
 
-/* Returns the wrapper function decl for FNDECL, or null if not set.  */
-
-static tree
-get_contract_wrapper_function (tree fndecl)
-{
-  gcc_checking_assert (fndecl);
-  tree *result = hash_map_safe_get (decl_wrapper_fn, fndecl);
-  return result ? *result : NULL_TREE;
-}
-
 /* Given a wrapper function WRAPPER, find the original function decl.  */
 
-static tree
+tree
 get_orig_func_for_wrapper (tree wrapper)
 {
   gcc_checking_assert (wrapper);
@@ -1897,6 +2341,27 @@ build_contract_wrapper_function (tree fndecl)
 
   contracts_fixup_names (wrapdecl, fndecl, /*pre*/false, /*wrapper*/true);
 
+  /* A single callee can have several, non-identical wrappers coexisting in
+     one TU (P3595 caller-side: distinct call sites resolving to distinct
+     caller-semantic tuples, e.g. different dynamic selectors -- see
+     wrapper_tuples_equal).  All wrappers are internal (TREE_PUBLIC is
+     cleared below), but they are still separate definitions and need
+     distinct names or their identical ".contract_wrapper"-suffixed
+     assembler names collide.  The first wrapper for FNDECL keeps the plain
+     name for readability; subsequent ones get a numeric discriminator.  */
+  if (tree *listp = hash_map_safe_get (decl_wrapper_fn, fndecl))
+    {
+      unsigned idx = (unsigned) list_length (*listp);
+      char *nn = xasprintf ("%s.%u",
+			    IDENTIFIER_POINTER (DECL_NAME (wrapdecl)), idx);
+      DECL_NAME (wrapdecl) = get_identifier (nn);
+      free (nn);
+      nn = xasprintf ("%s.%u",
+		      IDENTIFIER_POINTER (DECL_ASSEMBLER_NAME (wrapdecl)), idx);
+      SET_DECL_ASSEMBLER_NAME (wrapdecl, get_identifier (nn));
+      free (nn);
+    }
+
   DECL_SOURCE_LOCATION (wrapdecl) = loc;
   /* The declaration was implicitly generated by the compiler.  */
   DECL_ARTIFICIAL (wrapdecl) = true;
@@ -1921,8 +2386,21 @@ build_contract_wrapper_function (tree fndecl)
 	}
     }
 
-  /* Copy selected attributes from the original function.  */
+  /* Copy selected attributes from the original function.  A call through
+     the wrapper returns exactly when the callee does, so a noreturn callee
+     makes a noreturn wrapper (TREE_THIS_VOLATILE), which flow analysis such
+     as -Wreturn-type relies on.  */
   TREE_USED (wrapdecl) = TREE_USED (fndecl);
+  TREE_THIS_VOLATILE (wrapdecl) = TREE_THIS_VOLATILE (fndecl);
+
+  /* A constexpr/consteval callee needs an equally-constexpr wrapper: when a
+     wrapper is interposed on a call (e.g. a virtual function's contract check),
+     a non-constexpr wrapper would make the whole call unusable in constant
+     evaluation.  The pre/post condition functions inherit this via copy_decl;
+     the wrapper is built from scratch, so propagate it explicitly.  */
+  DECL_DECLARED_CONSTEXPR_P (wrapdecl) = DECL_DECLARED_CONSTEXPR_P (fndecl);
+  if (DECL_IMMEDIATE_FUNCTION_P (fndecl))
+    SET_DECL_IMMEDIATE_FUNCTION_P (wrapdecl);
 
   /* Copy any alignment added.  */
   if (DECL_ALIGN (fndecl))
@@ -1936,17 +2414,33 @@ build_contract_wrapper_function (tree fndecl)
 
   /* We know this is an internal function.  */
   DECL_INTERFACE_KNOWN (wrapdecl) = true;
+
+  /* The wrapper of a C-variadic callee passes the variadic arguments on
+     with __builtin_va_arg_pack, which needs it inlined at every call; it is
+     only ever called directly, so it always can be (DECISIONS.md K12).  */
+  if (stdarg_p (TREE_TYPE (fndecl)))
+    {
+      DECL_DECLARED_INLINE_P (wrapdecl) = true;
+      DECL_DISREGARD_INLINE_LIMITS (wrapdecl) = true;
+      DECL_ATTRIBUTES (wrapdecl)
+	= tree_cons (get_identifier ("always_inline"), NULL_TREE,
+		     DECL_ATTRIBUTES (wrapdecl));
+    }
   return wrapdecl;
 }
+
+/* Return the wrapper of FNDECL whose caller-semantic tuple is TUPLE,
+   creating it (and recording TUPLE) if it does not yet exist.  */
 
 static tree
 get_or_create_contract_wrapper_function (tree fndecl)
 {
-  tree wrapdecl = get_contract_wrapper_function (fndecl);
+  tree wrapdecl = find_wrapper_for_tuple (fndecl, tuple);
   if (!wrapdecl)
     {
       wrapdecl = build_contract_wrapper_function (fndecl);
-      set_contract_wrapper_function (fndecl, wrapdecl);
+      set_wrapper_for_tuple (fndecl, tuple, wrapdecl);
+      set_wrapper_tuple (wrapdecl, tuple);
     }
   return wrapdecl;
 }
@@ -1957,22 +2451,42 @@ start_function_contracts (tree fndecl)
   if (error_operand_p (fndecl))
     return;
 
-  if (!handle_contracts_p (fndecl))
+  /* Parse any predicate that is still deferred, before anything below reads
+     it.  A function contract is token-cached at its declarator -- the
+     grammar puts the seq after the complete declarator, where the function's
+     parameters are no longer in scope -- and this is the first point at
+     which they are back: start_function has just run store_parm_decls.
+     Everything below needs the parsed form, the shadow check to have a
+     result name and the outlined contract functions to have the capture
+     VAR_DECLs rather than the identifiers the deferred form carries.
+
+     Ahead of handle_contracts_p deliberately: that is false while
+     processing_template_decl, but a template's pattern still has to be
+     PARSED -- leaving it deferred means tsubst_contract meets a
+     DEFERRED_PARSE when the template is instantiated.  Reading the source
+     text is not conditional on whether checks will be emitted.  */
+  cp_late_parse_function_contracts (fndecl);
+
+  /* A lambda's contracts can name its explicit captures, whose proxies
+     start_lambda_function pushes only after this, so they are still
+     deferred here; cp_parser_lambda_body calls again once they are in
+     scope.  */
+  if (!handle_contracts_p (fndecl)
+      || (LAMBDA_FUNCTION_P (fndecl)
+	  && contract_any_deferred_p (get_fn_contract_specifiers (fndecl))))
     return;
 
-  /* If this is not a client side check and definition side checks are
-     disabled, do nothing.  */
-  if (!flag_contracts_definition_check
-      && !DECL_CONTRACT_WRAPPER (fndecl))
-    return;
-
-  /* Check that the postcondition result name, if any, does not shadow a
-     function parameter.  */
+  /* A result name that failed to parse leaves the postcondition unusable.
+     (One that conflicts with a parameter is diagnosed where it is made, by
+     check_result_name_conflict.)  */
   if (tree specs = get_fn_contract_specifiers (fndecl))
     for (tree ca : tree_vec_range (specs))
       if (POSTCONDITION_P (ca)
 	  && POSTCONDITION_IDENTIFIER (ca) == error_mark_node)
 	CONTRACT_CONDITION (ca) = error_mark_node;
+
+  if (!contract_any_active_p (fndecl))
+    return;
 
   /* A postcondition check runs after the returned object has been
      initialized, and a violation handler that throws unwinds straight
@@ -2310,9 +2824,6 @@ emit_contract_statement (tree contract)
       || CONTRACT_CONDITION (contract) == error_mark_node)
     return false;
 
-  if (get_evaluation_semantic (contract) == CES_INVALID)
-    return false;
-
   add_stmt (contract);
   return true;
 }
@@ -2322,6 +2833,19 @@ static tree build_quick_enforce_reaction (location_t);
 static tree build_contract_data_block_address (tree);
 static tree declare_cxa_entry_point (contract_assertion_kind,
 				     contract_evaluation_semantic, int);
+
+static GTY(()) hash_map<tree, tree, pch_traits> *postcondition_retval_temps;
+
+/* Emit the initialization of one postcondition capture (P3098).  TARGET is
+   the capture object -- a VAR_DECL on the inline path, a capture-struct
+   member on the outlined one -- and INIT its initializer.
+
+   A capture is a local variable copy-initialized from its initializer
+   ([dcl.contract.capture]: the capture's initializer is a const lvalue
+   denoting the parameter, or the init-capture's own initializer), so a class
+   type has to go through build_aggr_init.  A bare INIT_EXPR performs no
+   overload resolution: it bit-copies the object, and the capture's
+   destructor then runs on a copy that no constructor ever made.  */
 
 /* Add a call or a direct evaluation of the pre checks.  */
 
@@ -3422,13 +3946,14 @@ update_contract_arguments (tree srcdecl, tree destdecl)
     onto the decl that will be preserved. This is not ideal because the
     redeclaration may have erroneous contracts.
     For non deferred contracts we currently do copy and remap, which is doing
+    more than we need.
+
     The copy is unconditional on purpose, and it is tempting to think it
     should not be: the first declaration's contracts are the function's, so
     a later declaration's look like they exist only to be compared.  An
     out-of-line DEFINITION also arrives here as SRCDECL, though, and its own
     token cache is what its body has to be checked against -- withhold the
     copy and it is checked against the in-class text instead.  */
-    more than we need.  */
   if (contract_any_deferred_p (src_contracts))
     set_fn_contract_specifiers (destdecl, src_contracts);
   else
@@ -3442,19 +3967,47 @@ update_contract_arguments (tree srcdecl, tree destdecl)
     }
 }
 
-/* Checks if a contract check wrapper is needed for fndecl.  */
+/* Compute the ordered caller-side semantic tuple for the contracts of the
+   callee FNDECL, resolved for the call site (CALLER_LOC, CALLER_FNDECL).
+   Returns a TREE_LIST whose Nth TREE_VALUE is an INTEGER_CST giving the
+   resolved caller-side semantic for the Nth contract in FNDECL's full
+   contract list (DECL_ORIGIN order), matching copy_and_remap_contracts.  */
 
-static bool
-should_contract_wrap_call (bool do_pre, bool do_post)
+static tree
+compute_caller_semantic_tuple (tree fndecl, location_t caller_loc,
+			       tree caller_fndecl)
 {
-  /* Only if the target function actually has any contracts.  */
-  if (!do_pre && !do_post)
-    return false;
+  tree tuple = NULL_TREE, *last = &tuple;
+  tree specs = get_fn_contract_specifiers (DECL_ORIGIN (fndecl));
+  if (!specs)
+    return tuple;
 
-
-  return ((flag_contract_client_check > 1)
-	  || ((flag_contract_client_check > 0)
-	      && do_pre));
+  for (tree contract : tree_vec_range (specs))
+    {
+      caller_resolution r
+	= resolve_caller_semantic (contract, DECL_ORIGIN (fndecl),
+				   caller_loc, caller_fndecl);
+      /* When the caller-side resolution is dynamic, carry the descriptor in
+	 the tuple element's TREE_PURPOSE so it can key the wrapper and be
+	 baked into the wrapper's copied contract.  The layout matches the
+	 callee-side CONTRACT_DYNAMIC cache: TREE_PURPOSE = selector name
+	 IDENTIFIER, TREE_VALUE = INTEGER_CST packing (linkage << 1
+	 | provideweak).  TREE_PURPOSE == NULL_TREE means not dynamic.  */
+      tree desc = NULL_TREE;
+      if (r.dyn_name)
+	{
+	  unsigned HOST_WIDE_INT packed
+	    = ((unsigned HOST_WIDE_INT) r.dyn_linkage << 1)
+	      | (r.dyn_provideweak ? 1 : 0);
+	  desc = build_tree_list (get_identifier (r.dyn_name),
+				  build_int_cst (uint16_type_node, packed));
+	}
+      tree node
+	= build_tree_list (desc, build_int_cst (uint16_type_node, r.semantic));
+      *last = node;
+      last = &TREE_CHAIN (node);
+    }
+  return tuple;
 }
 
 /* Possibly replace call with a call to a wrapper function which
@@ -3470,18 +4023,50 @@ maybe_contract_wrap_call (tree fndecl, tree call)
   if (error_operand_p (fndecl) || !call || call == error_mark_node)
     return error_mark_node;
 
-  if (!handle_contracts_p (fndecl))
+  if (!handle_caller_contracts_p (fndecl))
     return call;
 
-  bool do_pre = has_active_preconditions (fndecl);
-  bool do_post = has_active_postconditions (fndecl);
+  /* For virtual dispatch with P3097, always wrap -- the wrapper uses
+     callee-side semantics for the interface contracts.  For non-virtual
+     calls (including qualified calls to virtual functions), resolve the
+     caller-side semantic tuple for this call site and check whether any
+     entry is active.  */
+  bool is_virtual = (is_virtual_dispatch
+		     && flag_contracts_p3097
+		     && DECL_IOBJ_MEMBER_FUNCTION_P (fndecl)
+		     && DECL_VIRTUAL_P (fndecl));
 
-  /* Check if we need a wrapper.  */
-  if (!should_contract_wrap_call (do_pre, do_post))
+  /* Virtual wrappers use callee semantics and share a single wrapper per
+     callee, keyed by the empty (NULL_TREE) sentinel tuple.  Non-virtual
+     wrappers are keyed by the resolved caller-semantic tuple.  */
+  tree tuple = NULL_TREE;
+  bool any_active = is_virtual;
+  if (!is_virtual)
+    {
+      tuple = compute_caller_semantic_tuple (fndecl, input_location,
+					     current_function_decl);
+      for (tree t = tuple; t; t = TREE_CHAIN (t))
+	/* A dynamic descriptor (TREE_PURPOSE non-null) forces the wrapper to
+	   be emitted even when the compile-time default is ignore/assume: the
+	   selector may return a checking semantic at run time.  This mirrors
+	   the callee-side contract_active_p, which forces active whenever
+	   CONTRACT_DYNAMIC is present.  Gating on an actual descriptor (not on
+	   a label merely having a compute_semantic facet) preserves the
+	   caller-side opt-in invariant.  */
+	if (TREE_PURPOSE (t)
+	    || !contract_semantic_emits_no_check
+		  (tree_to_uhwi (TREE_VALUE (t))))
+	  {
+	    any_active = true;
+	    break;
+	  }
+    }
+
+  if (!any_active)
     return call;
 
   /* Build the declaration of the wrapper, if we need to.  */
-  tree wrapdecl = get_or_create_contract_wrapper_function (fndecl);
+  tree wrapdecl = get_or_create_contract_wrapper_function (fndecl, tuple);
 
   unsigned nargs = call_expr_nargs (call);
   vec<tree, va_gc> *argwrap;
@@ -3498,12 +4083,13 @@ maybe_contract_wrap_call (tree fndecl, tree call)
   return wrapcall;
 }
 
-/* Map traversal callback to define a wrapper function.
+/* Define a single wrapper function WRAPDECL that wraps callee FNDECL.
    This generates code for client-side contract check wrappers and the
-   noexcept wrapper around the contract violation handler.  */
+   noexcept wrapper around the contract violation handler.  Returns true
+   if the wrapper is (now or already) defined.  */
 
-bool
-define_contract_wrapper_func (const tree& fndecl, const tree& wrapdecl, void*)
+static bool
+define_one_contract_wrapper_func (tree fndecl, tree wrapdecl)
 {
   /* If we already built this function on a previous pass, then do nothing.  */
   if (DECL_INITIAL (wrapdecl) && DECL_INITIAL (wrapdecl) != error_mark_node)
@@ -3540,6 +4126,19 @@ define_contract_wrapper_func (const tree& fndecl, const tree& wrapdecl, void*)
   return true;
 }
 
+static size_t
+count_wrapper_pairs (void)
+{
+  if (!decl_wrapper_fn)
+    return 0;
+  size_t n = 0;
+  for (auto it = decl_wrapper_fn->begin ();
+       it != decl_wrapper_fn->end (); ++it)
+    for (tree p = (*it).second; p; p = TREE_CHAIN (p))
+      n++;
+  return n;
+}
+
 /* If any wrapper functions have been declared, emit their definition.
    This might be called multiple times, as we instantiate functions. When
    the processing here adds more wrappers, then flag to the caller that
@@ -3551,9 +4150,9 @@ emit_contract_wrapper_func (bool done)
 {
   if (!decl_wrapper_fn || decl_wrapper_fn->is_empty ())
     return false;
-  size_t start_elements = decl_wrapper_fn->elements ();
+  size_t start_pairs = count_wrapper_pairs ();
   decl_wrapper_fn->traverse<void *, define_contract_wrapper_func>(NULL);
-  bool more = decl_wrapper_fn->elements () > start_elements;
+  bool more = count_wrapper_pairs () > start_pairs;
   if (done)
     decl_wrapper_fn->empty ();
   gcc_checking_assert (!done || !more);
@@ -4350,11 +4949,26 @@ init_contracts ()
 
 static GTY(()) tree contracts_source_location_impl_type;
 
-/* Build a layout-compatible internal version of source location __impl
-   type.  */
+     - cfun and the statement-list stack, or the add_stmt that appends a
+       contract_assert to the enclosing body finds an empty stmt_list_stack;
+     - current_class_type/current_class_name, or finish_function pops a
+       class scope that start_preparsed_function never pushed (the
+       trampoline's DECL_CONTEXT is the global namespace), tripping the
+       binding-level assertion in poplevel_class;
+     - processing_template_decl, which a postcondition result name raises
+       while its predicate is grokked, and which tsubst_contract raises for
+       a deduced return type; start_preparsed_function would otherwise take
+       its template path and leave current_function_decl unset.
 
-static tree
-get_contracts_source_location_impl_type (tree context = NULL_TREE)
+   push_to_top_level saves all three -- it stacks cfun and installs a fresh
+   scope_chain, so the class scope and processing_template_decl are cleared
+   and restored together.  A trampoline is an ordinary non-template
+   namespace-scope function in every case, so this is also semantically
+   what we want.  */
+
+namespace {
+
+struct trampoline_scope
 {
   if (contracts_source_location_impl_type)
      return contracts_source_location_impl_type;
@@ -5135,9 +5749,24 @@ declare_cxa_entry_point (contract_assertion_kind kind,
 
 
 tree
+/* Emit the check body for CONTRACT under a single, statically known
+   evaluation SEMANTIC.  Returns a BIND_EXPR statement expression, or
+   void_node when the semantic emits no check (ignore/assume), or
+   NULL_TREE on error.  This is the per-semantic core shared by the plain
+   (compile-time-resolved) path and the P3595 dynamic-dispatch path.
+
+   SHARED_DATA_ADDR, when non-NULL, is the address of a violation data block
+   already built for this contract; the check reuses it instead of building a
+   fresh block.  The P3595 dynamic path passes a single block shared across all
+   dispatch arms (the block is identical for every arm of one contract), so we
+   emit one global instead of one per arm.  When NULL (the plain path) the
+   handler-calling semantics build their own block, as before.  */
+
+static tree
+emit_check_for_semantic (tree contract, contract_evaluation_semantic semantic,
+			 tree shared_data_addr = NULL_TREE)
 build_contract_check (tree contract)
 {
-  contract_evaluation_semantic semantic = get_evaluation_semantic (contract);
   bool quick = false;
   bool calls_handler = false;
   switch (semantic)
@@ -5158,17 +5787,21 @@ build_contract_check (tree contract)
   location_t loc = EXPR_LOCATION (contract);
 
   remap_dummy_this (current_function_decl, &CONTRACT_CONDITION (contract));
-  tree condition = CONTRACT_CONDITION (contract);
-  if (condition == error_mark_node)
+  if (CONTRACT_CONDITION (contract) == error_mark_node)
     return NULL_TREE;
 
-  if (!flag_contract_checks_outlined && POSTCONDITION_P (contract))
+  if (POSTCONDITION_P (contract) && !flag_contract_checks_outlined)
     {
       remap_retval (current_function_decl, contract);
-      condition = CONTRACT_CONDITION (contract);
-      if (condition == error_mark_node)
+      if (CONTRACT_CONDITION (contract) == error_mark_node)
 	return NULL_TREE;
     }
+
+  /* Unshare the condition: this helper may be called several times for the
+     same contract (once per case of the P3595 dynamic-dispatch switch), so
+     each emitted check must own an independent copy of the condition tree.
+     The remap steps above operate idempotently on the shared slot.  */
+  tree condition = unshare_expr (CONTRACT_CONDITION (contract));
 
   /* Determine the assertion kind for entry point selection.  */
   contract_assertion_kind kind = get_contract_assertion_kind (contract);
@@ -5189,8 +5822,14 @@ build_contract_check (tree contract)
   tree data_addr = NULL_TREE;
   if (calls_handler)
     {
+      if (shared_data_addr)
+	/* Reuse the block built once for all dynamic-dispatch arms.  */
+	data_addr = shared_data_addr;
+      else
+	{
 	  /* Build a data block for the violation.  */
 	  data_addr = build_contract_data_block_address (contract);
+	}
     }
 
   /* Get the entry points we will call.  */
@@ -5263,6 +5902,41 @@ build_contract_check (tree contract)
   return cc_bind;
 }
 
+/* Emit an unconditional enforced violation for CONTRACT: report the
+   violation as if an "enforce" predicate had evaluated false, then
+   terminate.  Used as the default arm of the P3595 dynamic-dispatch
+   switch, for a selector value that is unknown or maps to no valid
+   semantic (P3595).  Returns a BIND_EXPR statement expression, or
+   NULL_TREE on error.  SHARED_DATA_ADDR is the address of the violation data
+   block already built once for this contract's dynamic dispatch; it is reused
+   here (the block is identical to the one every dispatch arm uses).  */
+
+static tree
+emit_enforced_violation (tree contract, tree shared_data_addr)
+{
+  contract_assertion_kind kind = get_contract_assertion_kind (contract);
+
+  tree cc_bind = build3 (BIND_EXPR, void_type_node, NULL, NULL, NULL);
+  BIND_EXPR_BODY (cc_bind) = push_stmt_list ();
+
+  /* Reuse the violation data block built once for the dynamic dispatch.  */
+
+  /* Call the enforce predicate-false entry point unconditionally.  That
+     entry point is noreturn for CES_ENFORCE, so no explicit terminate is
+     required after it.  */
+  tree entry_pf = declare_cxa_entry_point (kind, CES_ENFORCE,
+					   CDM_PREDICATE_FALSE);
+  finish_expr_stmt (build_call_n (entry_pf, 1, shared_data_addr));
+
+  BIND_EXPR_BODY (cc_bind) = pop_stmt_list (BIND_EXPR_BODY (cc_bind));
+  return cc_bind;
+}
+
+/* P3100: build the violation data block for an implicit contract assertion
+   at LOC with comment COMMENT, and return its address.  The assertion is
+   synthesized for the purpose; it has no label, so the block is the basic
+   one.  Builds GENERIC.  */
+
 static const char *
 contract_dynamic_name (const_tree contract)
 {
@@ -5279,5 +5953,670 @@ contract_dynamic_linkage (const_tree contract)
   gcc_checking_assert (d);
   return (unsigned char) (tree_to_uhwi (TREE_VALUE (d)) >> 1);
 }
+
+static bool
+contract_dynamic_provideweak (const_tree contract)
+{
+  tree d = CONTRACT_DYNAMIC (contract);
+  gcc_checking_assert (d);
+  return (tree_to_uhwi (TREE_VALUE (d)) & 1) != 0;
+}
+
+/* The type std::contracts::NAME_ID if <contracts> has declared it, else
+   NULL_TREE.  Unlike lookup_std_contracts_type, this only looks: it never
+   injects a placeholder class, which would conflict with the header's own
+   declaration of anything that is not a class (evaluation_semantic and
+   violation_handled are enumerations) when <contracts> is included later in
+   the TU.  */
+
+static tree
+find_std_contracts_type (tree name_id)
+{
+  tree ns = lookup_qualified_name (std_node, get_identifier ("contracts"));
+  if (TREE_CODE (ns) != NAMESPACE_DECL)
+    return NULL_TREE;
+  tree decl = lookup_qualified_name (ns, name_id, LOOK_want::TYPE);
+  return TREE_CODE (decl) == TYPE_DECL ? TREE_TYPE (decl) : NULL_TREE;
+}
+
+/* The return type of a dynamic-selection function: the real
+   std::contracts::evaluation_semantic when the header is in scope, else
+   the ABI-compatible uint16.  The return type is not part of the mangled
+   name, so either choice binds to the same symbol.  */
+
+static tree
+dynamic_selector_return_type ()
+{
+  tree t = find_std_contracts_type (get_identifier ("evaluation_semantic"));
+  if (t && t != error_mark_node && TREE_CODE (t) == ENUMERAL_TYPE)
+    return t;
+  return short_unsigned_type_node;
+}
+
+/* Map from selector IDENTIFIER_NODE to its FUNCTION_DECL, so we build at
+   most one decl per unique name per TU.  */
+static GTY(()) hash_map<tree, tree, pch_traits> *dynamic_selector_decls;
+
+/* Selectors whose weak definition must be emitted at end of TU.  Each
+   element is a TREE_LIST: PURPOSE=FUNCTION_DECL, VALUE=INTEGER_CST default
+   semantic.  */
+static GTY(()) vec<tree, va_gc> *pending_weak_selectors;
+
+/* Resolve or synthesize the NAMESPACE_DECL designated by the leading
+   (namespace) components of a P3595 "C++"-linkage selector name.  NAME is
+   the full qualified string (e.g. "mylib::detail::sel"); on return, *FN_ID
+   is the IDENTIFIER_NODE of the final (function) component and the returned
+   tree is the innermost enclosing NAMESPACE_DECL (global_namespace for a
+   bare identifier).  A component that does not yet name a namespace is
+   created via push_namespace, so the weak definition can be emitted there.  */
+
+static tree
+resolve_dynamic_selector_namespace (const char *name, tree *fn_id)
+{
+  /* The qualified name is resolved from the global namespace.  push_namespace
+     starts from the current scope, and the check is built from cp_genericize
+     inside finish_function, while the namespace of the function being
+     finished is still current: resolving from there would find or synthesize
+     the selector inside that namespace and mangle it so (GCC-655).  A
+     member function finished in its class has the class scope current as
+     well, so go to the top level unconditionally.  */
+  const char *sep = strstr (name, "::");
+  if (!sep)
+    {
+      /* Bare identifier: global namespace.  */
+      *fn_id = get_identifier (name);
+      return global_namespace;
+    }
+
+  push_to_top_level ();
+
+  /* Push each leading component; push_namespace resolves an existing
+     namespace of that name in the current scope or creates a new one, and
+     leaves it as current_namespace.  We record how many we pushed so we can
+     pop back out to where we started.  */
+  int pushed = 0;
+  const char *comp = name;
+  const char *next;
+  while ((next = strstr (comp, "::")) != NULL)
+    {
+      tree comp_id = get_identifier_with_length (comp, next - comp);
+      push_namespace (comp_id);
+      pushed++;
+      comp = next + 2;
+    }
+
+  /* COMP now points at the final (function) component.  */
+  *fn_id = get_identifier (comp);
+  tree ns = current_namespace;
+
+  while (pushed-- > 0)
+    pop_namespace ();
+
+  pop_from_top_level ();
+
+  return ns;
+}
+
+/* Look up the P3595 "C++"-linkage selector NAME as a qualified name from
+   the global namespace, following inline namespaces as qualified lookup
+   does, and return the declared function with the selector's signature
+   (returning RET_TYPE, no parameters) that it names, or NULL_TREE.  Only
+   declarations visible at the point of the check are found.  */
+
+static tree
+lookup_declared_dynamic_selector (const char *name, tree ret_type)
+{
+  tree scope = global_namespace;
+  const char *comp = name;
+  const char *next;
+  while ((next = strstr (comp, "::")) != NULL)
+    {
+      tree comp_id = get_identifier_with_length (comp, next - comp);
+      scope = lookup_qualified_name (scope, comp_id, LOOK_want::NAMESPACE,
+				     /*complain=*/false);
+      if (TREE_CODE (scope) != NAMESPACE_DECL)
+	return NULL_TREE;
+      scope = ORIGINAL_NAMESPACE (scope);
+      comp = next + 2;
+    }
+
+  tree fns = lookup_qualified_name (scope, get_identifier (comp),
+				    LOOK_want::NORMAL, /*complain=*/false);
+  if (fns == error_mark_node)
+    return NULL_TREE;
+  for (tree fn : lkp_range (fns))
+    if (TREE_CODE (fn) == FUNCTION_DECL
+	&& DECL_NAMESPACE_SCOPE_P (fn)
+	&& TYPE_ARG_TYPES (TREE_TYPE (fn)) == void_list_node
+	&& same_type_p (TREE_TYPE (TREE_TYPE (fn)), ret_type))
+      return fn;
+  return NULL_TREE;
+}
+
+/* True if TYPE is std::contracts::evaluation_semantic, possibly declared
+   in an inline namespace of std::contracts or of std.  */
+
+static bool
+evaluation_semantic_type_p (tree type)
+{
+  type = TYPE_MAIN_VARIANT (type);
+  if (TREE_CODE (type) != ENUMERAL_TYPE
+      || !TYPE_IDENTIFIER (type)
+      || !id_equal (TYPE_IDENTIFIER (type), "evaluation_semantic"))
+    return false;
+  tree ctx = CP_TYPE_CONTEXT (type);
+  while (ctx && TREE_CODE (ctx) == NAMESPACE_DECL
+	 && DECL_NAMESPACE_INLINE_P (ctx))
+    ctx = CP_DECL_CONTEXT (ctx);
+  if (!ctx || TREE_CODE (ctx) != NAMESPACE_DECL
+      || !DECL_NAME (ctx) || !id_equal (DECL_NAME (ctx), "contracts"))
+    return false;
+  ctx = CP_DECL_CONTEXT (ctx);
+  while (TREE_CODE (ctx) == NAMESPACE_DECL && DECL_NAMESPACE_INLINE_P (ctx))
+    ctx = CP_DECL_CONTEXT (ctx);
+  return ctx == std_node;
+}
+
+/* Warn about each declaration this translation unit makes with the
+   qualified name NAME of a "C++"-linkage P3595 dynamic selector but not the
+   selector's type, std::contracts::evaluation_semantic ().  The selector is
+   called with that type whatever the declaration says.  A function of that
+   name with parameters, or a template, has another symbol and is left
+   alone; a variable of that name cannot be the selector.  */
+
+static void
+diagnose_mistyped_dynamic_selector (const char *name)
+{
+  tree scope = global_namespace;
+  const char *comp = name;
+  const char *next;
+  while ((next = strstr (comp, "::")) != NULL)
+    {
+      tree comp_id = get_identifier_with_length (comp, next - comp);
+      scope = lookup_qualified_name (scope, comp_id, LOOK_want::NAMESPACE,
+				     /*complain=*/false);
+      if (TREE_CODE (scope) != NAMESPACE_DECL)
+	return;
+      scope = ORIGINAL_NAMESPACE (scope);
+      comp = next + 2;
+    }
+
+  tree found = lookup_qualified_name (scope, get_identifier (comp),
+				      LOOK_want::NORMAL, /*complain=*/false);
+  if (found == error_mark_node)
+    return;
+  for (tree decl : lkp_range (found))
+    {
+      if (!DECL_NAMESPACE_SCOPE_P (decl))
+	continue;
+      if (TREE_CODE (decl) == FUNCTION_DECL)
+	{
+	  if (TYPE_ARG_TYPES (TREE_TYPE (decl)) != void_list_node
+	      || undeduced_auto_decl (decl)
+	      || evaluation_semantic_type_p (TREE_TYPE (TREE_TYPE (decl))))
+	    continue;
+	  warning_at (DECL_SOURCE_LOCATION (decl), OPT_Wcontract_configuration,
+		      "function %qD has the name of the dynamic contract "
+		      "selector %qs in the contract configuration, but its "
+		      "type %qT is not "
+		      "%<std::contracts::evaluation_semantic ()%>",
+		      decl, name, TREE_TYPE (decl));
+	}
+      else if (VAR_P (decl))
+	warning_at (DECL_SOURCE_LOCATION (decl), OPT_Wcontract_configuration,
+		    "variable %qD has the name of the dynamic contract "
+		    "selector %qs in the contract configuration, but it is "
+		    "not a function of type "
+		    "%<std::contracts::evaluation_semantic ()%>",
+		    decl, name);
+    }
+}
+
+/* Return the FUNCTION_DECL for the P3595 dynamic-selection function NAME.
+   LINKAGE selects how NAME is interpreted:
+
+   - CDL_CXX ("C++"): NAME is a (possibly fully-qualified) C++ name.  The
+     enclosing namespaces are resolved/synthesized and the FUNCTION_DECL is
+     built with the innermost NAMESPACE_DECL as DECL_CONTEXT and C++ language,
+     so normal C++ mangling applies (e.g. "mylib::contract_semantic" ->
+     _ZN5mylib17contract_semanticEv).
+
+   - CDL_C ("C"): NAME is used verbatim as the assembler symbol (via
+     SET_DECL_ASSEMBLER_NAME) with C language, so no mangling is applied.
+     This lets a user target any symbol, including a mangled C++ symbol.
+
+   Decls are cached (deduplicated) per unique NAME string per TU.  When
+   PROVIDEWEAK, schedule a weak definition returning DEF_SEM to be emitted
+   once for this name at end of TU.  */
+
+static tree
+get_dynamic_selector_decl (const char *name, unsigned char linkage,
+			   bool provideweak,
+			   contract_evaluation_semantic def_sem)
+{
+  /* Key the cache by the full NAME string: distinct qualified names (or
+     distinct verbatim C symbols) map to distinct decls.  */
+  tree key = get_identifier (name);
+
+  hash_map_maybe_create<hm_ggc> (dynamic_selector_decls, 8);
+
+  if (tree *cached = dynamic_selector_decls->get (key))
+    return *cached;
+
+  tree ret_type = dynamic_selector_return_type ();
+  tree fntype = build_function_type_list (ret_type, NULL_TREE);
+
+  tree fndecl;
+  if (linkage == CDL_C)
+    {
+      /* Verbatim C symbol: a global-scope decl whose assembler name is NAME
+	 exactly, with C language so mangling is suppressed.  */
+      tree fn_id = get_identifier (name);
+      fndecl = build_lang_decl_loc (BUILTINS_LOCATION, FUNCTION_DECL,
+				    fn_id, fntype);
+      DECL_CONTEXT (fndecl) = FROB_CONTEXT (global_namespace);
+      SET_DECL_LANGUAGE (fndecl, lang_c);
+      SET_DECL_ASSEMBLER_NAME (fndecl, get_identifier (name));
+    }
+  else
+    {
+      /* C++ name, possibly qualified: build in the resolved namespace with
+	 C++ language so the symbol mangles normally.  When the name finds a
+	 declared selector (possibly through an inline namespace, possibly
+	 with an abi_tag), take its context and symbol instead.  */
+      tree fn_id;
+      tree ns = resolve_dynamic_selector_namespace (name, &fn_id);
+      tree decl = lookup_declared_dynamic_selector (name, ret_type);
+      fndecl = build_lang_decl_loc (BUILTINS_LOCATION, FUNCTION_DECL,
+				    fn_id, fntype);
+      DECL_CONTEXT (fndecl)
+	= decl ? CP_DECL_CONTEXT (decl) : FROB_CONTEXT (ns);
+      SET_DECL_LANGUAGE (fndecl, lang_cplusplus);
+      if (decl)
+	SET_DECL_ASSEMBLER_NAME (fndecl, DECL_ASSEMBLER_NAME (decl));
+    }
+
+  TREE_PUBLIC (fndecl) = true;
+  DECL_EXTERNAL (fndecl) = true;
+  DECL_ARTIFICIAL (fndecl) = true;
+
+  dynamic_selector_decls->put (key, fndecl);
+
+  if (provideweak)
+    vec_safe_push (pending_weak_selectors,
+		   build_tree_list (fndecl,
+				    build_int_cst (ret_type, (int) def_sem)));
+
+  return fndecl;
+}
+
+/* Emit the scheduled weak definitions of dynamic-selection functions.
+   Called at end of TU from maybe_emit_violation_handler_wrappers.  Each
+   weak definition simply returns the entry's compile-time default
+   semantic, so a program links and runs with no user-supplied selector,
+   while a strong user definition overrides it at link time.  First warn
+   about any declaration of a configured selector's name with the wrong
+   type.  */
+
+static void
+emit_pending_weak_selectors ()
+{
+  /* Every selector the configuration names is checked against the
+     declarations of its name, whether or not a contract used it.  */
+  contract_config_for_each_cxx_selector (diagnose_mistyped_dynamic_selector);
+
+  if (!pending_weak_selectors)
+    return;
+
+  /* Symbols we have already emitted a weak definition for, keyed by the final
+     assembler name.  The per-name decl cache (dynamic_selector_decls) already
+     collapses two config entries that name the same selector with the same
+     string into one pending entry, so one weak is emitted.  This set adds the
+     final backstop: two config entries whose *distinct* name strings resolve to
+     the same symbol (e.g. a "C++" name mylib::sel and a "C" verbatim mangled
+     _ZN5mylib3selEv) still yield at most one weak definition, never a
+     duplicate-symbol link error.  */
+  hash_set<tree> emitted_asm_names;
+
+  unsigned i;
+  tree elt;
+  FOR_EACH_VEC_ELT (*pending_weak_selectors, i, elt)
+    {
+      tree fndecl = TREE_PURPOSE (elt);
+      tree def_val = TREE_VALUE (elt);
+
+      /* Already emitted a weak for this exact symbol via another entry.  */
+      if (emitted_asm_names.contains (DECL_ASSEMBLER_NAME (fndecl)))
+	continue;
+
+      /* If the user (or some other definition) already provides a strong
+	 definition of this selector in this TU, emitting our weak definition
+	 too would produce two definitions of the same symbol.  Detect this by
+	 the *assembler* name: for a "C++" qualified selector the user's strong
+	 definition lives in the resolved namespace and mangles to this symbol;
+	 for a "C" verbatim selector the strong definition is any C++ function
+	 whose mangled name happens to equal this symbol.  A symtab lookup by
+	 assembler name catches both, and works for non-global namespaces, so
+	 it needs no source-level (namespace-scoped) name lookup.  */
+      tree asm_name = DECL_ASSEMBLER_NAME (fndecl);
+      bool user_defined = false;
+      for (symtab_node *node = symtab_node::get_for_asmname (asm_name);
+	   node; node = node->next_sharing_asm_name)
+	{
+	  tree decl = node->decl;
+	  if (decl != fndecl
+	      && TREE_CODE (decl) == FUNCTION_DECL
+	      && DECL_INITIAL (decl) != NULL_TREE
+	      && DECL_ASSEMBLER_NAME_SET_P (decl)
+	      && DECL_ASSEMBLER_NAME (decl) == asm_name)
+	    {
+	      user_defined = true;
+	      break;
+	    }
+	}
+      if (user_defined)
+	continue;
+
+      emitted_asm_names.add (DECL_ASSEMBLER_NAME (fndecl));
+
+      DECL_EXTERNAL (fndecl) = false;
+      DECL_INITIAL (fndecl) = error_mark_node;
+      DECL_RESULT (fndecl) = NULL_TREE;
+
+      start_preparsed_function (fndecl, NULL_TREE, SF_DEFAULT | SF_PRE_PARSED);
+      tree body = begin_function_body ();
+      tree compound_stmt = begin_compound_stmt (BCS_FN_BODY);
+      finish_return_stmt (def_val);
+      finish_compound_stmt (compound_stmt);
+      finish_function_body (body);
+      tree fn = finish_function (false);
+      declare_weak (fn);
+      expand_or_defer_fn (fn);
+    }
+
+  vec_free (pending_weak_selectors);
+  pending_weak_selectors = NULL;
+}
+
+/* Compute T(RAW) at compile time for the P3595 dynamic-dispatch transform:
+   clamp RAW to the label's allowed set via the resolution fallback order, then
+   apply the compute_semantic facet.  Sets *OK to false (and returns
+   CES_INVALID) when the clamp finds no allowed semantic or the compute_semantic
+   result is disallowed -- stage 2 turns that sentinel into a runtime enforced
+   violation.  This mirrors contract_semantic_best_fit + apply_compute_semantic
+   in contracts-config.cc / this file, but never issues a compile-time
+   error.  */
+
+static contract_evaluation_semantic
+transform_semantic (tree contract, tree fndecl,
+		    contract_evaluation_semantic raw, bool *ok)
+{
+  contract_query q = make_contract_query (contract, fndecl);
+  uint16_t mask = q.allowed_mask;
+
+  /* Stage: clamp to the allowed set using the best-fit safety-level search.  */
+  uint16_t s
+    = (uint16_t) contract_semantic_best_fit ((contract_evaluation_semantic) raw,
+					     mask);
+
+  /* Stage: apply compute_semantic (returns CES_INVALID if disallowed).  */
+  if (s != CES_INVALID)
+    s = apply_compute_semantic_value (CONTRACT_LABEL (contract), s, mask,
+				      EXPR_LOCATION (contract));
+
+  *ok = (s != CES_INVALID) && (mask & (1 << s)) != 0;
+  return (contract_evaluation_semantic) (*ok ? s : (uint16_t) CES_INVALID);
+}
+
+/* Does CONTRACT's label transform the raw selector value non-trivially?
+   True when a compute_semantic facet is present or allowed_semantics narrows
+   the set the flags allow -- in which case the P3595 dynamic path must emit
+   the two-stage map/dispatch.  When false each value a selector may return
+   only needs adjusting to the flag-gated set (dynamic_adjusted_semantic), and
+   the single-stage cascade is used.  */
+
+static bool
+contract_label_transforms_p (tree contract, tree fndecl)
+{
+  tree label = CONTRACT_LABEL (contract);
+  if (label_has_compute_semantic (label))
+    return true;
+  contract_query q = make_contract_query (contract, fndecl);
+  return q.allowed_mask != contract_base_allowed_mask ();
+}
+
+/* The semantic a check with no transforming label evaluates with when its
+   dynamic selector returns RAW, one of dynamic_raw_semantics: RAW adjusted to
+   the flag-gated set (D3595R1, "Adjusting a Semantic to the Allowed Set"),
+   which always has the four C++26 semantics, so the result is valid.  An
+   allowed assume is evaluated as ignore.  */
+
+static contract_evaluation_semantic
+dynamic_adjusted_semantic (int raw)
+{
+  contract_evaluation_semantic s
+    = contract_semantic_best_fit ((contract_evaluation_semantic) raw,
+				  contract_base_allowed_mask ());
+  return s == CES_ASSUME ? CES_IGNORE : s;
+}
+
+/* Emit DEST = T(RAW), where RAW is the value a P3595 dynamic selector
+   returned for CONTRACT and T maps each value a selector may return to the
+   semantic to evaluate with -- the label's transform if TRANSFORMS, and the
+   adjustment to the flag-gated set otherwise -- or to CES_INVALID when the
+   result is not allowed or RAW is not a value a selector may return.  */
+
+static void
+emit_dynamic_semantic_map (tree contract, tree raw, tree ret_type, tree dest,
+			   bool transforms)
+{
+  location_t loc = EXPR_LOCATION (contract);
+
+  auto_vec<tree, 7> map_ifs;
+  for (int s : dynamic_raw_semantics ())
+    {
+      tree cmp = build2 (EQ_EXPR, boolean_type_node, raw,
+			 build_int_cst (ret_type, s));
+      tree if_stmt = begin_if_stmt ();
+      finish_if_stmt_cond (cmp, if_stmt);
+      bool ok = true;
+      contract_evaluation_semantic eff_sem
+	= (transforms
+	   ? transform_semantic (contract, current_function_decl,
+				 (contract_evaluation_semantic) s, &ok)
+	   : dynamic_adjusted_semantic (s));
+      /* A dynamically-resolved "assume" cannot inform the optimizer -- the
+	 predicate is never evaluated on this path, so there is nothing to
+	 assume from -- and the only universally-correct behavior is to do
+	 exactly what "ignore" does: no check, no violation, continue.  Map
+	 it to CES_IGNORE so stage 2's ignore arm handles it.  The transform
+	 yields assume only when -fcontracts-allow-assume put it in the
+	 allowed set; otherwise it was adjusted away.  */
+      int eff_val = !ok ? (int) CES_INVALID
+		  : eff_sem == CES_ASSUME ? (int) CES_IGNORE
+		  : (int) eff_sem;
+      finish_expr_stmt
+	(cp_build_modify_expr (loc, dest, NOP_EXPR,
+			       build_int_cst (short_unsigned_type_node,
+					      eff_val),
+			       tf_warning_or_error));
+      finish_then_clause (if_stmt);
+      begin_else_clause (if_stmt);
+      map_ifs.safe_push (if_stmt);
+    }
+  /* Default (unknown raw value): CES_INVALID.  */
+  finish_expr_stmt
+    (cp_build_modify_expr (loc, dest, NOP_EXPR,
+			   build_int_cst (short_unsigned_type_node,
+					  (int) CES_INVALID),
+			   tf_warning_or_error));
+  for (int i = map_ifs.length () - 1; i >= 0; i--)
+    {
+      finish_else_clause (map_ifs[i]);
+      finish_if_stmt (map_ifs[i]);
+    }
+}
+
+/* Emit the stage-2 dispatch of CONTRACT, a dynamically selected contract,
+   on DISPATCH_VAL, of type DISPATCH_TYPE: the check for each semantic in
+   dynamic_dispatch_semantics, each emitted once, and an enforced violation,
+   whose data block is at DATA_ADDR, for any other value.  If RAW,
+   DISPATCH_VAL is the selector's own value, and each arm also takes the
+   values dynamic_adjusted_semantic maps to its semantic; otherwise it has
+   already been mapped (emit_dynamic_semantic_map).  Nested if-statements,
+   opened outermost-first and closed innermost-first so that their else
+   clauses nest into the enforced-violation default.  */
+
+static void
+emit_dynamic_dispatch (tree contract, tree dispatch_val, tree dispatch_type,
+		       tree data_addr, bool raw)
+{
+  auto_vec<tree, 6> if_stmts;
+  for (int s : dynamic_dispatch_semantics ())
+    {
+      tree cmp = NULL_TREE;
+      for (int r : dynamic_raw_semantics ())
+	{
+	  if (raw ? dynamic_adjusted_semantic (r) != s : r != s)
+	    continue;
+	  tree eq = build2 (EQ_EXPR, boolean_type_node, dispatch_val,
+			    build_int_cst (dispatch_type, r));
+	  cmp = (cmp ? build2 (TRUTH_ORIF_EXPR, boolean_type_node, cmp, eq)
+		 : eq);
+	}
+      tree if_stmt = begin_if_stmt ();
+      finish_if_stmt_cond (cmp, if_stmt);
+      tree body = emit_check_for_semantic (contract,
+					   (contract_evaluation_semantic) s,
+					   data_addr);
+      if (body && body != void_node && body != error_mark_node)
+	add_stmt (body);
+      finish_then_clause (if_stmt);
+      begin_else_clause (if_stmt);
+      if_stmts.safe_push (if_stmt);
+    }
+
+  /* Final else: an unknown value (raw dispatch) or the CES_INVALID sentinel
+     (two-stage map) yields an enforced violation.  */
+  tree def_body = emit_enforced_violation (contract, data_addr);
+  if (def_body && def_body != error_mark_node)
+    add_stmt (def_body);
+
+  /* Close the else clauses / if statements, innermost first.  */
+  for (int i = if_stmts.length () - 1; i >= 0; i--)
+    {
+      finish_else_clause (if_stmts[i]);
+      finish_if_stmt (if_stmts[i]);
+    }
+}
+
+/* If CONTRACT is one of the statements recorded in dynamic_selection_sites
+   for a dynamically selected postcondition with captures, return what it
+   becomes: the statement that calls the selector and stores the mapped
+   semantic, or the postcondition check that dispatches on the stored
+   semantic without calling the selector again.  SEMANTIC is the compile-time
+   semantic, which the selector's weak default returns.  Otherwise return
+   NULL_TREE.  */
+
+tree
+build_contract_check (tree contract)
+{
+  contract_evaluation_semantic semantic
+    = ensure_evaluation_semantic (contract, current_function_decl, false);
+
+  /* Plain (non-dynamic) contract: emit the single resolved check.  */
+  const char *dyn_name = contract_dynamic_name (contract);
+  if (!dyn_name)
+    return emit_check_for_semantic (contract, semantic);
+
+  /* P3595 dynamic selection.  Dispatch on the selector's runtime return value,
+     emitting each distinct check body exactly once and driving an unknown value
+     to an enforced violation.
+
+     This runs during genericization, where the parser's switch machinery
+     (finish_case_label et al.) is not available, so each dispatch is built
+     as an if / else-if cascade comparing a value against each semantic.  The
+     statement-tree if builders (begin_if_stmt ...) are the same ones the
+     non-dynamic check body uses at this stage.
+
+     When the contract's label transforms the raw value non-trivially (an
+     allowed_semantics facet narrows the set, or a compute_semantic facet is
+     present), a TWO-STAGE form is emitted:
+
+       stage 1: eff = T(raw), mapping each semantic a selector may return to
+		its compile-time transform T() (or CES_INVALID when the result
+		is disallowed), an allowed assume to ignore, and an unknown raw
+		value to CES_INVALID.
+       stage 2: dispatch on eff, calling emit_check_for_semantic for each
+		semantic dispatched on and emit_enforced_violation for
+		CES_INVALID.
+
+     With no transforming label stage 1 is skipped and stage 2 dispatches
+     directly on the raw selector value, each arm also taking the values that
+     are adjusted to its semantic (dynamic_adjusted_semantic): assume, allowed
+     or not, takes the ignore arm, and without -fcontracts-p4298 a noexcept
+     semantic takes the arm of its throwing counterpart.  */
+  bool provideweak = contract_dynamic_provideweak (contract);
+  unsigned char linkage = contract_dynamic_linkage (contract);
+
+  tree fndecl = get_dynamic_selector_decl (dyn_name, linkage, provideweak,
+					   semantic);
+  tree ret_type = TREE_TYPE (TREE_TYPE (fndecl));
+
+  tree cc_bind = build3 (BIND_EXPR, void_type_node, NULL, NULL, NULL);
+  BIND_EXPR_BODY (cc_bind) = push_stmt_list ();
+
+  /* The violation data block is identical for every dispatch arm of this
+     contract (same source location, comment, kind, ...), so build it ONCE here
+     and reuse its address across all arms and the enforced-violation default,
+     rather than emitting a duplicate global per arm.  */
+  tree data_addr = build_contract_data_block_address (contract);
+
+  tree raw = save_expr (build_call_n (fndecl, 0));
+
+  bool transforms
+    = contract_label_transforms_p (contract, current_function_decl);
+
+  /* The value stage 2 dispatches on: the raw selector value, or the
+     transformed "eff" temporary for the two-stage form.  */
+  tree dispatch_val = raw;
+  tree dispatch_type = ret_type;
+
+  if (transforms)
+    {
+      /* Stage 1: eff = T(raw).  Introduce a uint16 temporary added to the
+	 enclosing BIND_EXPR, then a cascade assigning T(s) for each known raw
+	 value and CES_INVALID for the default (unknown) case.  */
+      location_t loc = EXPR_LOCATION (contract);
+      tree eff = build_decl (loc, VAR_DECL, NULL, short_unsigned_type_node);
+      DECL_ARTIFICIAL (eff) = true;
+      DECL_IGNORED_P (eff) = true;
+      DECL_CONTEXT (eff) = current_function_decl;
+      layout_decl (eff, 0);
+      add_decl_expr (eff);
+      DECL_CHAIN (eff) = BIND_EXPR_VARS (cc_bind);
+      BIND_EXPR_VARS (cc_bind) = eff;
+
+      emit_dynamic_semantic_map (contract, raw, ret_type, eff,
+				 /*transforms=*/true);
+
+      dispatch_val = eff;
+      dispatch_type = short_unsigned_type_node;
+    }
+
+  /* Stage 2 (or the sole stage when no label transforms the value).  */
+  emit_dynamic_dispatch (contract, dispatch_val, dispatch_type, data_addr,
+			 /*raw=*/!transforms);
+
+  BIND_EXPR_BODY (cc_bind) = pop_stmt_list (BIND_EXPR_BODY (cc_bind));
+  return cc_bind;
+}
+
+/* P3400 [expr.contract.control]: contract_control (EXPR) is an lvalue
+   denoting a constexpr object with a deduced type initialized by its
+   constant-expression EXPR.  The object is made as a template parameter
+   object is, so one object stands for each type and value.  In a template
+   the expression is kept as a CONTRACT_CONTROL_EXPR and finished at
+   instantiation.  */
 
 #include "gt-cp-contracts.h"

@@ -603,6 +603,10 @@ Wconstant-logical-operand
 C ObjC C++ ObjC++ Var(warn_constant_logical_operand) Warning LangEnabledBy(C ObjC C++ ObjC++,Wall)
 Warn for constant operands of logical operators other than 0 or 1.
 
+Wcontract-configuration
+C ObjC C++ ObjC++ Var(warn_contract_configuration) Init(1) Warning
+Warn about problems in the contract configuration (P3595).
+
 Wconversion
 C ObjC C++ ObjC++ Var(warn_conversion) Warning
 Warn for implicit type conversions that may change a value.
@@ -1912,7 +1916,7 @@ fcontracts
 C++ ObjC++ Var(flag_contracts) Init(0)
 Enable features proposed for C++26 Contracts.
 
-; Keep these in step with the values in cp/contracts.h
+; Keep these in step with the values in c-family/contracts-config.h
 
 Enum
 Name(contract_semantic) Type(int)  UnknownError(unrecognized contract evaluation semantic %qs)
@@ -1950,6 +1954,18 @@ fcontract-comment-from-expression
 C++ ObjC++ Var(flag_contract_comment_from_expression) Init(0)
 -fcontract-comment-from-expression	Form the comment of a contract violation
 by printing the predicate, not from its source text.
+
+fcontract-configuration=
+C C++ ObjC ObjC++ Joined RejectNegative
+-fcontract-configuration=<json>	Provide inline JSON contract configuration.
+
+fcontract-configuration-file=
+C C++ ObjC ObjC++ Joined RejectNegative
+-fcontract-configuration-file=<path>	Load contract configuration from a JSON file.
+
+fcontract-group-evaluation-semantic=
+C C++ ObjC ObjC++ Joined RejectNegative
+-fcontract-group-evaluation-semantic=<group>:<semantic>[,...]	Set the evaluation semantic for contracts in the named groups.
 
 Enum
 Name(client_contract_check) Type(int)  UnknownError(unrecognized client contract check option %qs)
