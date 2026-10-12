@@ -318,6 +318,8 @@ extern tree build_implicit_shift_check
   (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
 extern tree build_implicit_divide_overflow_check
   (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
+extern tree build_implicit_float_cast_check
+  (tree, location_t, contract_evaluation_semantic, tree, tree);
 extern void maybe_instantiate_contracts (tree, bool = false);
 
 /* Contract data-block ABI constants.
