@@ -3353,6 +3353,9 @@ void
 handle_contract_violation (const std::contracts::contract_violation&);
 @end smallexample
 
+As an extension, @code{__pre} and @code{__post} may be written in place
+of @code{pre} and @code{post} wherever contracts are enabled.
+
 @opindex fcontract-evaluation-semantic
 @item -fcontract-evaluation-semantic=@var{semantic}
 Set the semantic with which contracts will be evaluated to @var{semantic}.
