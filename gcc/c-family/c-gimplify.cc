@@ -782,7 +782,10 @@ c_genericize (tree fndecl)
   dump_flags_t local_dump_flags;
   struct cgraph_node *cgn;
 
-  if (flag_sanitize & SANITIZE_BOUNDS)
+  /* Also walk for P3100 implicit array-bounds contract assertions, which reuse
+     the same ARRAY_REF walk (a no-op unless a subscript's site resolves to a
+     checking/defining semantic).  */
+  if ((flag_sanitize & SANITIZE_BOUNDS) || flag_contracts_p3100)
     {
       hash_set<tree> pset;
       walk_tree (&DECL_SAVED_TREE (fndecl), ubsan_walk_array_refs_r, &pset,

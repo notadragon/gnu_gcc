@@ -855,6 +855,72 @@ ubsan_array_ref_instrumented_p (tree t)
 	 && CALL_EXPR_IFN (TREE_OPERAND (op1, 0)) == IFN_UBSAN_BOUNDS;
 }
 
+/* P3100: whether ARRAY, the array operand of an ARRAY_REF, is a trailing
+   array member -- of an object accessed through a pointer, and of each
+   enclosing aggregate in turn -- that may be used as a flexible array
+   member, and so has no bound to check.  -fstrict-flex-arrays decides which
+   sizes qualify, in C++ as in C.  The walk is ubsan_instrument_bounds's,
+   which applies the levels in C only.  */
+
+static bool
+p3100_flexible_array_member_like_p (tree array)
+{
+  tree base = get_base_address (array);
+  if (TREE_CODE (array) != COMPONENT_REF
+      || !base || !(INDIRECT_REF_P (base) || TREE_CODE (base) == MEM_REF))
+    return false;
+
+  tree next = NULL_TREE;
+  for (tree cref = array; TREE_CODE (cref) == COMPONENT_REF;
+       cref = TREE_OPERAND (cref, 0))
+    {
+      tree field = TREE_OPERAND (cref, 1);
+      if (TREE_CODE (TREE_TYPE (TREE_OPERAND (cref, 0))) == RECORD_TYPE)
+	for (next = DECL_CHAIN (field);
+	     next && TREE_CODE (next) != FIELD_DECL;
+	     next = DECL_CHAIN (next))
+	  ;
+      if (next)
+	/* Not a last element.  */
+	break;
+      tree type = TREE_TYPE (field);
+      if (TREE_CODE (type) == ARRAY_TYPE && TYPE_DOMAIN (type) != NULL_TREE)
+	{
+	  unsigned l = c_strict_flex_array_level_of (field);
+	  tree max = TYPE_MAX_VALUE (TYPE_DOMAIN (type));
+	  if (max == NULL_TREE)
+	    {
+	      /* C [0] */
+	      if (COMPLETE_TYPE_P (type) && integer_zerop (TYPE_SIZE (type))
+		  && l == 3)
+		next = field;
+	    }
+	  else if (TREE_CODE (max) == INTEGER_CST)
+	    {
+	      if (c_dialect_cxx () && integer_all_onesp (max))
+		{
+		  /* C++ [0] */
+		  if (l == 3)
+		    next = field;
+		}
+	      else if (integer_zerop (max))
+		{
+		  /* C/C++ [1] */
+		  if (l >= 2)
+		    next = field;
+		}
+	      else if (l >= 1)
+		next = field;
+	    }
+	  if (next)
+	    break;
+	}
+      /* The last field of its aggregate, which must in turn be the last
+	 field of the one containing it.  */
+    }
+  return !next;
+}
+
 /* Instrument an ARRAY_REF or an address computation whose base address is
    a call to .ACCESS_WITH_SIZE, if it hasn't already been instrumented.
    IGNORE_OFF_BY_ONE is true if the ARRAY_REF is inside a ADDR_EXPR, or the
@@ -869,11 +935,60 @@ ubsan_maybe_instrument_array_ref (tree *expr_p, bool ignore_off_by_one)
   tree factor = NULL_TREE;
   int index_n = 0;  /* the operand position of INDEX in the parent tree.  */
 
+  bool do_sanitize
+    = sanitize_flags_p (SANITIZE_BOUNDS | SANITIZE_BOUNDS_STRICT);
   if (!ubsan_array_ref_instrumented_p (*expr_p)
-      && sanitize_flags_p (SANITIZE_BOUNDS | SANITIZE_BOUNDS_STRICT)
+      && (do_sanitize || flag_contracts_p3100)
       && current_function_decl != NULL_TREE)
     {
-      if (TREE_CODE (*expr_p) == ARRAY_REF)
+      /* P3100 implicit array-bounds contract assertion.  It takes precedence
+	 over the sanitizer, which checks the subscript only when no contract
+	 applies.  */
+      bool contract_applied = false;
+      if (TREE_CODE (*expr_p) == ARRAY_REF && flag_contracts_p3100)
+	{
+	  /* Only the statically-known-bound case is handled: the array
+	     operand has an ARRAY_TYPE with a constant upper domain bound.  The
+	     C++ langhook resolves the per-site semantic and builds a guarded
+	     index (out-of-range -> the defined valid index 0) that REPLACES the
+	     original index outright.  */
+	  op0 = TREE_OPERAND (*expr_p, 0);
+	  op1 = TREE_OPERAND (*expr_p, 1);
+	  tree atype = TREE_TYPE (op0);
+	  tree domain = (TREE_CODE (atype) == ARRAY_TYPE
+			 ? TYPE_DOMAIN (atype) : NULL_TREE);
+	  tree maxv = domain ? TYPE_MAX_VALUE (domain) : NULL_TREE;
+	  /* A trailing array that may be used as a flexible array member has
+	     no bound to check, rather than one to redirect every access
+	     to.  */
+	  if (maxv != NULL_TREE && TREE_CODE (maxv) == INTEGER_CST
+	      && !p3100_flexible_array_member_like_p (op0))
+	    {
+	      /* First out-of-range index = max + 1 (+ 1 more when a one-past
+		 address is being formed rather than an element accessed).  */
+	      tree bound
+		= fold_build2 (PLUS_EXPR, TREE_TYPE (maxv), maxv,
+			       build_int_cst (TREE_TYPE (maxv),
+					      1 + ignore_off_by_one));
+	      /* Skip a constant index that is provably in range.  */
+	      if (!(TREE_CODE (op1) == INTEGER_CST
+		    && tree_int_cst_sgn (op1) >= 0
+		    && tree_int_cst_lt (op1, bound)))
+		{
+		  tree g = lang_hooks.build_implicit_bounds_check
+			     (current_function_decl, EXPR_LOCATION (*expr_p),
+			      op1, bound);
+		  if (g != NULL_TREE)
+		    {
+		      TREE_OPERAND (*expr_p, 1) = g;
+		      contract_applied = true;
+		    }
+		}
+	    }
+	}
+      if (contract_applied)
+	;
+      else if (TREE_CODE (*expr_p) == ARRAY_REF && do_sanitize)
 	{
 	  op0 = TREE_OPERAND (*expr_p, 0);
 	  op1 = TREE_OPERAND (*expr_p, 1);
@@ -884,9 +999,10 @@ ubsan_maybe_instrument_array_ref (tree *expr_p, bool ignore_off_by_one)
 	    TREE_OPERAND (*expr_p, 1)
 	      = build2 (COMPOUND_EXPR, TREE_TYPE (op1), e, op1);
 	}
-      else if (is_instrumentable_pointer_array_address (*expr_p, &op0, &op1,
-							&index_p, &index_n,
-							&factor))
+      else if (do_sanitize
+	       && is_instrumentable_pointer_array_address (*expr_p, &op0, &op1,
+							   &index_p, &index_n,
+							   &factor))
 	{
 	  tree e
 	    = ubsan_instrument_bounds_pointer_address (EXPR_LOCATION (*expr_p),
