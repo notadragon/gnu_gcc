@@ -10467,6 +10467,7 @@ cp_build_modify_expr (location_t loc, tree lhs, enum tree_code modifycode,
   bool plain_assign = (modifycode == NOP_EXPR);
   bool compound_side_effects_p = false;
   tree preeval = NULL_TREE;
+  tree overlap_check = NULL_TREE;
 
   /* Avoid duplicate error messages from operands that had errors.  */
   if (error_operand_p (lhs) || error_operand_p (rhs))
@@ -10827,6 +10828,14 @@ cp_build_modify_expr (location_t loc, tree lhs, enum tree_code modifycode,
       goto ret;
     }
 
+  /* P3100: the check of the value stored read from an object overlapping
+     LHS, built before the conversion, while the value read is still found
+     in the right operand: an operand evaluated through its saved address is
+     replaced there.  */
+  if (plain_assign)
+    overlap_check = build_implicit_assign_overlap_check (loc, &lhs, newrhs,
+							 &newrhs);
+
   if (modifycode == INIT_EXPR)
     /* Calls with INIT_EXPR are all direct-initialization, so don't set
        LOOKUP_ONLYCONVERTING.  */
@@ -10865,6 +10874,11 @@ cp_build_modify_expr (location_t loc, tree lhs, enum tree_code modifycode,
       if (result)
 	goto ret;
     }
+
+  /* P3100: the value stored read from an object overlapping LHS.  */
+  if (overlap_check)
+    newrhs = build2 (COMPOUND_EXPR, TREE_TYPE (newrhs), overlap_check,
+		     newrhs);
 
   result = build2_loc (loc, modifycode == NOP_EXPR ? MODIFY_EXPR : INIT_EXPR,
 		       lhstype, lhs, newrhs);

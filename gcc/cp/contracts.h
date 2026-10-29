@@ -464,6 +464,8 @@ extern tree build_implicit_this_operation_check
   (location_t, tree, tree, implicit_this_op);
 extern tree build_implicit_pure_virtual_direct_check
   (location_t, tree);
+extern tree build_implicit_assign_overlap_check
+  (location_t, tree *, tree, tree *);
 extern tree build_implicit_pure_virtual_terminus (tree);
 extern bool contract_constexpr_ignored_p (const_tree);
 extern bool contract_constexpr_terminating_p (const_tree);

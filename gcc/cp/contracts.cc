@@ -12902,6 +12902,179 @@ build_implicit_pure_virtual_direct_check (location_t loc, tree call)
    parameter named directly, through member and subscript operators; NULL_TREE
    otherwise.  */
 
+static tree
+implicit_overlap_base_decl (tree expr)
+{
+  for (;;)
+    {
+      expr = tree_strip_any_location_wrapper (expr);
+      if (TREE_CODE (expr) == COMPONENT_REF
+	  || TREE_CODE (expr) == ARRAY_REF
+	  || TREE_CODE (expr) == REALPART_EXPR
+	  || TREE_CODE (expr) == IMAGPART_EXPR)
+	expr = TREE_OPERAND (expr, 0);
+      else
+	break;
+    }
+  if (VAR_P (expr)
+      || TREE_CODE (expr) == PARM_DECL
+      || TREE_CODE (expr) == RESULT_DECL)
+    return expr;
+  return NULL_TREE;
+}
+
+/* walk_tree callback: find the operand slot holding **DATA, not looking
+   into a SAVE_EXPR, which may be shared.  */
+
+static tree
+implicit_find_slot_r (tree *tp, int *walk_subtrees, void *data)
+{
+  tree **slot = (tree **) data;
+  if (*tp == **slot)
+    {
+      *slot = tp;
+      return *tp;
+    }
+  if (TREE_CODE (*tp) == SAVE_EXPR)
+    *walk_subtrees = 0;
+  return NULL_TREE;
+}
+
+/* P3100: *LHS_P = RHS is a built-in simple assignment of scalar type; RHS is
+   the right operand before its conversion for the assignment, and *NEWRHS_P
+   the tree that will be converted (RHS itself).  If the value
+   stored is read from an object that overlaps the object designated by the
+   left operand, the overlap must be exact and the two objects must have the
+   same type ({expr.assign.overlap}).  Where RHS is, after conversions, a
+   glvalue read, return a void check of the two address ranges to evaluate
+   before the store; otherwise NULL_TREE.  An operand whose address
+   computation has side effects is evaluated once: its address is saved,
+   evaluated by the check -- the right operand's first, as it is sequenced
+   before the left -- and *LHS_P, or the glvalue read in *NEWRHS_P, replaced
+   with an indirection through it.  Bit-fields and two different variables
+   (which cannot overlap) are not checked.  Comparing addresses as integers
+   is not a constant expression, so constant evaluation is unchanged; the
+   assignment goes ahead after a violation that returns.  */
+
+tree
+build_implicit_assign_overlap_check (location_t loc, tree *lhs_p, tree rhs,
+				     tree *newrhs_p)
+{
+  tree lhs = *lhs_p;
+  if (!implicit_ub_check_context_p ()
+      || error_operand_p (lhs)
+      || error_operand_p (rhs)
+      || !SCALAR_TYPE_P (TREE_TYPE (lhs)))
+    return NULL_TREE;
+
+  /* The glvalue the stored value is read from, through conversions of the
+     value read.  */
+  tree src = tree_strip_any_location_wrapper (rhs);
+  while ((CONVERT_EXPR_P (src)
+	  || TREE_CODE (src) == NON_LVALUE_EXPR
+	  || TREE_CODE (src) == FLOAT_EXPR
+	  || TREE_CODE (src) == FIX_TRUNC_EXPR)
+	 && SCALAR_TYPE_P (TREE_TYPE (src))
+	 && TREE_TYPE (TREE_OPERAND (src, 0))
+	 && SCALAR_TYPE_P (TREE_TYPE (TREE_OPERAND (src, 0))))
+    src = tree_strip_any_location_wrapper (TREE_OPERAND (src, 0));
+  if (!glvalue_p (src)
+      || !SCALAR_TYPE_P (TREE_TYPE (src))
+      || bitfield_p (src)
+      || bitfield_p (lhs))
+    return NULL_TREE;
+
+  tree lbase = implicit_overlap_base_decl (lhs);
+  tree rbase = implicit_overlap_base_decl (src);
+  if (lbase && rbase && lbase != rbase)
+    return NULL_TREE;
+  if ((lbase && VAR_P (lbase) && DECL_HARD_REGISTER (lbase))
+      || (rbase && VAR_P (rbase) && DECL_HARD_REGISTER (rbase)))
+    return NULL_TREE;
+  bool same = same_type_ignoring_top_level_qualifiers_p (TREE_TYPE (lhs),
+							 TREE_TYPE (src));
+  if (same && !TREE_SIDE_EFFECTS (lhs) && !TREE_SIDE_EFFECTS (src)
+      && cp_tree_equal (lhs, src))
+    return NULL_TREE;
+
+  contract_evaluation_semantic sem
+    = resolve_implicit_contract_semantic (current_function_decl, loc,
+					  "ub:expr.assign.overlap");
+  if (sem == CES_ASSUME || sem == CES_IGNORE)
+    return NULL_TREE;
+
+  tree laddr = cp_build_addr_expr (lhs, tf_none);
+  tree raddr = cp_build_addr_expr (src, tf_none);
+  if (laddr == error_mark_node || raddr == error_mark_node)
+    return NULL_TREE;
+  /* An operand whose address computation has side effects is evaluated once,
+     through its saved address.  The right operand is sequenced before the
+     left, so when the left is saved, so is the right, and first.  */
+  bool lforced = TREE_SIDE_EFFECTS (laddr);
+  bool rforced = lforced || TREE_SIDE_EFFECTS (raddr);
+  tree *rslot = NULL;
+  tree newrhs = *newrhs_p;
+  if (rforced)
+    {
+      tree target = src;
+      rslot = &target;
+      walk_tree_without_duplicates (&newrhs, implicit_find_slot_r, &rslot);
+      if (rslot == &target)
+	/* The value read is not found in the operand.  */
+	return NULL_TREE;
+    }
+  laddr = save_expr (laddr);
+  raddr = save_expr (raddr);
+  if (rforced)
+    {
+      *rslot = cp_build_fold_indirect_ref (raddr);
+      *newrhs_p = newrhs;
+    }
+  if (lforced)
+    *lhs_p = lhs = cp_build_fold_indirect_ref (laddr);
+
+  tree la = save_expr (fold_convert (sizetype, laddr));
+  tree ra = save_expr (fold_convert (sizetype, raddr));
+  tree lend = fold_build2_loc (loc, PLUS_EXPR, sizetype, la,
+			       size_in_bytes (TREE_TYPE (lhs)));
+  tree rend = fold_build2_loc (loc, PLUS_EXPR, sizetype, ra,
+			       size_in_bytes (TREE_TYPE (src)));
+  /* overlap := la < rend && ra < lend; with the same type only an inexact
+     overlap is undefined.  Neither operator short-circuits.  */
+  tree cond = build2_loc (loc, TRUTH_AND_EXPR, boolean_type_node,
+			  build2_loc (loc, LT_EXPR, boolean_type_node, la, rend),
+			  build2_loc (loc, LT_EXPR, boolean_type_node, ra, lend));
+  if (same)
+    cond = build2_loc (loc, TRUTH_AND_EXPR, boolean_type_node, cond,
+		       build2_loc (loc, NE_EXPR, boolean_type_node, la, ra));
+
+  tree reaction = (sem == CES_QUICK
+		   ? build_quick_enforce_reaction (loc)
+		   : build_implicit_violation_call (loc, sem,
+						    "assignment from an "
+						    "overlapping object"));
+  tree check = build3_loc (loc, COND_EXPR, void_type_node, cond, reaction,
+			   void_node);
+  COND_EXPR_IMPLICIT_UB_GUARD_P (check) = true;
+  COND_EXPR_IMPLICIT_UB_RUNTIME_P (check) = true;
+  /* The saved addresses are evaluated outside the runtime-only guard, in
+     order, so that constant evaluation sees them too.  */
+  if (lforced)
+    check = build2 (COMPOUND_EXPR, void_type_node,
+		    convert_to_void (laddr, ICV_STATEMENT, tf_none), check);
+  if (rforced)
+    check = build2 (COMPOUND_EXPR, void_type_node,
+		    convert_to_void (raddr, ICV_STATEMENT, tf_none), check);
+  return check;
+}
+
+/* P3100: guard a floating-point-to-integer conversion CONVERTED (the FIX_TRUNC
+   of the floating value EXPR) whose truncated value may not be representable in
+   the destination integer type -- core-language UB ({conv.fpint}).  EXPR must
+   already be a single-evaluation form (SAVE_EXPR) shared with CONVERTED.
+   Returns `expr, (out_of_range ? <reaction> : converted)`; if the conversion
+   can never be out of range the CONVERTED value is returned unchanged.  */
+
 tree
 build_implicit_float_cast_check (tree ARG_UNUSED (fndecl), location_t loc,
 				 contract_evaluation_semantic sem,
