@@ -34078,6 +34078,92 @@ cp_parser_annotation_list (cp_parser *parser)
   return attributes;
 }
 
+/* The tokens of a contract predicate, for get_source_text_of_tokens.  */
+
+class cp_contract_predicate_tokens : public source_token_sequence
+{
+public:
+  cp_contract_predicate_tokens (cp_token *first, cp_token *end)
+  {
+    for (cp_token *token = first; token != end; ++token)
+      if (!token->purged_p)
+	m_tokens.safe_push (token);
+  }
+
+  unsigned length () const final override { return m_tokens.length (); }
+
+  location_t location (unsigned i) const final override
+  {
+    return m_tokens[i]->location;
+  }
+
+  bool prev_white_p (unsigned i) const final override
+  {
+    return m_tokens[i]->flags & PREV_WHITE;
+  }
+
+  bool literal_p (unsigned i) const final override
+  {
+    return cp_parser_is_string_literal (m_tokens[i])
+	   || m_tokens[i]->type == CPP_NUMBER
+	   || (m_tokens[i]->type >= CPP_CHAR
+	       && m_tokens[i]->type <= CPP_UTF8CHAR)
+	   || (m_tokens[i]->type >= CPP_CHAR_USERDEF
+	       && m_tokens[i]->type <= CPP_UTF8CHAR_USERDEF);
+  }
+
+  bool spell (unsigned i, struct obstack *ob) const final override
+  {
+    const cp_token *token = m_tokens[i];
+    const char *text;
+    if (token->type == CPP_NAME || token->type == CPP_KEYWORD)
+      text = IDENTIFIER_POINTER (token->u.value);
+    else if (token->type == CPP_NESTED_NAME_SPECIFIER)
+      {
+	tree scope = token->u.tree_check_value->value;
+	if (scope != global_namespace)
+	  {
+	    text = (TYPE_P (scope) ? type_as_string (scope, 0)
+		    : decl_as_string (scope, 0));
+	    obstack_grow (ob, text, strlen (text));
+	  }
+	text = "::";
+      }
+    else if (token->type == CPP_TEMPLATE_ID || token->type == CPP_DECLTYPE)
+      {
+	tree value = token->u.tree_check_value->value;
+	text = (TYPE_P (value) ? type_as_string (value, 0)
+		: DECL_P (value) ? decl_as_string (value, 0)
+		: expr_as_string (value, 0));
+      }
+    else if (literal_p (i))
+      text = expr_as_string (token->u.value, 0);
+    else if (token->type < CPP_NAME && token->type != CPP_EOF)
+      text = cpp_type2name (token->type, token->flags);
+    else
+      return false;
+    obstack_grow (ob, text, strlen (text));
+    return true;
+  }
+
+private:
+  auto_vec<cp_token *> m_tokens;
+};
+
+/* Return the text of a contract predicate, whose tokens run from FIRST up
+   to END, written as the comment of a violation of the contract, or NULL
+   if there is none.  The token at DELIM follows the predicate.  */
+
+static char *
+cp_parser_contract_comment (cp_token *first, cp_token *end, location_t delim)
+{
+  cp_contract_predicate_tokens tokens (first, end);
+  return get_source_text_of_tokens (global_dc->get_file_cache (), tokens,
+				    delim,
+				    cpp_get_options (parse_in)
+				      ->track_macro_expansion);
+}
+
 /* Parse a contract condition for a deferred contract.  */
 
 void
@@ -34150,7 +34236,17 @@ cp_parser_late_contract_condition (cp_parser *parser, tree fn, tree contract)
       if (undeduced_result_type_p)
 	++processing_template_decl;
     }
+  cp_token *first = cp_lexer_peek_token (parser->lexer);
   cp_expr parsed_condition = cp_parser_conditional_expression (parser);
+  /* The deferred tokens end with the predicate or its message, so the
+     token that follows the predicate in the source may be the contract's
+     closing parenthesis, which is the end of its location.  */
+  cp_token *end = cp_lexer_peek_token (parser->lexer);
+  char *comment
+    = cp_parser_contract_comment (first, end,
+				  end->type == CPP_EOF
+				  ? get_finish (EXPR_LOCATION (contract))
+				  : end->location);
   /* Commit to changes.  */
   update_late_contract (contract, fn, result, parsed_condition, comment);
   if (undeduced_result_type_p)
@@ -34457,9 +34553,12 @@ cp_parser_contract_assert (cp_parser *parser, cp_token *token)
 
   /* Parse the condition.  */
   begin_scope (sk_contract, current_function_decl);
+  cp_token *first = cp_lexer_peek_token (parser->lexer);
   bool old_pc = processing_postcondition;
   processing_postcondition = false;
   cp_expr condition = cp_parser_conditional_expression (parser);
+  cp_token *end = cp_lexer_peek_token (parser->lexer);
+  char *comment = cp_parser_contract_comment (first, end, end->location);
   gcc_checking_assert (scope_chain && scope_chain->bindings
 		       && scope_chain->bindings->kind == sk_contract);
   /* Build the contract.  */
@@ -34652,7 +34751,10 @@ cp_parser_function_contract_specifier (cp_parser *parser, bool defer)
 	    cplus_decl_attributes (&result, result_attrs, 0);
 	  ++processing_template_decl;
 	}
+      cp_token *first = cp_lexer_peek_token (parser->lexer);
       cp_expr condition = cp_parser_conditional_expression (parser);
+      cp_token *end = cp_lexer_peek_token (parser->lexer);
+      char *comment = cp_parser_contract_comment (first, end, end->location);
       /* Build the contract.  */
       contract = grok_contract (contract_name, /*mode*/NULL_TREE, result,
 				condition, loc);

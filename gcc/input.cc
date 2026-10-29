@@ -151,7 +151,16 @@ get_source_text_between (diagnostics::file_cache &fc,
     = expand_location_to_spelling_point (start, location_aspect::start);
   expanded_location expend
     = expand_location_to_spelling_point (end, location_aspect::finish);
+  return get_source_text_between (fc, expstart, expend);
+}
 
+/* Likewise, from the column of EXPSTART to the column of EXPEND, both
+   included.  */
+
+char *
+get_source_text_between (diagnostics::file_cache &fc,
+			 expanded_location expstart, expanded_location expend)
+{
   /* If the locations are in different files or the end comes before the
      start, give up and return nothing.  */
   if (!expstart.file || !expend.file)
@@ -231,6 +240,314 @@ get_source_text_between (diagnostics::file_cache &fc,
   const char *buf = (const char *) obstack_finish (&buf_obstack);
 
   return xstrdup (buf);
+}
+
+/* Skip the string or character literal whose opening quote is at OFF in
+   LINE, and return the offset of its closing quote, or LINE's length if
+   it does not close on this line.  */
+
+static size_t
+skip_quoted_literal (diagnostics::char_span line, size_t off)
+{
+  char quote = line[off];
+  for (++off; off < line.length (); ++off)
+    if (line[off] == '\\')
+      ++off;
+    else if (line[off] == quote)
+      return off;
+  return line.length ();
+}
+
+/* Find the parenthesis that closes the arguments of a function-like macro
+   invocation whose name ends at NAME_END, and store its position in
+   *CLOSE.  Whitespace and comments may separate the name from the opening
+   parenthesis.  Within the arguments, parentheses in comments and in
+   string and character literals do not count; a raw string literal is
+   not recognized.  Return false if there is no such parenthesis.  */
+
+static bool
+find_macro_arguments_end (diagnostics::file_cache &fc,
+			  expanded_location name_end,
+			  expanded_location *close)
+{
+  int depth = 0;
+  bool in_comment = false;
+  /* The column of NAME_END is 1-based, so it is the offset just past the
+     name.  */
+  size_t off = name_end.column;
+  for (int lnum = name_end.line; ; ++lnum, off = 0)
+    {
+      diagnostics::char_span line = fc.get_source_line (name_end.file, lnum);
+      if (!line)
+	return false;
+      for (; off < line.length (); ++off)
+	{
+	  char c = line[off];
+	  bool next_p = off + 1 < line.length ();
+	  if (in_comment)
+	    {
+	      if (c == '*' && next_p && line[off + 1] == '/')
+		{
+		  in_comment = false;
+		  ++off;
+		}
+	      continue;
+	    }
+	  if (c == '/' && next_p && line[off + 1] == '*')
+	    {
+	      in_comment = true;
+	      ++off;
+	      continue;
+	    }
+	  if (c == '/' && next_p && line[off + 1] == '/')
+	    break;
+	  if (depth == 0)
+	    {
+	      if (c == '(')
+		depth = 1;
+	      else if (!ISSPACE (c))
+		return false;
+	      continue;
+	    }
+	  if (c == '"')
+	    off = skip_quoted_literal (line, off);
+	  else if (c == '\'')
+	    {
+	      /* A quote inside a pp-number is a digit separator.  */
+	      size_t b = off;
+	      while (b > 0 && (ISIDNUM (line[b - 1]) || line[b - 1] == '.'
+			       || line[b - 1] == '\''))
+		--b;
+	      if (b == off || !ISDIGIT (line[b]))
+		off = skip_quoted_literal (line, off);
+	    }
+	  else if (c == '(')
+	    ++depth;
+	  else if (c == ')' && --depth == 0)
+	    {
+	      *close = name_end;
+	      close->line = lnum;
+	      close->column = off + 1;
+	      return true;
+	    }
+	}
+    }
+}
+
+/* The macro map that LOC is a virtual location of, or NULL if LOC is not
+   from a macro expansion.  */
+
+static const line_map_macro *
+macro_map_of (location_t loc)
+{
+  loc = get_pure_location (line_table, loc);
+  if (!linemap_location_from_macro_expansion_p (line_table, loc))
+    return NULL;
+  return linemap_check_macro (linemap_lookup (line_table, loc));
+}
+
+/* True if LOC, a virtual location in MAP, is that of a token from an
+   argument of the macro rather than from its replacement list; if so,
+   store in *ARG the location of the token in the argument and in *PARM
+   that of the parameter it replaces.  */
+
+static bool
+macro_argument_token_p (const line_map_macro *map, location_t loc,
+			location_t *arg, location_t *parm)
+{
+  unsigned i = get_pure_location (line_table, loc) - MAP_START_LOCATION (map);
+  *arg = MACRO_MAP_LOCATIONS (map)[2 * i];
+  *parm = MACRO_MAP_LOCATIONS (map)[2 * i + 1];
+  return *arg != *parm;
+}
+
+/* Expand ASPECT of the spelling location of the token at LOC.  A virtual
+   location has no range of its own, so the spelling location is found
+   first.  */
+
+static expanded_location
+expand_token_spelling (location_t loc, location_aspect aspect)
+{
+  loc = linemap_resolve_location (line_table, loc, LRK_SPELLING_LOCATION,
+				  NULL);
+  return expand_location_to_spelling_point (loc, aspect);
+}
+
+/* One end of the text of a token sequence being lifted out of macro
+   expansions: the location of a token, and for the last token, the
+   function-like macro whose invocation that token is the name of, if
+   any, whose arguments the text must then include.  */
+
+struct token_text_end
+{
+  location_t loc;
+  const cpp_hashnode *invocation;
+};
+
+/* Lift END out of macro expansions until it is in the context CONTEXT (a
+   macro map, or NULL for source text outside any expansion).  A token
+   from an expansion within CONTEXT is replaced by the name of the macro,
+   as invoked there, whether it is from the replacement list or from an
+   argument: CONTEXT's text includes the whole invocation.  Return false if
+   CONTEXT is never reached.  */
+
+static bool
+lift_to_context (token_text_end *end, const line_map_macro *context)
+{
+  for (const line_map_macro *map; (map = macro_map_of (end->loc)) != context;)
+    {
+      if (!map)
+	return false;
+      end->loc = map->get_expansion_point_location ();
+      end->invocation = cpp_fun_like_macro_p (map->macro) ? map->macro : NULL;
+    }
+  return true;
+}
+
+/* True if the tokens at PREV and NEXT, which are adjacent in a sequence of
+   tokens, were not written next to each other: a macro expansion is taken
+   as written at its invocation, and tokens from the same invocation are
+   not separated here.  */
+
+static bool
+tokens_separated_p (location_t prev, location_t next)
+{
+  prev = linemap_resolve_location (line_table, prev,
+				   LRK_MACRO_EXPANSION_POINT, NULL);
+  next = linemap_resolve_location (line_table, next,
+				   LRK_MACRO_EXPANSION_POINT, NULL);
+  if (prev == next)
+    return false;
+  expanded_location xprev
+    = expand_location_to_spelling_point (prev, location_aspect::finish);
+  expanded_location xnext
+    = expand_location_to_spelling_point (next, location_aspect::start);
+  return (!xprev.file || !xnext.file || strcmp (xprev.file, xnext.file) != 0
+	  || xprev.line != xnext.line || xnext.column != xprev.column + 1);
+}
+
+/* Return a NUL-terminated copy of the text of the tokens TOKENS, which
+   are followed by a token at DELIM, or NULL if there is none.  The
+   caller is responsible for freeing the return value.
+
+   If MACRO_LOCATIONS_P, the virtual locations of tokens from macro
+   expansions are tracked, and the text is the source text that the
+   tokens were written as, in the context where the following token was
+   written: outside any macro expansion, a macro invocation is written as
+   itself, so the text from TOKENS' first token to their last is used,
+   extended to the end of a macro invocation that their last token comes
+   from.  Within the replacement list of a macro, the text of the
+   replacement list is used if every token is from it, and the text of an
+   argument as written (in the same way, recursively) if every token is
+   from that one use of that argument.  Otherwise, and whenever macro
+   locations are not tracked, the text is the spelling of the tokens
+   themselves, separated by a space where whitespace preceded one or
+   tokens_separated_p.  */
+
+char *
+get_source_text_of_tokens (diagnostics::file_cache &fc,
+			   const source_token_sequence &tokens,
+			   location_t delim, bool macro_locations_p)
+{
+  unsigned n = tokens.length ();
+  if (n == 0)
+    return NULL;
+
+  if (macro_locations_p)
+    {
+      /* Where each token, and the end of the last one, is as the context
+	 is narrowed.  */
+      auto_vec<token_text_end> toks (n);
+      for (unsigned i = 0; i < n; ++i)
+	toks.quick_push ({ get_start (tokens.location (i)), NULL });
+      token_text_end end = { get_finish (tokens.location (n - 1)), NULL };
+      const line_map_macro *context = macro_map_of (delim);
+      while (lift_to_context (&end, context))
+	{
+	  /* Classify every token as it is in CONTEXT.  */
+	  bool any_body = false, any_arg = false, one_parm = true;
+	  location_t parm0 = UNKNOWN_LOCATION;
+	  for (unsigned i = 0; i < n && one_parm; ++i)
+	    {
+	      location_t arg, parm;
+	      if (!lift_to_context (&toks[i], context))
+		one_parm = false;
+	      else if (!context)
+		;
+	      else if (!macro_argument_token_p (context, toks[i].loc, &arg,
+						&parm))
+		any_body = true;
+	      else if (any_arg && parm != parm0)
+		one_parm = false;
+	      else
+		{
+		  any_arg = true;
+		  parm0 = parm;
+		}
+	    }
+	  if (!one_parm || (any_body && any_arg))
+	    break;
+
+	  if (any_arg)
+	    {
+	      /* The tokens are all from one use of an argument: continue
+		 with the argument as written, in the context where the
+		 macro was invoked.  */
+	      location_t parm;
+	      for (unsigned i = 0; i < n; ++i)
+		macro_argument_token_p (context, toks[i].loc, &toks[i].loc,
+					&parm);
+	      macro_argument_token_p (context, end.loc, &end.loc, &parm);
+	      context = macro_map_of (context->get_expansion_point_location ());
+	      continue;
+	    }
+
+	  /* Outside any expansion the locations are the source's; within a
+	     replacement list, their spelling is in the macro definition.  */
+	  expanded_location xstart
+	    = expand_token_spelling (toks[0].loc, location_aspect::start);
+	  expanded_location xend
+	    = expand_token_spelling (end.loc, location_aspect::finish);
+	  if (end.invocation && !find_macro_arguments_end (fc, xend, &xend))
+	    break;
+	  if (char *text = get_source_text_between (fc, xstart, xend))
+	    return text;
+	  break;
+	}
+    }
+
+  /* Spell the tokens themselves.  */
+  struct obstack ob;
+  obstack_init (&ob);
+  for (unsigned i = 0; i < n; ++i)
+    {
+      if (i > 0
+	  && (tokens.prev_white_p (i)
+	      || tokens_separated_p (tokens.location (i - 1),
+				     tokens.location (i))))
+	obstack_1grow (&ob, ' ');
+      char *text = NULL;
+      if (macro_locations_p && tokens.literal_p (i))
+	text = get_source_text_between
+		 (fc, expand_token_spelling (tokens.location (i),
+					     location_aspect::start),
+		  expand_token_spelling (tokens.location (i),
+					 location_aspect::finish));
+      if (text)
+	{
+	  obstack_grow (&ob, text, strlen (text));
+	  free (text);
+	}
+      else if (!tokens.spell (i, &ob))
+	{
+	  obstack_free (&ob, NULL);
+	  return NULL;
+	}
+    }
+  obstack_1grow (&ob, 0);
+  char *result = xstrdup ((const char *) obstack_finish (&ob));
+  obstack_free (&ob, NULL);
+  return result;
 }
 
 /* Test if the location originates from the spelling location of a
