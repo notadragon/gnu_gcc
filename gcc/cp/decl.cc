@@ -6878,7 +6878,13 @@ start_decl (const cp_declarator *declarator,
       || !VAR_P (decl))
     decl = maybe_push_decl (decl);
 
-  if (processing_template_decl)
+  /* A local declared in a statement expression in the predicate of a
+     postcondition whose result type is still undeduced is parsed as if in a
+     template (cp_parser_late_contract_condition) but belongs to no template:
+     there are no template parameters for push_template_decl to attach it to,
+     and it would silently fail.  */
+  if (processing_template_decl
+      && (current_template_parms || !DECL_FUNCTION_SCOPE_P (decl)))
     decl = push_template_decl (decl);
 
   if (decl == error_mark_node)

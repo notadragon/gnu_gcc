@@ -17457,6 +17457,14 @@ tsubst (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 
 	r = NULL_TREE;
 
+	/* rebuild_postconditions substitutes a predicate parsed as if in a
+	   template, because the result type was undeduced, with no arguments
+	   at all.  The only template parameter it can meet is the `auto' of a
+	   variable declared in the predicate, whose type is deduced from its
+	   initializer once that is substituted.  */
+	if (TREE_VEC_LENGTH (args) == 0 && is_auto (t))
+	  return t;
+
 	gcc_assert (TREE_VEC_LENGTH (args) > 0);
 	template_parm_level_and_index (t, &level, &idx);
 

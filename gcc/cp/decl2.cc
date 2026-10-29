@@ -6572,6 +6572,16 @@ decl_dependent_p (tree decl)
      false.  */
   if (VAR_P (orig_decl) && in_expansion_stmt && decl == current_function_decl)
     return true;
+  /* So does a local declared in a statement expression in the predicate of a
+     postcondition whose result type is undeduced, which is parsed as if in a
+     template with no template parameters (cp_parser_late_contract_condition):
+     its type can depend on the result's.  The postcondition is substituted
+     once the type is known.  */
+  if (VAR_P (orig_decl)
+      && processing_template_decl
+      && !current_template_parms
+      && DECL_FUNCTION_SCOPE_P (orig_decl))
+    return true;
   return false;
 }
 
