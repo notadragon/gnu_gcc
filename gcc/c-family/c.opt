@@ -2054,6 +2054,14 @@ fcontracts-p4405
 C ObjC C++ ObjC++ Var(flag_contracts_p4405) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P4405 prove and diagnose evaluation semantics.
 
+fcontracts-prove-assume
+C ObjC C++ ObjC++ Var(flag_contracts_prove_assume) Init(0) LangEnabledBy(C ObjC C++ ObjC++,fcontracts-p4405)
+Treat a prove or diagnose evaluation whose predicate is soundly proven as an assumption (P4405).
+
+fcontracts-prove-fold
+C ObjC C++ ObjC++ Var(flag_contracts_prove_fold) Init(0) LangEnabledBy(C ObjC C++ ObjC++,fcontracts-p4405)
+Prove a prove or diagnose evaluation whose predicate folds to true (P4405).
+
 fcoroutines
 C++ ObjC++ LTO Var(flag_coroutines)
 Enable C++ coroutines (experimental).

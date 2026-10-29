@@ -3533,6 +3533,35 @@ also enable @option{-fcontracts}, in any C++ dialect.
 @itemx -fcontracts-p4283
 @itemx -fcontracts-p4298
 @itemx -fcontracts-p4405
+@opindex fcontracts-prove-fold
+@opindex fno-contracts-prove-fold
+@opindex fcontracts-prove-assume
+@opindex fno-contracts-prove-assume
+@item -fcontracts-prove-fold
+@itemx -fcontracts-prove-assume
+Proving strategies for the P4405 @code{prove} and @code{diagnose}
+evaluation semantics, each enabled by @option{-fcontracts-p4405} and
+disabled by its @option{-fno-} form.  An evaluation with either semantic is
+diagnosed unless an enabled strategy proves that its predicate holds; with
+every strategy disabled, every evaluation is diagnosed.  The predicate is
+never evaluated at run time.
+
+@option{-fcontracts-prove-fold} proves a predicate that the compiler folds
+to @code{true}, whether or not it is a constant expression, and diagnoses
+one that it folds to @code{false} as ``contract predicate is always
+false''.  A caller-side evaluation of a precondition folds the predicate
+with each argument that folds to a constant substituted for its parameter,
+when the parameter is passed by value and has scalar type, so that, for
+example, a call @code{divide (n, 0)} to a function with the precondition
+@code{pre (d != 0)} is always false and @code{divide (n, 2)} is proven.
+
+@option{-fcontracts-prove-assume} makes the compiler treat a soundly proven
+evaluation as an assumption.  A predicate proven by folding gives the
+optimizers nothing new, so with folding as the only strategy the option
+has no effect.
+
+Both are accepted for C and Objective-C too.
+
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines

@@ -26,6 +26,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "c-tree.h"
 #include "intl.h"
 #include "gimplify.h"
+#include "c-family/contracts-prove.h"
 
 static tree c_fully_fold_internal (tree expr, bool, bool *, bool *, bool,
 				   bool);
@@ -127,6 +128,15 @@ c_fully_fold (tree expr, bool in_init, bool *maybe_const, bool lval)
     ret = fold_convert_loc (loc, eptype, ret);
   *maybe_const &= maybe_const_itself;
   return ret;
+}
+
+/* The C front end's hook for the P4405 proving strategies
+   (contracts-prove.h): EXPR folded as c_fully_fold folds it.  */
+
+tree
+c_contract_fold_predicate (tree expr)
+{
+  return c_fully_fold (expr, false, NULL);
 }
 
 /* Internal helper for c_fully_fold.  EXPR and IN_INIT are as for

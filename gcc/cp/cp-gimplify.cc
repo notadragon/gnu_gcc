@@ -45,6 +45,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "gcc-urlifier.h"
 #include "contracts.h" // build_contract_check ()
 #include "builtins.h"
+#include "c-family/contracts-prove.h"
 
 /* Keep track of forward references to immediate-escalating functions in
    case they become consteval.  This vector contains ADDR_EXPRs and
@@ -3417,6 +3418,17 @@ tree
 c_fully_fold (tree x, bool /*in_init*/, bool */*maybe_const*/, bool lval)
 {
   return cp_fold_maybe_rvalue (x, !lval);
+}
+
+/* The C++ front end's hook for the P4405 proving strategies
+   (contracts-prove.h): EXPR folded as cp_fully_fold folds it, with constant
+   evaluation that is not manifestly constant-evaluated, as at run time.
+   Folding builds new trees and leaves EXPR as it was.  */
+
+tree
+c_contract_fold_predicate (tree expr)
+{
+  return cp_fully_fold (expr, mce_false);
 }
 
 static GTY((deletable)) hash_map<tree, tree> *fold_caches[3];

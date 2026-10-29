@@ -209,4 +209,20 @@ extern void contract_proof_note_premise (tree fndecl);
 
 /* The strategies, each defined in its own contracts-prove-<name>.cc.  */
 
+/* -fcontracts-prove-fold.  */
+extern const contract_proof_strategy contract_prove_fold_strategy;
+
+/* -fcontracts-prove-shadow (contracts-prove-shadow.cc; the middle end's
+   contracts-shadow.cc does the proving).  */
+/* Defined by each front end, for the folding strategy: EXPR folded as far
+   as the front end can fold it -- in C++ including constant evaluation that
+   is not manifestly constant-evaluated -- without changing EXPR or anything
+   else about the program.  */
+extern tree c_contract_fold_predicate (tree expr);
+
+/* Defined by each front end, for a strategy that diagnoses an evaluation
+   after the front end described it (the proof shadows): a handle on the
+   context the front end is describing an evaluation in now -- in C++ the
+   template instantiation backtrace, "In instantiation of ..." and
+   "required from here" -- or 0 if it has none (always, in C).  */
 #endif /* GCC_C_FAMILY_CONTRACTS_PROVE_H */
