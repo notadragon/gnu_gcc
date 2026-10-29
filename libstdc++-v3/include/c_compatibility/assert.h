@@ -26,4 +26,31 @@
  *  This is a Standard C++ Library header.
  */
 
-#include <cassert>
+// No include guards: the `assert` macro must be (re)defined according to the
+// current NDEBUG (and __STDC_WANT_ASSERT_USES_CONTRACTS__) on each inclusion.
+
+#if !defined __cplusplus || defined _GLIBCXX_INCLUDE_NEXT_C_HEADERS
+// Reached from inside another C header's #include_next (as <cassert> and
+// <cstdlib> do it): be the platform's <assert.h> and nothing more, as the
+// other "C" compatibility headers are.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic" // include_next
+# include_next <assert.h>
+#pragma GCC diagnostic pop
+#else
+// <bits/c++config.h>, as this header gave when it was <cassert>.
+#include <bits/c++config.h>
+
+// Get the platform's <assert.h> first.  When the P3290 assert integration is
+// not enabled this leaves behavior unchanged from the platform header.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic" // include_next
+#define _GLIBCXX_INCLUDE_NEXT_C_HEADERS
+#include_next <assert.h>
+#undef _GLIBCXX_INCLUDE_NEXT_C_HEADERS
+#pragma GCC diagnostic pop
+
+// P3290 assert integration and its feature-test macro, shared with <cassert>.
+// This expands to nothing unless -fcontracts-p3290 is active.
+#include <bits/assert_contract.h>
+#endif
