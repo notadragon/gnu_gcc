@@ -35,6 +35,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "stringpool.h"
 #include "attribs.h"
 #include "flags.h"
+#include "contracts.h"
 #include "selftest.h"
 
 static tree bot_manip (tree *, int *, void *);
@@ -4709,6 +4710,10 @@ maybe_dummy_object (tree type, tree* binfop)
 	    {
 	      if (tree cap = lambda_expr_this_capture (lambda, false))
 		quals = cp_type_quals (TREE_TYPE (TREE_TYPE (cap)));
+	      /* As maybe_resolve_dummy will make it in a contract
+		 predicate.  */
+	      if (contract_this_is_const_p ())
+		quals |= TYPE_QUAL_CONST;
 	    }
 	  else
 	    quals = cp_type_quals (ctype);
