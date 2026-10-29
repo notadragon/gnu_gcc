@@ -4144,6 +4144,11 @@ cp_build_indirect_ref_1 (location_t loc, tree ptr, ref_operator errorstring,
 	return TREE_OPERAND (pointer, 0);
       else
 	{
+	  /* P3100: an indirection through known-bound pointer arithmetic past
+	     the end of its array, *(a + N), checked before `&*' can fold it
+	     away.  */
+	  if (errorstring != RO_NULL && implicit_ub_check_context_p ())
+	    pointer = build_implicit_known_indirection_check (loc, pointer);
 	  tree ref = build1 (INDIRECT_REF, t, pointer);
 	  /* P3100: an indirection `*(p + c)', `(p + c)->m' or `(p + c)->*pm'
 	     through a pointer plus or minus an integral constant expression
@@ -4231,6 +4236,65 @@ cp_build_indirect_ref (location_t loc, tree ptr, ref_operator errorstring,
 		       tsubst_flags_t complain)
 {
   return cp_build_indirect_ref_1 (loc, ptr, errorstring, complain, false);
+}
+
+/* P3100: the subscript AR[IND] where the pointer AR is known-bound pointer
+   arithmetic, (a + k)[i] (see record_implicit_known_arith), built as the
+   subscript of the array a[k + i], so that the array-bounds checks apply to
+   it as to a subscript written on the array: an access at or past the bound,
+   or an address past it, is ub:expr.add.out.of.bounds.known.subscript, and
+   the address of the element at the bound is
+   ub:expr.unary.dereference.invalid.known.  An unsigned IND at least as wide
+   as sizetype that is above the bound stands for the position one past it,
+   so that the sum cannot wrap back into range.  NULL_TREE when AR is not
+   known-bound arithmetic or neither check applies here.  */
+
+static tree
+p3100_known_arith_subscript (location_t loc, tree ar, tree ind,
+			     tsubst_flags_t complain)
+{
+  tree base = implicit_known_arith_base (ar);
+  tree array = NULL_TREE;
+  tree n = base ? p3100_decayed_array_bound (base, &array) : NULL_TREE;
+  if (n == NULL_TREE
+      || ((resolve_implicit_contract_semantic
+	   (current_function_decl, loc,
+	    "ub:expr.add.out.of.bounds.known.subscript") == CES_ASSUME)
+	  && (resolve_implicit_contract_semantic
+	      (current_function_decl, loc,
+	       "ub:expr.unary.dereference.invalid.known") == CES_ASSUME)))
+    return NULL_TREE;
+
+  /* The array is named again, through BASE when that is saved.  */
+  if (TREE_CODE (base) == SAVE_EXPR)
+    array = build1 (INDIRECT_REF, TREE_TYPE (array),
+		    build_nop (build_pointer_type (TREE_TYPE (array)), base));
+
+  ar = save_expr (ar);
+  tree pos = fold_convert (sizetype, implicit_known_arith_position (loc, ar,
+								    base));
+  tree itype = TREE_TYPE (ind);
+  tree uind = fold_convert (sizetype,
+			    fold_convert (TYPE_UNSIGNED (itype)
+					  ? sizetype : ssizetype, ind));
+  tree idx = fold_build2_loc (loc, PLUS_EXPR, sizetype, pos, uind);
+  if (TYPE_UNSIGNED (itype)
+      && TYPE_PRECISION (itype) >= TYPE_PRECISION (sizetype))
+    {
+      tree un = fold_convert (sizetype, n);
+      ind = save_expr (ind);
+      uind = fold_convert (sizetype, ind);
+      idx = fold_build3_loc (loc, COND_EXPR, sizetype,
+			     fold_build2_loc (loc, GT_EXPR, boolean_type_node,
+					      uind, un),
+			     size_binop (PLUS_EXPR, un, size_one_node),
+			     fold_build2_loc (loc, PLUS_EXPR, sizetype, pos,
+					      uind));
+    }
+  /* When IND has side effects, AR is already saved and evaluated first
+     (cp_build_array_ref), as E1 is sequenced before E2 in E1[E2].  */
+  return cp_build_array_ref (loc, array, fold_convert (ssizetype, idx),
+			     complain);
 }
 
 /* This handles expressions of the form "a[i]", which denotes
@@ -4469,6 +4533,20 @@ cp_build_array_ref (location_t loc, tree array, tree idx,
       }
 
     warn_array_subscript_with_type_char (loc, idx);
+
+    /* P3100: a subscript of known-bound pointer arithmetic is checked as a
+       subscript of the array.  */
+    if (implicit_ub_check_context_p ())
+      if (tree aref = p3100_known_arith_subscript (loc, ar, ind, complain))
+	{
+	  ret = aref;
+	  if (first)
+	    ret = build2_loc (loc, COMPOUND_EXPR, TREE_TYPE (ret), first, ret);
+	  protected_set_expr_location (ret, loc);
+	  if (non_lvalue)
+	    ret = non_lvalue_loc (loc, ret);
+	  return ret;
+	}
 
     ret = cp_build_binary_op (input_location, PLUS_EXPR, ar, ind, complain);
     /* P3100: mark the element's address `p + i' as a subscript's where the
@@ -7443,6 +7521,42 @@ build_x_bswapg_bitreverseg (location_t loc, internal_fn ifn,
   return exp;
 }
 
+/* P3100: if PTROP is an array of statically-known bound decayed to a pointer
+   to its first element, return the bound (the number of elements), else
+   NULL_TREE.  A trailing array that may be used as a flexible array member
+   has no bound, as for a subscript, and neither has an array of elements of
+   size zero.  PTROP may be a SAVE_EXPR of such a pointer (a base recorded by
+   record_implicit_known_arith); *ARRAY, if given, is set to the array.  */
+
+tree
+p3100_decayed_array_bound (tree ptrop, tree *array_out)
+{
+  tree base = ptrop;
+  if (TREE_CODE (base) == SAVE_EXPR)
+    base = TREE_OPERAND (base, 0);
+  base = tree_strip_nop_conversions (base);
+  if (TREE_CODE (base) != ADDR_EXPR)
+    return NULL_TREE;
+  tree array = TREE_OPERAND (base, 0);
+  tree atype = TREE_TYPE (array);
+  if (TREE_CODE (atype) != ARRAY_TYPE
+      || !same_type_ignoring_top_level_qualifiers_p (TREE_TYPE (atype),
+						     TREE_TYPE (TREE_TYPE
+								(ptrop))))
+    return NULL_TREE;
+  tree domain = TYPE_DOMAIN (atype);
+  tree maxv = domain ? TYPE_MAX_VALUE (domain) : NULL_TREE;
+  tree esize = TYPE_SIZE_UNIT (TREE_TYPE (atype));
+  if (maxv == NULL_TREE || TREE_CODE (maxv) != INTEGER_CST
+      || esize == NULL_TREE || TREE_CODE (esize) != INTEGER_CST
+      || integer_zerop (esize)
+      || p3100_flexible_array_member_like_p (array))
+    return NULL_TREE;
+  if (array_out)
+    *array_out = array;
+  return int_const_binop (PLUS_EXPR, maxv, build_int_cst (TREE_TYPE (maxv), 1));
+}
+
 /* Return a tree for the sum or difference (RESULTCODE says which)
    of pointer PTROP and integer INTOP.  */
 
@@ -7459,8 +7573,81 @@ cp_pointer_int_sum (location_t loc, enum tree_code resultcode, tree ptrop,
      pointer_int_sum() anyway.  */
   complete_type (TREE_TYPE (res_type));
 
-  return pointer_int_sum (loc, resultcode, ptrop,
-			  intop, complain & tf_warning_or_error);
+  /* P3100: arithmetic on an array of statically-known bound N, decayed to a
+     pointer to its first element, must stay within [0, N]
+     ({expr.add.out.of.bounds.known.arithmetic}), and no pointer arithmetic
+     may wrap around the address space
+     ({expr.add.out.of.bounds.pointer.arithmetic}).  Arithmetic on the result
+     of such arithmetic, (a + i) + j, is checked against the same array at
+     the combined position: BASE is the pointer to the array's first element
+     and NESTED says that PTROP is not BASE itself but a result recorded with
+     it.  The arithmetic is not built in a template, so this is not
+     either.  */
+  contract_evaluation_semantic arith_sem = CES_ASSUME;
+  contract_evaluation_semantic wrap_sem = CES_ASSUME;
+  tree n = NULL_TREE;
+  tree base = NULL_TREE;
+  bool nested = false;
+  if (implicit_ub_check_context_p ())
+    {
+      n = p3100_decayed_array_bound (ptrop);
+      if (n != NULL_TREE)
+	implicit_array_arith_check_p (loc, resultcode, intop, n, NULL_TREE,
+				      &arith_sem);
+      else if ((base = implicit_known_arith_base (ptrop)) != NULL_TREE
+	       && (n = p3100_decayed_array_bound (base)) != NULL_TREE)
+	{
+	  nested = true;
+	  arith_sem = (resolve_implicit_contract_semantic
+		       (current_function_decl, loc,
+			"ub:expr.add.out.of.bounds.known.arithmetic"));
+	}
+      /* An address constant plus a constant offset cannot be checked without
+	 making a constant initializer dynamic.  */
+      if (!(TREE_CONSTANT (ptrop) && TREE_CODE (intop) == INTEGER_CST))
+	wrap_sem = (resolve_implicit_contract_semantic
+		    (current_function_decl, loc,
+		     "ub:expr.add.out.of.bounds.pointer.arithmetic"));
+      /* A decayed array with side effects of its own, f ()->a, is saved so
+	 that the result can be recorded with it.  */
+      if (arith_sem != CES_ASSUME || wrap_sem != CES_ASSUME
+	  || (n != NULL_TREE && !nested && TREE_SIDE_EFFECTS (ptrop)))
+	ptrop = cp_save_expr (ptrop);
+      if (arith_sem != CES_ASSUME)
+	intop = cp_save_expr (intop);
+      /* A combined position in range needs no check.  */
+      if (nested && arith_sem != CES_ASSUME
+	  && !implicit_array_arith_check_p (loc, resultcode, intop, n,
+					    implicit_known_arith_position
+					      (loc, ptrop, base),
+					    &arith_sem))
+	arith_sem = CES_ASSUME;
+      if (n != NULL_TREE && !nested)
+	base = ptrop;
+    }
+
+  tree sum = pointer_int_sum (loc, resultcode, ptrop,
+			      intop, complain & tf_warning_or_error);
+  if (sum == error_mark_node)
+    return sum;
+  /* The bound is tested first, so the outer guard.  */
+  if (wrap_sem != CES_ASSUME)
+    sum = build_implicit_pointer_wrap_check (loc, wrap_sem, ptrop, sum);
+  if (arith_sem != CES_ASSUME)
+    sum = build_implicit_array_arith_check (loc, arith_sem, resultcode, ptrop,
+					    intop, n,
+					    (nested
+					     ? implicit_known_arith_position
+						 (loc, ptrop, base)
+					     : NULL_TREE),
+					    base, sum);
+  /* Arithmetic, an indirection or a subscript applied to the result is
+     checked against the same array.  BASE is evaluated again there, so it
+     must have no side effects of its own.  */
+  if (n != NULL_TREE
+      && (TREE_CODE (base) == SAVE_EXPR || !TREE_SIDE_EFFECTS (base)))
+    record_implicit_known_arith (sum, base);
+  return sum;
 }
 
 /* Return a tree for the difference of pointers OP0 and OP1.
@@ -8108,6 +8295,44 @@ cp_build_addr_expr_strict (tree arg, tsubst_flags_t complain)
   return cp_build_addr_expr_1 (arg, 1, complain);
 }
 
+/* P3100: the pointer increment or decrement ARG++, ++ARG, ARG-- or --ARG
+   (CODE) by BYTES, checked against wrapping around the address space
+   ({expr.add.out.of.bounds.pointer.arithmetic}) as pointer arithmetic built
+   by cp_pointer_int_sum is: built as `arg = <checked old + bytes>', with OLD
+   the value read once, and for a postfix form `(arg = ..., old)'.  Execution
+   continuing past a violation leaves the pointer unmoved.  NULL_TREE when
+   the check does not apply here.  */
+
+static tree
+p3100_pointer_incdec (location_t loc, enum tree_code code, tree arg,
+		      tree bytes)
+{
+  contract_evaluation_semantic sem
+    = resolve_implicit_contract_semantic
+	(current_function_decl, loc,
+	 "ub:expr.add.out.of.bounds.pointer.arithmetic");
+  if (sem == CES_ASSUME)
+    return NULL_TREE;
+
+  arg = cp_stabilize_reference (arg);
+  tree type = cv_unqualified (TREE_TYPE (arg));
+  tree old = save_expr (rvalue (arg));
+  tree off = fold_convert (sizetype, bytes);
+  if (code == PREDECREMENT_EXPR || code == POSTDECREMENT_EXPR)
+    off = fold_build1_loc (loc, NEGATE_EXPR, sizetype, off);
+  tree sum = build2_loc (loc, POINTER_PLUS_EXPR, type, old, off);
+  sum = build_implicit_pointer_wrap_check (loc, sem, old, sum);
+  tree val = build2_loc (loc, MODIFY_EXPR, TREE_TYPE (arg), arg, sum);
+  TREE_SIDE_EFFECTS (val) = 1;
+  if (code == POSTINCREMENT_EXPR || code == POSTDECREMENT_EXPR)
+    {
+      val = build2_loc (loc, COMPOUND_EXPR, type, val, old);
+      /* The value of a discarded `p++' is not a comma's unused operand.  */
+      suppress_warning (val);
+    }
+  return val;
+}
+
 /* C++: Must handle pointers to members.
 
    Perhaps type instantiation should be extended to handle conversion
@@ -8395,6 +8620,8 @@ cp_build_unary_op (enum tree_code code, tree xarg, bool noconvert,
 	    ? build_one_cst (argtype)
 	    : integer_one_node;
 
+	/* P3100: the increment of a pointer, in bytes.  */
+	tree inc_bytes = TYPE_PTR_P (argtype) ? inc : NULL_TREE;
 	inc = cp_convert (argtype, inc, complain);
 
 	/* If 'arg' is an Objective-C PROPERTY_REF expression, then we
@@ -8454,6 +8681,10 @@ cp_build_unary_op (enum tree_code code, tree xarg, bool noconvert,
 	      }
 	    val = boolean_increment (code, arg);
 	  }
+	else if (inc_bytes != NULL_TREE && implicit_ub_check_context_p ()
+		 && (val = p3100_pointer_incdec (location, code, arg,
+						 inc_bytes)))
+	  ;
 	else if (code == POSTINCREMENT_EXPR || code == POSTDECREMENT_EXPR)
 	  /* An rvalue has no cv-qualifiers.  */
 	  val = build2 (code, cv_unqualified (TREE_TYPE (arg)), arg, inc);

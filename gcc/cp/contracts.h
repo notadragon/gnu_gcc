@@ -425,6 +425,20 @@ extern tree build_implicit_float_cast_check
   (tree, location_t, contract_evaluation_semantic, tree, tree);
 extern tree build_implicit_enum_cast_check
   (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
+extern bool implicit_array_arith_check_p
+  (location_t, enum tree_code, tree, tree, tree,
+   contract_evaluation_semantic *);
+extern tree build_implicit_array_arith_check
+  (location_t, contract_evaluation_semantic, enum tree_code, tree, tree, tree,
+   tree, tree, tree);
+extern void record_implicit_known_arith (tree, tree);
+extern tree implicit_known_arith_base (tree);
+extern tree implicit_known_arith_position (location_t, tree, tree);
+extern tree build_implicit_known_indirection_check (location_t, tree);
+/* Defined in typeck.cc.  */
+extern tree p3100_decayed_array_bound (tree, tree * = NULL);
+extern tree build_implicit_pointer_wrap_check
+  (location_t, contract_evaluation_semantic, tree, tree);
 extern tree build_implicit_pure_virtual_direct_check
   (location_t, tree);
 extern tree build_implicit_pure_virtual_terminus (tree);

@@ -12233,6 +12233,258 @@ cp_build_implicit_bounds_check (tree fndecl, location_t loc, tree index,
 /* P3100: the offset of the pointer arithmetic P + INTOP or P - INTOP (CODE),
    in sizetype as pointer_int_sum widens it, negated for -.  */
 
+static tree
+implicit_array_arith_offset (location_t loc, enum tree_code code, tree intop)
+{
+  tree itype = TREE_TYPE (intop);
+  tree off = fold_convert (sizetype,
+			   fold_convert (TYPE_UNSIGNED (itype)
+					 ? sizetype : ssizetype, intop));
+  if (code == MINUS_EXPR)
+    off = fold_build1_loc (loc, NEGATE_EXPR, sizetype, off);
+  return off;
+}
+
+/* P3100: the condition under which the pointer arithmetic P + INTOP or
+   P - INTOP (CODE) leaves [0, N], N an INTEGER_CST, where P is the pointer to
+   the first element of an array of bound N decayed (POS null) or a pointer
+   POS elements into it (POS of a signed type: arithmetic on known-bound
+   arithmetic).  The offset must not take the position past N (for +) or
+   below 0 (for -); the position is tested as unsigned, so that the wrong sign
+   is caught as well.  An unsigned INTOP at least as wide as sizetype that is
+   above N is outside wherever it is applied, so that the sum cannot wrap
+   back into range.  */
+
+static tree
+implicit_array_arith_cond (location_t loc, enum tree_code code, tree intop,
+			   tree n, tree pos)
+{
+  tree off = implicit_array_arith_offset (loc, code, intop);
+  tree un = fold_convert (sizetype, n);
+  if (pos == NULL_TREE)
+    return fold_build2_loc (loc, GT_EXPR, boolean_type_node, off, un);
+  off = fold_build2_loc (loc, PLUS_EXPR, sizetype,
+			 fold_convert (sizetype, pos), off);
+  tree cond = fold_build2_loc (loc, GT_EXPR, boolean_type_node, off, un);
+  tree itype = TREE_TYPE (intop);
+  if (code == PLUS_EXPR && TYPE_UNSIGNED (itype)
+      && TYPE_PRECISION (itype) >= TYPE_PRECISION (sizetype))
+    cond = fold_build2_loc (loc, TRUTH_OR_EXPR, boolean_type_node,
+			    fold_build2_loc (loc, GT_EXPR, boolean_type_node,
+					     fold_convert (sizetype, intop),
+					     un),
+			    cond);
+  return cond;
+}
+
+/* P3100: whether the pointer arithmetic P + INTOP or P - INTOP (CODE), where
+   P is an array of statically-known bound N (an INTEGER_CST) decayed to a
+   pointer to its first element, or a pointer POS elements into one (see
+   implicit_array_arith_cond), is checked against leaving [0, N]
+   ({expr.add.out.of.bounds.known.arithmetic}).  Sets *SEM to the semantic,
+   CES_ASSUME when nothing is checked: the resolved semantic, or a constant
+   position in range.  */
+
+bool
+implicit_array_arith_check_p (location_t loc, enum tree_code code,
+			      tree intop, tree n, tree pos,
+			      contract_evaluation_semantic *sem)
+{
+  tree cond = implicit_array_arith_cond (loc, code, intop, n, pos);
+  *sem = (integer_zerop (cond)
+	  ? CES_ASSUME
+	  : resolve_implicit_contract_semantic
+	      (current_function_decl, loc,
+	       "ub:expr.add.out.of.bounds.known.arithmetic"));
+  return *sem != CES_ASSUME;
+}
+
+/* P3100: guard SUM, the pointer arithmetic PTROP + INTOP or PTROP - INTOP
+   (CODE), against leaving [0, N] for SEM (see implicit_array_arith_check_p).
+   PTROP and INTOP are single-evaluation forms shared with SUM, and POS, if
+   given, is PTROP's position in the array (see implicit_array_arith_cond).
+   BASE is the pointer to the array's first element: PTROP itself when POS is
+   null.  Returns `ptrop, intop, (out_of_range ? <reaction / base> : sum)`, so
+   that execution continuing past the violation sees the array's first
+   element.  The guard is on the pointer rather than the offset, which
+   pointer_int_sum would fold the guard's COND_EXPR into.  */
+
+tree
+build_implicit_array_arith_check (location_t loc,
+				  contract_evaluation_semantic sem,
+				  enum tree_code code, tree ptrop, tree intop,
+				  tree n, tree pos, tree base, tree sum)
+{
+  gcc_checking_assert (sem != CES_ASSUME);
+
+  tree cond = implicit_array_arith_cond (loc, code, intop, n, pos);
+  tree force = build2 (COMPOUND_EXPR, TREE_TYPE (intop),
+		       convert_to_void (ptrop, ICV_STATEMENT, tf_none), intop);
+  return build_implicit_op_guard (loc, sem, force, cond, sum,
+				  "pointer arithmetic out of bounds",
+				  fold_convert (TREE_TYPE (sum), base));
+}
+
+/* P3100: known-bound pointer arithmetic.  cp_pointer_int_sum records each
+   result of pointer arithmetic on an array of statically-known bound --
+   decayed to a pointer to its first element, or itself such a result -- with
+   that pointer (the base), so that arithmetic, an indirection or a subscript
+   applied to the result is checked against the same array at the position
+   the result designates: (a + i) + j, *(a + i + j), &*(a + N), and
+   (a + k)[i] as a[k + i].  Keyed by the result; an entry goes away with its
+   key.  */
+
+static GTY((cache)) tree_cache_map *implicit_known_arith_bases;
+
+/* P3100: record RESULT, built by pointer arithmetic on known-bound pointer
+   arithmetic or on the decayed array itself, with BASE, the pointer to the
+   array's first element (with no side effects, or a SAVE_EXPR evaluated by
+   RESULT).  */
+
+void
+record_implicit_known_arith (tree result, tree base)
+{
+  if (!implicit_known_arith_bases)
+    implicit_known_arith_bases = tree_cache_map::create_ggc (37);
+  implicit_known_arith_bases->put (result, base);
+}
+
+/* P3100: the base recorded for PTR (see record_implicit_known_arith), looking
+   through location wrappers and a SAVE_EXPR, or NULL_TREE.  */
+
+tree
+implicit_known_arith_base (tree ptr)
+{
+  if (!implicit_known_arith_bases)
+    return NULL_TREE;
+  ptr = tree_strip_any_location_wrapper (ptr);
+  if (TREE_CODE (ptr) == SAVE_EXPR)
+    ptr = TREE_OPERAND (ptr, 0);
+  tree *base = implicit_known_arith_bases->get (ptr);
+  return base ? *base : NULL_TREE;
+}
+
+/* P3100: the position, in elements, of PTR within the array whose first
+   element BASE points to: (PTR - BASE) / sizeof *PTR, in ssizetype.  PTR is
+   evaluated once by the result, so it must be a single-evaluation form if it
+   is used again.  */
+
+tree
+implicit_known_arith_position (location_t loc, tree ptr, tree base)
+{
+  tree ptype = TREE_TYPE (ptr);
+  tree diff = fold_build2_loc (loc, POINTER_DIFF_EXPR,
+			       signed_type_for (ptype), ptr,
+			       fold_convert (ptype, base));
+  tree esize = fold_convert (ssizetype, size_in_bytes (TREE_TYPE (ptype)));
+  return fold_build2_loc (loc, EXACT_DIV_EXPR, ssizetype,
+			  fold_convert (ssizetype, diff), esize);
+}
+
+/* P3100: guard PTR, the operand of an indirection, when it is known-bound
+   pointer arithmetic (see record_implicit_known_arith): it must point at an
+   element of the array, since an indirection through the pointer past its
+   end is undefined even when only its address is taken or a reference is
+   bound to it ({expr.unary.dereference.invalid.known}).  The guard is built
+   before *PTR is, so `&*(a + N)', which folds to `a + N', keeps it.  Returns
+   `ptr, (pos >= N ? <reaction / base> : ptr)', so that execution continuing
+   past the violation sees the array's first element, or PTR itself when
+   nothing is checked: not known-bound arithmetic, a constant position in
+   range, or the assume semantic.  */
+
+tree
+build_implicit_known_indirection_check (location_t loc, tree ptr)
+{
+  tree base = implicit_known_arith_base (ptr);
+  tree n = base ? p3100_decayed_array_bound (base) : NULL_TREE;
+  if (n == NULL_TREE)
+    return ptr;
+  tree cond = fold_build2_loc (loc, GE_EXPR, boolean_type_node,
+			       fold_convert (sizetype,
+					     implicit_known_arith_position
+					       (loc, ptr, base)),
+			       fold_convert (sizetype, n));
+  if (integer_zerop (cond))
+    return ptr;
+  contract_evaluation_semantic sem
+    = resolve_implicit_contract_semantic
+	(current_function_decl, loc,
+	 "ub:expr.unary.dereference.invalid.known");
+  if (sem == CES_ASSUME)
+    return ptr;
+  tree p = save_expr (ptr);
+  cond = fold_build2_loc (loc, GE_EXPR, boolean_type_node,
+			  fold_convert (sizetype,
+					implicit_known_arith_position
+					  (loc, p, base)),
+			  fold_convert (sizetype, n));
+  return build_implicit_op_guard (loc, sem, p, cond, p,
+				  "indirection past the end of an array",
+				  fold_convert (TREE_TYPE (p), base));
+}
+
+/* P3100: guard the pointer arithmetic SUM, the result of pointer_int_sum on
+   the pointer PTROP (a single-evaluation form), against wrapping around the
+   address space ({expr.add.out.of.bounds.pointer.arithmetic}): with OFF the
+   byte offset, the result as an integer must be above PTROP's for a negative
+   OFF and below it otherwise, as -fsanitize=pointer-overflow tests.  Returns
+   `ptrop, off, (wrapped ? <reaction / ptrop> : ptrop + off)`, so that
+   execution continuing past the violation sees the unmoved pointer; SUM
+   unchanged when it is not a POINTER_PLUS_EXPR on PTROP (folded away).  The
+   comparison of addresses as integers is not a constant expression, so
+   manifestly constant evaluation evaluates the arithmetic alone
+   (COND_EXPR_IMPLICIT_UB_RUNTIME_P).  */
+
+tree
+build_implicit_pointer_wrap_check (location_t loc,
+				   contract_evaluation_semantic sem,
+				   tree ptrop, tree sum)
+{
+  gcc_checking_assert (sem != CES_ASSUME);
+
+  tree plus = sum;
+  STRIP_NOPS (plus);
+  if (TREE_CODE (plus) != POINTER_PLUS_EXPR
+      || TREE_OPERAND (plus, 0) != ptrop)
+    return sum;
+
+  tree off = save_expr (TREE_OPERAND (plus, 1));
+  tree result = build2_loc (loc, POINTER_PLUS_EXPR, TREE_TYPE (plus), ptrop,
+			    off);
+  result = fold_convert (TREE_TYPE (sum), result);
+
+  /* wrapped := (off < 0 && p + off > p) || (off >= 0 && p + off < p), in
+     sizetype, with neither operator short-circuiting.  */
+  tree up = fold_convert (sizetype, ptrop);
+  tree ur = fold_build2_loc (loc, PLUS_EXPR, sizetype, up, off);
+  tree neg = fold_build2_loc (loc, LT_EXPR, boolean_type_node,
+			      fold_convert (ssizetype, off),
+			      build_int_cst (ssizetype, 0));
+  tree down = build2_loc (loc, TRUTH_AND_EXPR, boolean_type_node, neg,
+			  build2_loc (loc, GT_EXPR, boolean_type_node, ur, up));
+  tree upward
+    = build2_loc (loc, TRUTH_AND_EXPR, boolean_type_node,
+		  invert_truthvalue_loc (loc, neg),
+		  build2_loc (loc, LT_EXPR, boolean_type_node, ur, up));
+  tree cond = build2_loc (loc, TRUTH_OR_EXPR, boolean_type_node, down, upward);
+  tree force = build2 (COMPOUND_EXPR, sizetype,
+		       convert_to_void (ptrop, ICV_STATEMENT, tf_none), off);
+  tree guarded = build_implicit_op_guard (loc, sem, force, cond, result,
+					  "pointer arithmetic overflow",
+					  fold_convert (TREE_TYPE (sum),
+							ptrop));
+  COND_EXPR_IMPLICIT_UB_RUNTIME_P (TREE_OPERAND (guarded, 1)) = true;
+  return guarded;
+}
+
+/* P3100: guard OP, a single-evaluation scalar (a SAVE_EXPR or a decl), whose
+   use is undefined when COND holds, for SEM (never CES_ASSUME).  Nothing
+   defined can replace OP, so execution continuing past the violation sees OP
+   itself, and "ignore" emits nothing.  Returns
+   `op, (cond ? <reaction / op> : op)`; OP is evaluated before COND, which may
+   refer to it.  RUNTIME marks a COND that is not a constant expression, so
+   that manifestly constant evaluation evaluates OP alone.  */
+
 tree
 build_implicit_pure_virtual_direct_check (location_t loc, tree call)
 {
