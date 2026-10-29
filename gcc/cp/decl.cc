@@ -20433,7 +20433,12 @@ start_preparsed_function (tree decl1, tree attrs, int flags)
       if (DECL_NOT_REALLY_EXTERN (decl1))
 	DECL_EXTERNAL (decl1) = 0;
 
-      if (ctx != NULL_TREE && vague_linkage_p (ctx))
+      if (ctx != NULL_TREE && vague_linkage_p (ctx)
+	  /* An outlined contract check function already has its linkage:
+	     it is internal, in the comdat group of the function it checks
+	     (build_contract_condition_function).  Giving it a group of its
+	     own left it in two (GCC-657).  */
+	  && !DECL_IS_PRE_FN_P (decl1) && !DECL_IS_POST_FN_P (decl1))
 	/* This is a function in a local class in an extern inline
 	   or template function.  */
 	comdat_linkage (decl1);
