@@ -12556,6 +12556,30 @@ build_implicit_null_member_function_check (location_t loc,
    evaluation diagnoses a null pointer as undefined.  */
 
 tree
+build_implicit_placement_new_check (location_t loc,
+				    contract_evaluation_semantic null_sem,
+				    tree ptr)
+{
+  if (null_sem == CES_ASSUME)
+    return ptr;
+  ptr = cp_save_expr (ptr);
+  tree cond = build2_loc (loc, EQ_EXPR, boolean_type_node, ptr,
+			  build_int_cst (TREE_TYPE (ptr), 0));
+  return build_implicit_unchanged_guard (loc, null_sem, ptr, cond,
+					 "null pointer passed to a "
+					 "non-allocating placement new",
+					 false);
+}
+
+/* P3100: guard PTR, the result of a call to a non-allocating (placement)
+   allocation function, where the new-expression creates an object of
+   alignment ALIGN bytes without storing to it -- default-initialization
+   that performs no initialization, or an empty class -- so that no access
+   check sees the address ({basic.align.object.alignment}, the .nostore
+   leaf).  Comparing an address as an integer is not a constant expression,
+   so constant evaluation is unchanged.  */
+
+tree
 build_implicit_pure_virtual_direct_check (location_t loc, tree call)
 {
   if (!implicit_ub_check_context_p () || call == error_mark_node)

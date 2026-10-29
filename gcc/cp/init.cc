@@ -25,6 +25,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "coretypes.h"
 #include "target.h"
 #include "cp-tree.h"
+#include "contracts.h"
 #include "stringpool.h"
 #include "varasm.h"
 #include "gimplify.h"
@@ -3600,6 +3601,16 @@ build_new_1 (vec<tree, va_gc> **placement, tree type, tree nelts,
        && (!outer_nelts || !integer_zerop (cst_outer_nelts))
        && (!*init || CLASS_TYPE_P (elt_type)));
 
+  /* P3100: a non-allocating allocation function's pointer argument, which
+     it returns, must not be null ({expr.new.non.allocating.null}); check it
+     before the object is initialized there.  */
+  if (std_placement && implicit_ub_check_context_p ())
+    alloc_expr = (build_implicit_placement_new_check
+		  (input_location,
+		   resolve_implicit_contract_semantic
+		     (current_function_decl, input_location,
+		      "ub:expr.new.non.allocating.null"),
+		   alloc_expr));
   /* In the simple case, we can stop now.  */
   pointer_type = build_pointer_type (type);
   if (!cookie_size && !is_initialized && !member_delete_p && !do_clobber)
