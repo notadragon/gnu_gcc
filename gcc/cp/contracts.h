@@ -292,6 +292,7 @@ extern contract_evaluation_semantic ensure_evaluation_semantic
    byte and the semantic of the analysis evaluation in the byte above;
    ensure_evaluation_semantic gives the first, and ensure_analysis_semantic
    both.  */
+extern void maybe_instantiate_contracts (tree, bool = false);
 
 /* Contract data-block ABI constants.
 
