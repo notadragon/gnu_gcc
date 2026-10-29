@@ -1,0 +1,5 @@
+[
+  {"match": {"caller": true},
+   "output": {"semantic": "noexcept_enforce",
+              "dynamic": {"linkage": "C++", "name": "p3595_caller_nothrow_sel"}}}
+]

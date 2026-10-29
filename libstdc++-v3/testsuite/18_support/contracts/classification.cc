@@ -1,0 +1,61 @@
+// { dg-options "-fcontracts-p3850" }
+// { dg-do compile { target c++26 } }
+
+// P3400 [support.contract.control.semfun]: is_checked, is_unchecked,
+// is_terminating, is_continuing.  The extensions are classified by
+// behaviour (notadragon_wg21 DECISIONS.md E65): noexcept_observe and
+// noexcept_enforce are checked, noexcept_enforce is terminating, and assume
+// and unspecified are unchecked.  unspecified is continuing (E142); assume is
+// neither terminating nor continuing, since continuing after a violation
+// under it is undefined behaviour (D3400R5; GCC-898).
+//
+// Mirror: libcxx/test/std/contracts/classification.compile.pass.cpp in the
+// llvm_llvm-project fork.
+
+#include <contracts>
+
+using std::contracts::evaluation_semantic;
+using std::contracts::is_checked;
+using std::contracts::is_unchecked;
+using std::contracts::is_terminating;
+using std::contracts::is_continuing;
+using enum evaluation_semantic;
+
+static_assert(is_checked(observe));
+static_assert(is_checked(enforce));
+static_assert(is_checked(quick_enforce));
+static_assert(is_checked(noexcept_observe));
+static_assert(is_checked(noexcept_enforce));
+static_assert(!is_checked(ignore));
+static_assert(!is_checked(assume));
+static_assert(!is_checked(unspecified));
+
+static_assert(is_terminating(enforce));
+static_assert(is_terminating(quick_enforce));
+static_assert(is_terminating(noexcept_enforce));
+static_assert(!is_terminating(observe));
+static_assert(!is_terminating(noexcept_observe));
+static_assert(!is_terminating(ignore));
+static_assert(!is_terminating(assume));
+static_assert(!is_terminating(unspecified));
+
+static_assert(is_continuing(ignore));
+static_assert(is_continuing(observe));
+static_assert(is_continuing(noexcept_observe));
+static_assert(is_continuing(unspecified));
+static_assert(!is_continuing(enforce));
+static_assert(!is_continuing(quick_enforce));
+static_assert(!is_continuing(noexcept_enforce));
+static_assert(!is_continuing(assume));
+
+constexpr bool
+check_negations()
+{
+  for (auto s : { unspecified, ignore, observe, enforce, quick_enforce,
+		  assume, noexcept_observe, noexcept_enforce })
+    if (is_unchecked(s) == is_checked(s)
+	|| (s != assume && is_continuing(s) == is_terminating(s)))
+      return false;
+  return true;
+}
+static_assert(check_negations());
