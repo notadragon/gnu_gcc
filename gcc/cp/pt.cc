@@ -12629,6 +12629,16 @@ tsubst_contract (tree decl, tree t, tree args, tsubst_flags_t complain,
 
   /* NOW enable postcondition predicate processing for the condition.  */
   processing_postcondition_predicate = POSTCONDITION_P (t);
+  /* P3100: and check a member function called on (*this) in a
+     constructor precondition or a destructor postcondition.  */
+  auto p3100_cdtor_contract
+    = make_temp_override (implicit_cdtor_contract_p,
+			  (decl
+			   && TREE_CODE (decl) == FUNCTION_DECL
+			   && ((DECL_CONSTRUCTOR_P (decl) && PRECONDITION_P (t))
+			       || (DECL_DESTRUCTOR_P (decl)
+				   && POSTCONDITION_P (t)))));
+
   /* Contract conditions have a wider application of location wrappers than
      other trees (which will not work with the generic handling in tsubst_expr),
      remove the wrapper here...  */

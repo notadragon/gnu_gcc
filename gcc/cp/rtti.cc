@@ -23,6 +23,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "coretypes.h"
 #include "target.h"
 #include "cp-tree.h"
+#include "contracts.h"
 #include "memmodel.h"
 #include "tm_p.h"
 #include "stringpool.h"
@@ -407,7 +408,17 @@ build_typeid (tree exp, tsubst_flags_t complain, tree tinfo_type/*=NULL_TREE*/)
   else
     mark_type_use (initial_expr);
 
-  return cp_build_fold_indirect_ref (exp);
+  exp = cp_build_fold_indirect_ref (exp);
+  /* P3100: typeid applied to (*this) of polymorphic class type before its
+     bases are initialized or after they are destroyed, even where the
+     dynamic type is known and the operand is not evaluated.  */
+  tree p3100_type = TREE_TYPE (initial_expr);
+  if (p3100_type
+      && CLASS_TYPE_P (p3100_type)
+      && TYPE_POLYMORPHIC_P (p3100_type))
+    exp = build_implicit_this_operation_check (input_location, initial_expr,
+					       exp, ITO_TYPEID);
+  return exp;
 }
 
 /* Generate the NTBS name of a type.  If MARK_PRIVATE, put a '*' in front so that
@@ -897,6 +908,17 @@ build_dynamic_cast (location_t loc, tree type, tree expr,
 						    complain));
   if (r != error_mark_node)
     maybe_warn_about_useless_cast (loc, type, expr, complain);
+  /* P3100: dynamic_cast applied to (*this) before its bases are initialized
+     or after they are destroyed.  */
+  tree p3100_type = (TREE_TYPE (expr) ? non_reference (TREE_TYPE (expr))
+		     : NULL_TREE);
+  if (p3100_type && POINTER_TYPE_P (p3100_type))
+    p3100_type = TREE_TYPE (p3100_type);
+  if (r != error_mark_node
+      && p3100_type
+      && CLASS_TYPE_P (p3100_type)
+      && TYPE_POLYMORPHIC_P (p3100_type))
+    r = build_implicit_this_operation_check (loc, expr, r, ITO_DYNAMIC_CAST);
   protected_set_expr_location (r, loc);
   return r;
 }

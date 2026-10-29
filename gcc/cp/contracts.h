@@ -451,6 +451,17 @@ extern void apply_implicit_noreturn_check
   (tree);
 extern tree build_implicit_handler_member_check
   (location_t, tree, tree);
+/* The operations on `*this' build_implicit_this_operation_check checks.  */
+enum implicit_this_op
+{
+  ITO_CALL,
+  ITO_VIRTUAL_CALL,
+  ITO_TYPEID,
+  ITO_DYNAMIC_CAST
+};
+extern bool implicit_cdtor_contract_p;
+extern tree build_implicit_this_operation_check
+  (location_t, tree, tree, implicit_this_op);
 extern tree build_implicit_pure_virtual_direct_check
   (location_t, tree);
 extern tree build_implicit_pure_virtual_terminus (tree);

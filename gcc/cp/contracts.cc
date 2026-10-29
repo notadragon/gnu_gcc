@@ -12760,6 +12760,90 @@ build_implicit_handler_member_check (location_t loc, tree object, tree expr)
 /* P3100: set while a template's constructor precondition or destructor
    postcondition is substituted, where CONTRACT_CLASS_PTR is not.  */
 
+bool implicit_cdtor_contract_p;
+
+/* P3100: EXPR applies OP -- a member function call (virtual or not), typeid
+   or dynamic_cast -- to OBJECT.  Doing so to an object under construction
+   before the mem-initializers for its base classes have completed, which
+   includes a precondition of its constructor, or after its bases have been
+   destroyed, which includes a postcondition of its destructor, is undefined
+   ({class.base.init.mem.fun}).  Where OBJECT is `*this' and EXPR is
+   lexically in a base-class or delegating mem-initializer, a constructor
+   precondition or a destructor postcondition, return EXPR with the check
+   prepended; otherwise EXPR.  A virtual call, typeid and dynamic_cast are
+   the polymorphic leaves, any other member function call the nonpolymorphic
+   leaf of where it is.  */
+
+tree
+build_implicit_this_operation_check (location_t loc, tree object, tree expr,
+				     implicit_this_op op)
+{
+  if (!implicit_ub_check_context_p ()
+      || expr == error_mark_node
+      || !implicit_this_object_p (object))
+    return expr;
+
+  bool mem_init = (cfun
+		   && cp_function_chain
+		   && in_base_initializer
+		   && current_function_decl != NULL_TREE
+		   && DECL_CONSTRUCTOR_P (current_function_decl));
+  bool contract = (!mem_init
+		   && processing_contract_condition
+		   && ((contract_class_ptr
+			&& contract_class_ptr == current_class_ptr)
+		       || implicit_cdtor_contract_p));
+  if (!mem_init && !contract)
+    return expr;
+
+  const char *group;
+  switch (op)
+    {
+    case ITO_CALL:
+      group = (mem_init
+	       ? "ub:class.base.init.mem.fun.nonpolymorphic.mem.init"
+	       : "ub:class.base.init.mem.fun.nonpolymorphic.contract");
+      break;
+    case ITO_VIRTUAL_CALL:
+      group = "ub:class.base.init.mem.fun.polymorphic.virtual.call";
+      break;
+    case ITO_TYPEID:
+      group = "ub:class.base.init.mem.fun.polymorphic.typeid";
+      break;
+    case ITO_DYNAMIC_CAST:
+      group = "ub:class.base.init.mem.fun.polymorphic.dynamic.cast";
+      break;
+    default:
+      gcc_unreachable ();
+    }
+
+  contract_evaluation_semantic sem
+    = resolve_implicit_contract_semantic (current_function_decl, loc, group);
+  tree check
+    = build_implicit_unconditional_check (loc, sem,
+					  "member function, typeid or "
+					  "dynamic_cast used before the bases "
+					  "are initialized or after they are "
+					  "destroyed");
+  if (check == NULL_TREE)
+    return expr;
+  return build2 (COMPOUND_EXPR, TREE_TYPE (expr), check, expr);
+}
+
+/* P3100: CALL is a call of a virtual function, not qualified.  When the
+   front end resolved it statically to a pure virtual function -- the object
+   is `*this' in a constructor or destructor of a class that has no final
+   overrider for it -- the call is undefined
+   ({class.abstract.pure.virtual}, the .direct leaf): dispatching it would
+   reach the pure-virtual terminus, which the static call bypasses, running
+   the pure virtual's definition if it has one.  Return CALL with the
+   violation prepended, or CALL unchanged.  As at the terminus, "assume" and
+   "ignore" keep the status quo (the call), "observe" aborts after the
+   handler returns, since there is no function to call, and a noexcept pure
+   virtual promotes a throwing semantic to its noexcept form.  The check is
+   a guard on a constant true marked as not a constant expression, so
+   constant evaluation is unchanged.  */
+
 tree
 build_implicit_pure_virtual_direct_check (location_t loc, tree call)
 {
