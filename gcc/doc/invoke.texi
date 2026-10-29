@@ -3395,11 +3395,30 @@ without it, @code{enforce} is used instead and a warning is issued.
 handler context.  Requires @option{-fcontracts-p4298}; without it,
 @code{observe} is used instead and a warning is issued.
 
+'@code{prove}' The predicate is not evaluated and there is no run-time
+effect, as for @code{ignore}, but each evaluation that cannot be proven to
+hold is an error, issued where the check would be emitted: in the function
+body, or at the call for a caller-side check.  Each enabled proving
+strategy is tried in turn.  An evaluation is diagnosed even in an unused
+inline function, but not under @option{-fsyntax-only}.  Constant evaluation
+uses @code{enforce} instead (and @code{observe} for @code{diagnose}).
+Requires @option{-fcontracts-p4405}; without it, @code{ignore} is used
+instead and a warning is issued.
+
+@opindex Wcontract-unproven
+@opindex Wno-contract-unproven
+'@code{diagnose}' As @code{prove}, but with a warning,
+@option{-Wcontract-unproven} (enabled by default), instead of an error.
+Requires @option{-fcontracts-p4405}; without it, @code{ignore} is used.
+
 The semantic selected for a contract assertion, by this option or by the
 options below, is also limited to those its assertion-control label allows
 (P3400).  A semantic that is not allowed is replaced by the nearest allowed
 semantic that checks at least as much, or failing that by the allowed
 semantic that checks the most.
+A disallowed @code{prove} becomes @code{diagnose}, then @code{ignore}; where
+@code{ignore} is reached but disallowed, @code{diagnose}, then @code{prove}.
+
 @opindex fcontract-checks-outlined
 @opindex fno-contract-checks-outlined
 @item -fcontract-checks-outlined
@@ -3504,6 +3523,8 @@ also enable @option{-fcontracts}, in any C++ dialect.
 @opindex fno-contracts-p4283
 @opindex fcontracts-p4298
 @opindex fno-contracts-p4298
+@opindex fcontracts-p4405
+@opindex fno-contracts-p4405
 @item -fcontracts-p3097
 @itemx -fcontracts-p3098
 @itemx -fcontracts-p3099
@@ -3511,6 +3532,7 @@ also enable @option{-fcontracts}, in any C++ dialect.
 @itemx -fcontracts-p3400
 @itemx -fcontracts-p4283
 @itemx -fcontracts-p4298
+@itemx -fcontracts-p4405
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines
@@ -10837,6 +10859,10 @@ declaration says.
 The warning also reports an entry asking for the @code{noexcept_enforce}
 or @code{noexcept_observe} semantic without @option{-fcontracts-p4298}, in
 which case @code{enforce} or @code{observe} is used instead.
+It also reports an entry asking for the @code{prove} or @code{diagnose}
+semantic without @option{-fcontracts-p4405}, in which case @code{ignore} is
+used instead.
+
 @opindex Wcontract-invalid-label-facet
 @opindex Wno-contract-invalid-label-facet
 @item -Wno-contract-invalid-label-facet @r{(C, Objective-C, C++ and Objective-C++ only)}

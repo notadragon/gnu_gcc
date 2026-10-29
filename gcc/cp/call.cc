@@ -7943,6 +7943,9 @@ extract_call_expr (tree call)
     call = TREE_OPERAND (call, 0);
   if (TREE_CODE (call) == TARGET_EXPR)
     call = TARGET_EXPR_INITIAL (call);
+  /* P4405 proving hook: the proof markers maybe_contract_wrap_call puts
+     ahead of a call in the initializer of its temporary.  */
+  call = contract_strip_proof_markers (call);
 
   if (TREE_CODE (call) != CALL_EXPR
       && TREE_CODE (call) != AGGR_INIT_EXPR
@@ -10071,6 +10074,11 @@ make_base_init_ok (tree exp)
     /* unsafe_copy_elision_p_opt must have said this is OK.  */
     return true;
   tree fn = cp_get_callee_fndecl_nofold (exp);
+  if (DECL_IS_WRAPPER_FN_P (fn))
+    /* A caller-side contract wrapper of a complete object constructor
+       (maybe_contract_wrap_call): there is no wrapper of the base
+       constructor to redirect it to.  */
+    return false;
   if (DECL_BASE_CONSTRUCTOR_P (fn))
     return true;
   gcc_assert (DECL_COMPLETE_CONSTRUCTOR_P (fn));

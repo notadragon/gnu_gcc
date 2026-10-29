@@ -1449,6 +1449,31 @@ c_common_post_options (const char **pfilename)
 		   contract_semantic_name (sem), plain);
       }
 
+  /* Likewise the P4405 prove and diagnose semantics, which need
+     -fcontracts-p4405 and otherwise resolve as ignore does, in C as in
+     C++.  */
+  if ((c_dialect_cxx () ? flag_contracts : flag_contracts_p4299)
+      && !flag_contracts_p4405)
+    for (contract_evaluation_semantic sem : { CES_PROVE, CES_DIAGNOSE })
+      {
+	const char *plain = contract_semantic_name (CES_IGNORE);
+	if (contract_evaluation_semantic_explicit
+	    && flag_contract_evaluation_semantic == sem)
+	  warning (0, "%<-fcontract-evaluation-semantic=%s%> requires "
+		   "%<-fcontracts-p4405%>; %qs is used instead",
+		   contract_semantic_name (sem), plain);
+	/* D4405: the analysis evaluation then has ignore.  */
+	if (flag_contract_analysis_semantic == sem)
+	  warning (0, "%<-fcontract-analysis-semantic=%s%> requires "
+		   "%<-fcontracts-p4405%>; %qs is used instead",
+		   contract_semantic_name (sem), plain);
+	if (contract_config_names_semantic (sem))
+	  warning (OPT_Wcontract_configuration,
+		   "the contract configuration asks for %qs, which requires "
+		   "%<-fcontracts-p4405%>; %qs is used instead",
+		   contract_semantic_name (sem), plain);
+      }
+
   /* Don't do any compilation or preprocessing if there is no input file.  */
   if (this_input_filename == NULL)
     {

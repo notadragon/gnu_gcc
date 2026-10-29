@@ -353,7 +353,15 @@ cp_gimplify_init_expr (tree *expr_p)
 	    return;
 	  }
 	else
-	  from = init;
+	  {
+	    /* P4405 proving hook: the proof markers ahead of a constructor
+	       call may name the slot (maybe_contract_wrap_call).  */
+	    if (TREE_CODE (init) == COMPOUND_EXPR
+		&& contract_proof_markers_p (TREE_OPERAND (init, 0)))
+	      replace_decl (&TREE_OPERAND (init, 0), TARGET_EXPR_SLOT (from),
+			    to);
+	    from = init;
+	  }
       }
 
   /* Look through any COMPOUND_EXPRs, since build_compound_expr pushes them

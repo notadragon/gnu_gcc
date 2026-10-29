@@ -104,6 +104,12 @@ __handle_contract_violation_default
     case std::contracts::evaluation_semantic::noexcept_enforce:
       std::cerr << " noexcept_enforce";
       break;
+    case std::contracts::evaluation_semantic::prove:
+      std::cerr << " prove";
+      break;
+    case std::contracts::evaluation_semantic::diagnose:
+      std::cerr << " diagnose";
+      break;
     default:
       std::cerr << " unknown(" << static_cast<int>(__v.semantic()) << ")";
     }

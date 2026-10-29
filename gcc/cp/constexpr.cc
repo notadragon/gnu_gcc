@@ -3556,6 +3556,18 @@ addr_of_non_const_var (tree *tp, int *walk_subtrees, void *data)
   return NULL_TREE;
 }
 
+/* True if T, a call of FUN, constructs an object: FUN is a constructor,
+   or a caller-side contract wrapper of one called for a temporary
+   (maybe_contract_wrap_call), which initializes it as the constructor
+   would.  */
+
+static bool
+constructing_call_p (tree t, tree fun)
+{
+  return (DECL_CONSTRUCTOR_P (fun)
+	  || (TREE_CODE (t) == AGGR_INIT_EXPR && AGGR_INIT_VIA_CTOR_P (t)));
+}
+
 /* Subroutine of cxx_eval_call_expression.
    We are processing a call expression (either CALL_EXPR or
    AGGR_INIT_EXPR) in the context of CTX.  Evaluate
@@ -3631,7 +3643,7 @@ cxx_bind_parameters_in_call (const constexpr_ctx *ctx, tree t, tree fun,
       /* For member function, the first argument is a pointer to the implied
          object.  For a constructor, it might still be a dummy object, in
 	 which case we get the real argument from ctx.  */
-      if (i == 0 && DECL_CONSTRUCTOR_P (fun)
+      if (i == 0 && constructing_call_p (t, fun)
 	  && is_dummy_object (x))
 	{
 	  x = ctx->object;
@@ -5059,13 +5071,15 @@ cxx_eval_call_expression (const constexpr_ctx *ctx, tree t,
 
   constexpr_ctx new_ctx = *ctx;
   ctx = &new_ctx;
-  if (DECL_CONSTRUCTOR_P (fun) && !ctx->object
+  if (constructing_call_p (t, fun) && !ctx->object
       && TREE_CODE (t) == AGGR_INIT_EXPR)
     {
       /* We want to have an initialization target for an AGGR_INIT_EXPR.
 	 If we don't already have one in CTX, use the AGGR_INIT_EXPR_SLOT.  */
       new_ctx.object = AGGR_INIT_EXPR_SLOT (t);
-      tree ctor = new_ctx.ctor = build_constructor (DECL_CONTEXT (fun), NULL);
+      tree type = (DECL_CONSTRUCTOR_P (fun) ? DECL_CONTEXT (fun)
+		   : TREE_TYPE (new_ctx.object));
+      tree ctor = new_ctx.ctor = build_constructor (type, NULL);
       CONSTRUCTOR_NO_CLEARING (ctor) = true;
       ctx->global->put_value (new_ctx.object, ctor);
     }
@@ -5410,7 +5424,7 @@ cxx_eval_call_expression (const constexpr_ctx *ctx, tree t,
 		error ("%<[[noreturn]]%> call returns");
 	      *non_constant_p = true;
 	    }
-	  else if (DECL_CONSTRUCTOR_P (fun))
+	  else if (constructing_call_p (t, fun))
 	    /* This can be null for a subobject constructor call, in
 	       which case what we care about is the initialization
 	       side-effects rather than the value.  We could get at the

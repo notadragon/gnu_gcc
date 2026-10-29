@@ -82,6 +82,8 @@ namespace contracts
     assume = 5, // P3100 "assume" evaluation semantic
     noexcept_observe = 6, // P4298
     noexcept_enforce = 7, // P4298
+    prove = 8, // P4405
+    diagnose = 9, // P4405
 
     /* Implementation-defined values should have a minimum value of 1000.  */
   };
@@ -266,6 +268,10 @@ namespace contracts
   constexpr bool
   is_nonthrowing(evaluation_semantic __s) noexcept
   {
+    // P4405: no run-time effect, so nothing to throw.
+    if (__s == evaluation_semantic::prove
+	|| __s == evaluation_semantic::diagnose)
+      return true;
     return __s == evaluation_semantic::ignore
 	|| __s == evaluation_semantic::quick_enforce
 	|| __s == evaluation_semantic::assume

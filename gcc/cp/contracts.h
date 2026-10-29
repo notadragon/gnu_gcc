@@ -243,6 +243,18 @@ extern void maybe_update_postconditions		(tree);
 extern void rebuild_postconditions		(tree);
 extern bool check_postcondition_result		(tree, tree, location_t);
 
+/* P4405: a contract of a function as a caller-side evaluation of it at a
+   call evaluates it, for the proof: for a specialization whose contracts
+   are not yet substituted, a substituted copy; NULL_TREE if the function
+   has no such contract; error_mark_node if the predicate cannot be
+   described.  */
+extern tree contract_for_caller_side_proof	(tree, tree);
+
+/* P4405: the proof markers maybe_contract_wrap_call places with a call.  */
+extern bool contract_proof_markers_p		(const_tree);
+extern tree contract_strip_proof_markers	(tree);
+extern tree contract_object_proof_markers	(tree);
+
 extern bool contract_any_deferred_p 		(tree);
 /* Late-parse the deferred predicates of a redeclaration's CONTRACTS as if
    they belonged to FNDECL.  Supplied by the parser, which owns the token

@@ -611,6 +611,10 @@ Wcontract-invalid-label-facet
 C ObjC C++ ObjC++ Var(warn_contract_invalid_label_facet) Init(1) Warning
 Warn when an assertion-control object has a member that almost provides a facet but does not, because it is inaccessible or not const (P3400).
 
+Wcontract-unproven
+C ObjC C++ ObjC++ Var(warn_contract_unproven) Init(1) Warning
+Warn about a contract assertion evaluated with the diagnose semantic whose predicate cannot be proven (P4405).
+
 Wconversion
 C ObjC C++ ObjC++ Var(warn_conversion) Warning
 Warn for implicit type conversions that may change a value.
@@ -2045,6 +2049,10 @@ Enable P4283 requires clauses on contract assertions.
 fcontracts-p4298
 C ObjC C++ ObjC++ Var(flag_contracts_p4298) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P4298 noexcept_enforce and noexcept_observe evaluation semantics.
+
+fcontracts-p4405
+C ObjC C++ ObjC++ Var(flag_contracts_p4405) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P4405 prove and diagnose evaluation semantics.
 
 fcoroutines
 C++ ObjC++ LTO Var(flag_coroutines)

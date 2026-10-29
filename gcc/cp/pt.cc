@@ -29334,6 +29334,83 @@ always_instantiate_p (tree decl)
 	      && decl_maybe_constant_var_p (decl)));
 }
 
+/* walk_tree callback for contract_for_caller_side_proof: a lambda or a
+   statement expression, which substitution declares anew, and which no
+   strategy can look at unsubstituted.  */
+
+static tree
+caller_side_proof_unsubstitutable_r (tree *tp, int *walk_subtrees, void *)
+{
+  if (TYPE_P (*tp))
+    *walk_subtrees = 0;
+  else if (TREE_CODE (*tp) == LAMBDA_EXPR || TREE_CODE (*tp) == STMT_EXPR)
+    return *tp;
+  return NULL_TREE;
+}
+
+/* P4405: CONTRACT, a contract of the function DECL, as a caller-side
+   evaluation of it at a call of DECL evaluates it, for proving that
+   evaluation: CONTRACT itself, or a substituted copy of it; NULL_TREE if
+   DECL has no such contract (its P4283 requires-clause is not satisfied);
+   or error_mark_node if its predicate cannot be described, and so is not
+   proven (contract_proof_query::opaque).
+
+   A specialization's contracts are the pattern's, unsubstituted, until its
+   definition is instantiated (maybe_instantiate_contracts), which is after
+   the call; their predicate then names the pattern's parameters, which no
+   argument can stand for, and may be dependent.  So it is substituted
+   here, without making the copy DECL's: the definition's instantiation
+   replaces DECL's parameters, which the copy names.  Only the
+   requires-clause and the predicate are substituted, which is all a proof
+   reads, and with tf_none, so that the definition's substitution issues
+   the diagnostics (a diagnostic issued regardless of tf_none can only be
+   an ill-formed program's).  A predicate holding a lambda or a statement
+   expression, a dependent one of a postcondition with captures (which
+   substitution would declare anew), and one that fails to substitute
+   cannot be described.  */
+
+tree
+contract_for_caller_side_proof (tree decl, tree contract)
+{
+  if (!flag_contracts
+      || processing_template_decl
+      || CONTRACT_CONDITION (contract) == error_mark_node
+      || TREE_CODE (decl) != FUNCTION_DECL
+      || !DECL_TEMPLATE_INFO (decl)
+      || !DECL_TEMPLATE_INSTANTIATION (decl))
+    return contract;
+
+  tree code_pattern = DECL_TEMPLATE_RESULT (template_for_substitution (decl));
+  tree in_decl = contract_parameter_pattern (code_pattern);
+  tree pattern_contracts = get_fn_contract_specifiers (in_decl);
+  if (!pattern_contracts
+      || get_fn_contract_specifiers (decl) != pattern_contracts)
+    return contract;
+
+  if (cp_walk_tree_without_duplicates (&CONTRACT_CONDITION (contract),
+				       caller_side_proof_unsubstitutable_r,
+				       NULL))
+    return error_mark_node;
+  if (POSTCONDITION_P (contract) && POSTCONDITION_CAPTURES (contract))
+    return (uses_template_parms (CONTRACT_CONDITION (contract))
+	    ? error_mark_node : contract);
+
+  /* The label and the message say nothing about the predicate's value, and
+     substituting a label makes declarations of its own.  */
+  tree pattern = copy_node (contract);
+  CONTRACT_LABEL (pattern) = NULL_TREE;
+  CONTRACT_MESSAGE (pattern) = NULL_TREE;
+
+  push_access_scope (decl);
+  tree r = tsubst_contract_specifier (decl, pattern, DECL_TI_ARGS (decl),
+				      tf_none, in_decl);
+  pop_access_scope (decl);
+  if (r && (CONTRACT_CONDITION (r) == error_mark_node
+	    || uses_template_parms (CONTRACT_CONDITION (r))))
+    return error_mark_node;
+  return r;
+}
+
 /* If FN has a noexcept-specifier that hasn't been instantiated yet,
    instantiate it now, modifying TREE_TYPE (fn).  Returns false on
    error, true otherwise.  */

@@ -1,0 +1,147 @@
+// P4405 with P3400 labels: adjusting a semantic to a label's allowed set,
+// when the walk reaches ignore's level, tries ignore, then diagnose, then
+// prove before another level; a requested prove tries prove, diagnose,
+// then ignore, and a requested diagnose tries diagnose, ignore, then prove
+// (D3595R1, "Adjusting a Semantic to the Allowed Set").  Under D4405
+// ("Adjusting to the Allowed Semantics") the walk reaching prove or
+// diagnose is the analysis evaluation's, whose allowed set has ignore
+// only when the label allows a runtime semantic, and a configured prove or
+// diagnose moves to it; the runtime evaluations never reach prove or
+// diagnose.  So a label allowing quick_enforce and prove always gives
+// quick_enforce at run time, and the analysis evaluation prove only when
+// prove is configured (diagnose falls back to ignore).  Each namespace is
+// configured with one semantic; an unprovable predicate shows which
+// semantic applied:
+//
+//                     ignore    quick_enforce  prove     diagnose
+//   proving_only      diagnose  diagnose       prove     diagnose
+//   prove_only        prove     prove          prove     prove
+//   diagnose_only     diagnose  diagnose       diagnose  diagnose
+//   ignore_or_prove   ignore    ignore         prove     ignore
+//   qe_or_prove       quick     quick          prove+    quick
+//   ignore_or_diag    ignore    ignore         diagnose  diagnose
+//   always_prove      prove     prove          prove     prove
+//
+// (prove+: the analysis evaluation is prove, and the runtime evaluation
+// quick_enforce, both emitted.)  A precondition's analysis evaluation is at
+// each call (D4405), so each function is called once, in ae2_calls.
+//
+// Mirror: clang/test/Contracts/p4405-labels-reach-configured.cpp in the
+// llvm_llvm-project fork.
+// { dg-do compile { target c++26 } }
+// { dg-additional-options "-fcontracts -fcontracts-p3400 -fcontracts-p4405" }
+// { dg-additional-options "-fcontract-configuration-file=${srcdir}/g++.dg/contracts/cpp26/p4405-labels-reach-configured.json" }
+// { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
+
+#include <contracts>
+
+using std::contracts::evaluation_semantic;
+using std::contracts::evaluation_semantic_set;
+using enum evaluation_semantic;
+
+template<evaluation_semantic... S>
+struct allow {
+  using assertion_control_object = allow;
+  static constexpr evaluation_semantic_set allowed_semantics{S...};
+};
+struct always_prove_t {
+  using assertion_control_object = always_prove_t;
+  static constexpr evaluation_semantic_set allowed_semantics{prove};
+  constexpr evaluation_semantic compute_semantic (evaluation_semantic) const
+  { return prove; }
+};
+constexpr allow<prove, diagnose> proving_only{};
+constexpr allow<prove> prove_only{};
+constexpr allow<diagnose> diagnose_only{};
+constexpr allow<ignore, prove> ignore_or_prove{};
+constexpr allow<quick_enforce, prove> qe_or_prove{};
+constexpr allow<ignore, diagnose> ignore_or_diag{};
+constexpr always_prove_t always_prove{};
+
+namespace c_ignore {
+int a (int x) pre<proving_only> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int b (int x) pre<prove_only> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int c (int x) pre<diagnose_only> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int d (int x) pre<ignore_or_prove> (x > 0) { return x; }	// { dg-bogus "cannot be proven|no valid" }
+int e (int x) pre<qe_or_prove> (x > 0) { return x; }	// { dg-bogus "cannot be proven|no valid" }
+int f (int x) pre<ignore_or_diag> (x > 0) { return x; }	// { dg-bogus "cannot be proven|no valid" }
+int g (int x) pre<always_prove> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+
+void
+ae2_calls (int y)
+{
+  a (y);	// { dg-warning "contract assertion cannot be proven" }
+  b (y);	// { dg-error "contract assertion cannot be proven" }
+  c (y);	// { dg-warning "contract assertion cannot be proven" }
+  d (y);	// { dg-bogus "cannot be proven|no valid" }
+  e (y);	// { dg-bogus "cannot be proven|no valid" }
+  f (y);	// { dg-bogus "cannot be proven|no valid" }
+  g (y);	// { dg-error "contract assertion cannot be proven" }
+}
+}
+
+namespace c_quick_enforce {
+int a (int x) pre<proving_only> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int b (int x) pre<prove_only> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int c (int x) pre<diagnose_only> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int d (int x) pre<ignore_or_prove> (x > 0) { return x; }	// { dg-bogus "cannot be proven|no valid" }
+int e (int x) pre<qe_or_prove> (x > 0) { return x; }	// { dg-bogus "cannot be proven|no valid" }
+int f (int x) pre<ignore_or_diag> (x > 0) { return x; }	// { dg-bogus "cannot be proven|no valid" }
+int g (int x) pre<always_prove> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+
+void
+ae2_calls (int y)
+{
+  a (y);	// { dg-warning "contract assertion cannot be proven" }
+  b (y);	// { dg-error "contract assertion cannot be proven" }
+  c (y);	// { dg-warning "contract assertion cannot be proven" }
+  d (y);	// { dg-bogus "cannot be proven|no valid" }
+  e (y);	// { dg-bogus "cannot be proven|no valid" }
+  f (y);	// { dg-bogus "cannot be proven|no valid" }
+  g (y);	// { dg-error "contract assertion cannot be proven" }
+}
+}
+
+namespace c_prove {
+int a (int x) pre<proving_only> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int b (int x) pre<prove_only> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int c (int x) pre<diagnose_only> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int d (int x) pre<ignore_or_prove> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int e (int x) pre<qe_or_prove> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int f (int x) pre<ignore_or_diag> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int g (int x) pre<always_prove> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+
+void
+ae2_calls (int y)
+{
+  a (y);	// { dg-error "contract assertion cannot be proven" }
+  b (y);	// { dg-error "contract assertion cannot be proven" }
+  c (y);	// { dg-warning "contract assertion cannot be proven" }
+  d (y);	// { dg-error "contract assertion cannot be proven" }
+  e (y);	// { dg-error "contract assertion cannot be proven" }
+  f (y);	// { dg-warning "contract assertion cannot be proven" }
+  g (y);	// { dg-error "contract assertion cannot be proven" }
+}
+}
+
+namespace c_diagnose {
+int a (int x) pre<proving_only> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int b (int x) pre<prove_only> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int c (int x) pre<diagnose_only> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int d (int x) pre<ignore_or_prove> (x > 0) { return x; }	// { dg-bogus "cannot be proven|no valid" }
+int e (int x) pre<qe_or_prove> (x > 0) { return x; }	// { dg-bogus "cannot be proven|no valid" }
+int f (int x) pre<ignore_or_diag> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+int g (int x) pre<always_prove> (x > 0) { return x; }	// { dg-message "the predicate of the contract assertion" }
+
+void
+ae2_calls (int y)
+{
+  a (y);	// { dg-warning "contract assertion cannot be proven" }
+  b (y);	// { dg-error "contract assertion cannot be proven" }
+  c (y);	// { dg-warning "contract assertion cannot be proven" }
+  d (y);	// { dg-bogus "cannot be proven|no valid" }
+  e (y);	// { dg-bogus "cannot be proven|no valid" }
+  f (y);	// { dg-warning "contract assertion cannot be proven" }
+  g (y);	// { dg-error "contract assertion cannot be proven" }
+}
+}

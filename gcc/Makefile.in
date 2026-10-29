@@ -1343,6 +1343,7 @@ C_COMMON_OBJS = c-family/c-common.o c-family/c-cppbuiltin.o c-family/c-dump.o \
   c-family/c-attribs.o c-family/c-warn.o c-family/c-spellcheck.o \
   c-family/c-type-mismatch.o attr-handlers.o \
   c-family/contracts-config.o \
+  c-family/contracts-prove.o \
 
 # Analyzer object files
 ANALYZER_OBJS = \
