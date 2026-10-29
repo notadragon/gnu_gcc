@@ -11830,6 +11830,40 @@ build_implicit_op_guard (location_t loc, contract_evaluation_semantic sem,
    OP1) whose divisor may be zero -- core-language UB ({expr.mul.div.by.zero}).
    Returns `op0, (op1 == 0 ? <reaction> : div_result)`.  */
 
+tree
+build_implicit_shift_check (tree ARG_UNUSED (fndecl), location_t loc,
+			    contract_evaluation_semantic sem,
+			    tree op0, tree op1, tree shift_result)
+{
+  gcc_checking_assert (sem != CES_ASSUME);
+
+  tree optype = TREE_TYPE (op1);
+  tree width = build_int_cst (optype, TYPE_PRECISION (TREE_TYPE (op0)));
+  tree cond = build2_loc (loc, GE_EXPR, boolean_type_node, op1, width);
+  if (!TYPE_UNSIGNED (optype))
+    {
+      tree neg = build2_loc (loc, LT_EXPR, boolean_type_node, op1,
+			     build_int_cst (optype, 0));
+      cond = build2_loc (loc, TRUTH_ORIF_EXPR, boolean_type_node, neg, cond);
+    }
+  return build_implicit_op_guard (loc, sem, op0, cond, shift_result,
+				  "shift count out of range");
+}
+
+/* P3100 langhook (LANG_HOOKS_BUILD_IMPLICIT_BOUNDS_CHECK): build the implicit
+   array-bounds guard for a site (FNDECL + LOC) into an array of statically-
+   known size.  INDEX is the (integer) subscript, or the byte offset of an
+   indirection; BOUND is its first out-of-range value (for a subscript, the
+   array size, adjusted by the caller for a one-past address-of context).
+   GROUP is the check: ub:expr.add.out.of.bounds.known.subscript for a
+   subscript, or ub:expr.unary.dereference.invalid.known for an indirection
+   past the end of the array.  Resolves the evaluation semantic for GROUP and
+   returns a replacement index expression `i, (out_of_range ? 0 : i)` --
+   redirecting an out-of-range index to the defined valid index 0 and running
+   the configured reaction -- or NULL_TREE for the assume semantic (no guard,
+   raw index).  Called from the c-family array-ref walk so the C++ reaction can
+   be built without linking to cc1.  */
+
 static const char *
 contract_dynamic_name (const_tree contract)
 {
