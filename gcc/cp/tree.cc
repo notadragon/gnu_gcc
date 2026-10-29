@@ -804,6 +804,8 @@ build_aggr_init_expr (tree type, tree init)
       CALL_EXPR_OPERATOR_SYNTAX (rval) = CALL_EXPR_OPERATOR_SYNTAX (init);
       CALL_EXPR_ORDERED_ARGS (rval) = CALL_EXPR_ORDERED_ARGS (init);
       CALL_EXPR_REVERSE_ARGS (rval) = CALL_EXPR_REVERSE_ARGS (init);
+      /* P3100 (DECISIONS.md E110 (a)).  */
+      CALL_EXPR_P3100_VIRTUAL_P (rval) = CALL_EXPR_P3100_VIRTUAL_P (init);
       SET_EXPR_LOCATION (rval, EXPR_LOCATION (init));
     }
   else

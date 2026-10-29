@@ -686,6 +686,38 @@ maybe_emit_clobber_object_begin (tree decl, gimple_seq *pre_p)
 
 /* Do C++-specific gimplification.  Args are as for gimplify_expr.  */
 
+/* P3100: if E, an INDIRECT_REF, is the element `*(p + c)' at a constant
+   subscript of the pointer p, p[c], where the null check of
+   ub:expr.unary.dereference.nullptr applies (ubsan_p3100_constant_subscript),
+   return it as `MEM[p + c]', so that the ubsan pass checks a load or store
+   through it, and the address of a subobject of it, on p, as for p[0]
+   (DECISIONS.md E97 (c)); otherwise NULL_TREE.  Also the derived object
+   of a downcast of `*p' to a reference, converted to the derived class
+   (P3100_DOWNCAST_ADDRESS_P): `*(D *) (p - offset)', the object a virtual
+   call through it reads the vtable pointer of.  */
+
+static tree
+p3100_constant_subscript_mem_ref (tree e)
+{
+  tree sub = TREE_OPERAND (e, 0);
+  tree stripped = tree_strip_nop_conversions (sub);
+  if (TREE_CODE (stripped) == POINTER_PLUS_EXPR
+      && P3100_DOWNCAST_ADDRESS_P (stripped))
+    sub = stripped;
+  if (TREE_CODE (sub) != POINTER_PLUS_EXPR
+      || !ubsan_p3100_constant_subscript (sub, 0))
+    return NULL_TREE;
+  tree mem = build2_loc (EXPR_LOCATION (e), MEM_REF, TREE_TYPE (e),
+			 TREE_OPERAND (sub, 0),
+			 fold_convert (TREE_TYPE (TREE_OPERAND (e, 0)),
+				       TREE_OPERAND (sub, 1)));
+  TREE_THIS_VOLATILE (mem) = TREE_THIS_VOLATILE (e);
+  TREE_THIS_NOTRAP (mem) = TREE_THIS_NOTRAP (e);
+  TREE_SIDE_EFFECTS (mem) = TREE_SIDE_EFFECTS (e);
+  TREE_READONLY (mem) = TREE_READONLY (e);
+  return mem;
+}
+
 int
 cp_gimplify_expr (tree *expr_p, gimple_seq *pre_p, gimple_seq *post_p)
 {
@@ -703,6 +735,16 @@ cp_gimplify_expr (tree *expr_p, gimple_seq *pre_p, gimple_seq *post_p)
 
   switch (code)
     {
+    case INDIRECT_REF:
+      if (tree mem = p3100_constant_subscript_mem_ref (*expr_p))
+	{
+	  *expr_p = mem;
+	  ret = GS_OK;
+	}
+      else
+	ret = (enum gimplify_status) c_gimplify_expr (expr_p, pre_p, post_p);
+      break;
+
     case AGGR_INIT_EXPR:
       simplify_aggr_init_expr (expr_p);
       ret = GS_OK;
@@ -1338,6 +1380,10 @@ struct cp_genericize_data
   tree try_block;
   bool no_sanitize_p;
   bool handle_invisiref_parm_p;
+  /* P3100: the location of the expression most recently walked that has
+     one, for a reference binding that has none of its own
+     (ubsan_maybe_instrument_reference).  */
+  location_t loc = UNKNOWN_LOCATION;
 };
 
 /* Emit an error about taking the address of an immediate function.
@@ -1963,6 +2009,9 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
   struct cp_genericize_data *wtd = (struct cp_genericize_data *) data;
   hash_set<tree> *p_set = wtd->p_set;
 
+  if (flag_contracts_p3100 && EXPR_P (stmt) && EXPR_HAS_LOCATION (stmt))
+    wtd->loc = EXPR_LOCATION (stmt);
+
   /* If in an OpenMP context, note var uses.  */
   if (UNLIKELY (wtd->omp_ctx != NULL)
       && (VAR_P (stmt)
@@ -2004,10 +2053,11 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 
   if (TREE_CODE (stmt) == INTEGER_CST
       && TYPE_REF_P (TREE_TYPE (stmt))
-      && (flag_sanitize & (SANITIZE_NULL | SANITIZE_ALIGNMENT))
+      && ((flag_sanitize & (SANITIZE_NULL | SANITIZE_ALIGNMENT))
+	  || flag_contracts_p3100)
       && !wtd->no_sanitize_p)
     {
-      ubsan_maybe_instrument_reference (stmt_p);
+      ubsan_maybe_instrument_reference (stmt_p, wtd->loc);
       if (*stmt_p != stmt)
 	{
 	  *walk_subtrees = 0;
@@ -2516,17 +2566,29 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 	}
 
       if (!wtd->no_sanitize_p
-	  && sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT)
+	  && (sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT)
+	      || flag_contracts_p3100)
 	  && TYPE_REF_P (TREE_TYPE (stmt)))
-	ubsan_maybe_instrument_reference (stmt_p);
+	{
+	  /* P3100: a reference bound to a virtual base of `*p' checks p
+	     under the .access leaf (DECISIONS.md E94 (b)).  */
+	  if (TREE_CODE (*stmt_p) == NOP_EXPR)
+	    cp_ubsan_maybe_check_vbase_conversion (EXPR_LOC_OR_LOC (*stmt_p,
+								     wtd->loc),
+						   &TREE_OPERAND (*stmt_p, 0),
+						   TREE_TYPE (TREE_TYPE
+							      (*stmt_p)));
+	  ubsan_maybe_instrument_reference (stmt_p, wtd->loc);
+	}
       break;
 
     case CALL_EXPR:
       /* D4405: a temporary's destructor call that is made.  */
       contract_resolve_pending_analysis (stmt);
       if (!wtd->no_sanitize_p
-	  && sanitize_flags_p ((SANITIZE_NULL
-				| SANITIZE_ALIGNMENT | SANITIZE_VPTR)))
+	  && (sanitize_flags_p ((SANITIZE_NULL
+				 | SANITIZE_ALIGNMENT | SANITIZE_VPTR))
+	      || flag_contracts_p3100))
 	{
 	  tree fn = CALL_EXPR_FN (stmt);
 	  if (fn != NULL_TREE
@@ -2538,7 +2600,30 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 		= TREE_CODE (fn) == ADDR_EXPR
 		  && TREE_CODE (TREE_OPERAND (fn, 0)) == FUNCTION_DECL
 		  && DECL_CONSTRUCTOR_P (TREE_OPERAND (fn, 0));
-	      if (sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT))
+	      /* P3100: a member function called on a virtual base of `*p'
+		 checks p under the .access leaf (DECISIONS.md E94 (b)).  */
+	      if (!is_ctor && call_expr_nargs (stmt) > 0)
+		cp_ubsan_maybe_check_vbase_conversion (EXPR_LOCATION (stmt),
+						       &CALL_EXPR_ARG (stmt,
+								       0));
+	      /* P3100: a virtual member function called on a subobject of
+		 `*p' checks p under the .access leaf (DECISIONS.md E102
+		 (a)), whether or not the call is resolved statically
+		 (DECISIONS.md E110 (a)).  */
+	      if (!is_ctor)
+		cp_ubsan_maybe_check_virtual_call_object (stmt);
+	      /* P3100: the object pointer of a call through a pointer to
+		 member function is checked before its adjustment.  */
+	      if (!is_ctor && cp_ubsan_maybe_instrument_ptrmemfunc_call (stmt))
+		;
+	      /* P3100: a virtual function called by its unqualified name
+		 and resolved statically checks its object pointer under the
+		 .access leaf (DECISIONS.md E110 (a)).  */
+	      else if (!is_ctor
+		       && cp_ubsan_maybe_check_devirtualized_call (stmt))
+		;
+	      else if (sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT)
+		       || flag_contracts_p3100)
 		ubsan_maybe_instrument_member_call (stmt, is_ctor);
 	      if (sanitize_flags_p (SANITIZE_VPTR) && !is_ctor)
 		cp_ubsan_maybe_instrument_member_call (stmt);
@@ -2551,6 +2636,12 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 	}
       /* Fall through.  */
     case AGGR_INIT_EXPR:
+      /* P3100: a member call returning a class by value through a pointer
+	 (GCC-854).  */
+      if (TREE_CODE (stmt) == AGGR_INIT_EXPR
+	  && flag_contracts_p3100
+	  && !wtd->no_sanitize_p)
+	cp_ubsan_maybe_check_aggr_init_call (stmt);
       /* For calls to a multi-versioned function, overload resolution
 	 returns the function with the highest target priority, that is,
 	 the version that will checked for dispatching first.  If this
@@ -2882,6 +2973,7 @@ cp_genericize (tree fndecl)
   /* We do want to see every occurrence of the parms, so we can't just use
      walk_tree's hash functionality.  */
   cp_genericize_tree (&DECL_SAVED_TREE (fndecl), true);
+  cp_ubsan_retarget_ptrmem_object_checks (fndecl);
 
   cp_maybe_instrument_return (fndecl);
 
@@ -3788,7 +3880,21 @@ cp_fold (tree x, fold_flags_t flags)
       if (op0 == error_mark_node || op1 == error_mark_node)
 	x = error_mark_node;
       else if (op0 != TREE_OPERAND (x, 0) || op1 != TREE_OPERAND (x, 1))
-	x = fold_build2_loc (loc, code, TREE_TYPE (x), op0, op1);
+	{
+	  x = fold_build2_loc (loc, code, TREE_TYPE (x), op0, op1);
+	  /* P3100: the element address of a subscript stays one
+	     (DECISIONS.md E97 (c)), and the derived object's address of a
+	     downcast to a reference.  */
+	  if (code == POINTER_PLUS_EXPR
+	      && P3100_SUBSCRIPT_ADDRESS_P (org_x)
+	      && TREE_CODE (x) == POINTER_PLUS_EXPR
+	      && (tree_strip_nop_conversions (TREE_OPERAND (x, 0))
+		  == tree_strip_nop_conversions (op0)))
+	    {
+	      P3100_SUBSCRIPT_ADDRESS_P (x) = 1;
+	      P3100_DOWNCAST_ADDRESS_P (x) = P3100_DOWNCAST_ADDRESS_P (org_x);
+	    }
+	}
       else
 	x = fold (x);
 
@@ -3907,7 +4013,9 @@ cp_fold (tree x, fold_flags_t flags)
 	   cast.  */
 	if ((OPTION_SET_P (flag_fold_simple_inlines)
 	     ? flag_fold_simple_inlines
-	     : !flag_no_inline)
+	     : (!flag_no_inline
+		/* P3100: and wherever a null check applies.  */
+		|| cp_ubsan_fold_cast_call_p (x)))
 	    && !(flags & ff_only_non_odr)
 	    && call_expr_nargs (x) == 1
 	    && decl_in_std_namespace_p (callee)
@@ -3919,7 +4027,11 @@ cp_fold (tree x, fold_flags_t flags)
 		/* This addressof equivalent is used heavily in libstdc++.  */
 		|| id_equal (DECL_NAME (callee), "__addressof")
 		|| id_equal (DECL_NAME (callee), "to_underlying")
-		|| id_equal (DECL_NAME (callee), "as_const")))
+		|| id_equal (DECL_NAME (callee), "as_const"))
+	    /* P3100: keep the reference binding of std::addressof (*p).  */
+	    && !((id_equal (DECL_NAME (callee), "addressof")
+		  || id_equal (DECL_NAME (callee), "__addressof"))
+		 && cp_ubsan_keep_addressof_call_p (x)))
 	  {
 	    r = CALL_EXPR_ARG (x, 0);
 	    /* These type-checks must be performed here, because invalid

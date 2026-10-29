@@ -28,6 +28,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "stor-layout.h"
 #include "builtins.h"
 #include "gimplify.h"
+#include "langhooks.h"
 #include "stringpool.h"
 #include "attribs.h"
 #include "asan.h"
@@ -905,25 +906,489 @@ ubsan_maybe_instrument_array_ref (tree *expr_p, bool ignore_off_by_one)
     }
 }
 
+static bool
+ubsan_p3100_checked_subobject_p (tree op)
+{
+  STRIP_NOPS (op);
+  if (TREE_CODE (op) == COMPOUND_EXPR)
+    {
+      tree call = TREE_OPERAND (op, 0);
+      if (TREE_CODE (call) == CALL_EXPR
+	  && CALL_EXPR_FN (call) == NULL_TREE
+	  && CALL_EXPR_IFN (call) == IFN_UBSAN_NULL
+	  && (tree_to_uhwi (CALL_EXPR_ARG (call, UBSAN_NULL_CKIND))
+	      == UBSAN_MEMBER_ACCESS))
+	return true;
+    }
+  while (true)
+    {
+      STRIP_NOPS (op);
+      if (TREE_CODE (op) == SAVE_EXPR || TREE_CODE (op) == POINTER_PLUS_EXPR)
+	op = TREE_OPERAND (op, 0);
+      else
+	break;
+    }
+  if (TREE_CODE (op) != ADDR_EXPR
+      || !handled_component_p (TREE_OPERAND (op, 0)))
+    return false;
+  tree base = TREE_OPERAND (op, 0);
+  while (handled_component_p (base))
+    base = TREE_OPERAND (base, 0);
+  if (!INDIRECT_REF_P (base) && TREE_CODE (base) != MEM_REF)
+    return false;
+  /* The ubsan pass checks a pointer that is not a constant: a null
+     constant is checked here, or not at all.  */
+  tree ptr = TREE_OPERAND (base, 0);
+  STRIP_NOPS (ptr);
+  return TREE_CODE (ptr) != ADDR_EXPR && !CONSTANT_CLASS_P (ptr);
+}
+
+/* P3100: whether OP, the pointer a reference is bound to or a member
+   function is called on, is formed from a glvalue that is a reference
+   already -- a reference variable or parameter, a reference member, a call
+   returning a reference -- by conversions, base class adjustments or member
+   accesses: `const T &r2 = r', `B &b = d' for `D &d', `r.f ()',
+   `sid (*sp).f ()'.  That indirects through no pointer: the object was
+   reached where the reference was bound, and checked there.  */
+
+static bool
+ubsan_p3100_reference_glvalue_p (tree op)
+{
+  while (true)
+    {
+      STRIP_NOPS (op);
+      if (TREE_CODE (op) == SAVE_EXPR || TREE_CODE (op) == POINTER_PLUS_EXPR)
+	op = TREE_OPERAND (op, 0);
+      else if (TREE_CODE (op) == ADDR_EXPR
+	       && handled_component_p (TREE_OPERAND (op, 0)))
+	{
+	  tree base = TREE_OPERAND (op, 0);
+	  while (handled_component_p (base))
+	    base = TREE_OPERAND (base, 0);
+	  if (!INDIRECT_REF_P (base))
+	    return false;
+	  op = TREE_OPERAND (base, 0);
+	}
+      else
+	break;
+    }
+  return (TREE_CODE (TREE_TYPE (op)) == REFERENCE_TYPE
+	  && !CONSTANT_CLASS_P (op));
+}
+
+/* P3100: if PTR, stripped of conversions, is the address of an empty base
+   class subobject of `*p' at a nonzero offset, which build_base_path forms
+   as `p + offset' (such a base has no field to name), return p; otherwise
+   NULL_TREE.  The address is never null, so a null check of it checks
+   nothing; the indirection is through p.  An offset smaller than the class
+   p points to cannot step to another element of an array.  */
+
+tree
+ubsan_p3100_base_offset_object (tree ptr)
+{
+  STRIP_NOPS (ptr);
+  if (TREE_CODE (ptr) != POINTER_PLUS_EXPR
+      || TREE_CODE (TREE_OPERAND (ptr, 1)) != INTEGER_CST
+      || integer_zerop (TREE_OPERAND (ptr, 1)))
+    return NULL_TREE;
+  tree obj = TREE_OPERAND (ptr, 0);
+  tree type = TREE_TYPE (TREE_TYPE (tree_strip_nop_conversions (obj)));
+  if (!RECORD_OR_UNION_TYPE_P (type)
+      || !COMPLETE_TYPE_P (type)
+      || TREE_CODE (TYPE_SIZE_UNIT (type)) != INTEGER_CST
+      || !tree_int_cst_lt (TREE_OPERAND (ptr, 1), TYPE_SIZE_UNIT (type)))
+    return NULL_TREE;
+  return obj;
+}
+
+/* P3100: if *OP_P, the pointer a reference is bound to or a member
+   function is called on, is the address of an empty base class subobject
+   of `*p' at a nonzero offset, `p + offset' (ubsan_p3100_base_offset_object),
+   and the .indirection leaf of {expr.unary.dereference.nullptr} applies at
+   LOC, rewrite *OP_P to evaluate p once and return the check that p is not
+   null; otherwise NULL_TREE.  A p that is the address of an object, a
+   member subobject (checked by the ubsan pass) or a reference already is
+   not checked.  */
+
+tree
+ubsan_p3100_check_base_offset_object (location_t loc, tree *op_p)
+{
+  if (!flag_contracts_p3100 || current_function_decl == NULL_TREE)
+    return NULL_TREE;
+  tree obj = ubsan_p3100_base_offset_object (*op_p);
+  if (obj == NULL_TREE)
+    return NULL_TREE;
+  tree sobj = tree_strip_nop_conversions (obj);
+  if (TREE_CODE (sobj) == ADDR_EXPR
+      || CONSTANT_CLASS_P (sobj)
+      || ubsan_p3100_reference_glvalue_p (obj))
+    return NULL_TREE;
+  tree saved = save_expr (obj);
+  tree check = ubsan_build_p3100_indirection_check (loc, saved);
+  if (check == NULL_TREE)
+    return NULL_TREE;
+  /* Rebuild the address on the saved pointer.  */
+  tree *p = op_p;
+  while (TREE_CODE (*p) != POINTER_PLUS_EXPR)
+    {
+      *p = copy_node (*p);
+      p = &TREE_OPERAND (*p, 0);
+    }
+  *p = copy_node (*p);
+  TREE_OPERAND (*p, 0) = saved;
+  return check;
+}
+
+/* P3100: OP stripped of conversions; if that is pointer arithmetic
+   guarded against wrapping around the address space
+   (build_implicit_pointer_wrap_check), `force, (wrapped ? <reaction / p>
+   : p + i)', the sum `p + i' it computes when nothing wraps, stripped of
+   conversions.  */
+
+tree
+ubsan_p3100_unguarded_sum (tree op)
+{
+  STRIP_NOPS (op);
+  if (TREE_CODE (op) == COMPOUND_EXPR)
+    {
+      /* A conversion of the guarded sum, folded through the comma.  */
+      tree guard = TREE_OPERAND (op, 1);
+      STRIP_NOPS (guard);
+      if (TREE_CODE (guard) == COND_EXPR)
+	{
+	  tree sum = TREE_OPERAND (guard, 2);
+	  STRIP_NOPS (sum);
+	  if (TREE_CODE (sum) == POINTER_PLUS_EXPR)
+	    return sum;
+	}
+    }
+  return op;
+}
+
+/* P3100: SUB being the address `p + c' of the element at a constant
+   subscript (ubsan_p3100_constant_subscript), the pointer its null check
+   checks: p, unless p is a pointer plus a constant itself
+   (P3100_ARITH_ADDRESS_P) guarded against wrapping around the address
+   space (build_implicit_pointer_wrap_check), `force, (wrapped ? <reaction
+   / q> : q + c2)' with force `q, c2', saved -- a chain `q + 1 + 2' whose
+   inner sum the guard keeps fold from combining with the outer one --
+   then the innermost pointer of the chain, q (DECISIONS.md E103 (a)).  */
+
+tree
+ubsan_p3100_subscript_pointer (tree sub)
+{
+  tree ptr = TREE_OPERAND (sub, 0);
+  while (true)
+    {
+      tree guarded = tree_strip_nop_conversions (ptr);
+      if (TREE_CODE (guarded) == SAVE_EXPR)
+	guarded = tree_strip_nop_conversions (TREE_OPERAND (guarded, 0));
+      if (TREE_CODE (guarded) != COMPOUND_EXPR)
+	return ptr;
+      tree inner = ubsan_p3100_unguarded_sum (guarded);
+      if (TREE_CODE (inner) != POINTER_PLUS_EXPR
+	  || !P3100_ARITH_ADDRESS_P (inner)
+	  || TREE_CODE (TREE_OPERAND (inner, 1)) != INTEGER_CST)
+	return ptr;
+      /* The guard's own shape: it evaluates q first.  */
+      tree force = TREE_OPERAND (guarded, 0);
+      if (TREE_CODE (force) != COMPOUND_EXPR)
+	return ptr;
+      tree first = TREE_OPERAND (force, 0);
+      if (CONVERT_EXPR_P (first) && VOID_TYPE_P (TREE_TYPE (first)))
+	first = TREE_OPERAND (first, 0);
+      if (tree_strip_nop_conversions (first)
+	  != tree_strip_nop_conversions (TREE_OPERAND (inner, 0)))
+	return ptr;
+      ptr = TREE_OPERAND (inner, 0);
+    }
+}
+
+/* P3100: if OP, stripped of conversions, is the address `p + c' of the
+   element at a constant subscript of the pointer p, p[c]
+   (P3100_SUBSCRIPT_ADDRESS_P), return that POINTER_PLUS_EXPR; otherwise
+   NULL_TREE.  A null check of the element checks p itself (DECISIONS.md
+   E97 (c)): `p[c]' is `*(p + c)', so a null p is reported whatever c is,
+   as its accesses are (the ubsan pass sees them as `MEM[p + c]',
+   cp_gimplify_expr).  Also if OP is that sum guarded against wrapping
+   around the address space (ubsan_p3100_unguarded_sum), p then a saved
+   expression the guard evaluates.  Not if the offset would change the
+   alignment ALIGN (in bytes, 0 for none) the check also tests, nor if p is
+   the address of an object or a constant, which is not checked (the
+   innermost pointer of a guarded chain, ubsan_p3100_subscript_pointer).  */
+
+tree
+ubsan_p3100_constant_subscript (tree op, unsigned HOST_WIDE_INT align)
+{
+  if (!flag_contracts_p3100 || op == NULL_TREE)
+    return NULL_TREE;
+  op = ubsan_p3100_unguarded_sum (op);
+  if (TREE_CODE (op) != POINTER_PLUS_EXPR
+      || !P3100_SUBSCRIPT_ADDRESS_P (op)
+      || TREE_CODE (TREE_OPERAND (op, 1)) != INTEGER_CST)
+    return NULL_TREE;
+  if (align > 1
+      && (TREE_INT_CST_LOW (TREE_OPERAND (op, 1)) & (align - 1)) != 0)
+    return NULL_TREE;
+  tree ptr = tree_strip_nop_conversions (ubsan_p3100_subscript_pointer (op));
+  if (TREE_CODE (ptr) == SAVE_EXPR)
+    ptr = tree_strip_nop_conversions (TREE_OPERAND (ptr, 0));
+  if (TREE_CODE (ptr) == ADDR_EXPR || CONSTANT_CLASS_P (ptr))
+    return NULL_TREE;
+  return op;
+}
+
+/* P3100: if OP is the derived object's address of a downcast of `*p' to a
+   reference (P3100_DOWNCAST_ADDRESS_P) that -fsanitize=vptr's check of the
+   downcast wraps, `(<vptr check>, (D *) (p - offset))', possibly saved as
+   a member call's object argument, return the downcast's sum
+   `p - offset'; otherwise NULL_TREE.  Not if p has side effects, which a
+   null check of p would evaluate again.  */
+
+tree
+ubsan_p3100_vptr_checked_downcast (tree op)
+{
+  if (!flag_contracts_p3100)
+    return NULL_TREE;
+  bool wrapped = false;
+  while (true)
+    {
+      STRIP_NOPS (op);
+      if (TREE_CODE (op) == SAVE_EXPR)
+	op = TREE_OPERAND (op, 0);
+      else if (TREE_CODE (op) == COMPOUND_EXPR)
+	{
+	  op = TREE_OPERAND (op, 1);
+	  wrapped = true;
+	}
+      else
+	break;
+    }
+  if (!wrapped
+      || TREE_CODE (op) != POINTER_PLUS_EXPR
+      || !P3100_DOWNCAST_ADDRESS_P (op)
+      || TREE_SIDE_EFFECTS (TREE_OPERAND (op, 0)))
+    return NULL_TREE;
+  return op;
+}
+
+/* P3100: true if OP is the address of the element at a constant subscript
+   (ubsan_p3100_constant_subscript) guarded against wrapping around the
+   address space (ubsan_p3100_unguarded_sum).  */
+
+bool
+ubsan_p3100_guarded_subscript_p (tree op)
+{
+  tree sub = ubsan_p3100_constant_subscript (op, 0);
+  if (sub == NULL_TREE)
+    return false;
+  STRIP_NOPS (op);
+  return op != sub;
+}
+
+/* P3100: SUB being the address `p + c' of the element at a constant
+   subscript (ubsan_p3100_constant_subscript) found in OP, return it formed
+   from PTR, p evaluated once, instead.  If OP guards SUB against wrapping
+   around the address space, return OP itself: its p is a saved expression
+   that PTR evaluated, and the guard stays.  */
+
+tree
+ubsan_p3100_rebuild_subscript (tree sub, tree ptr, tree op)
+{
+  tree stripped = op;
+  STRIP_NOPS (stripped);
+  if (stripped != sub)
+    return op;
+  tree r = build2 (POINTER_PLUS_EXPR, TREE_TYPE (sub), ptr,
+		   TREE_OPERAND (sub, 1));
+  P3100_SUBSCRIPT_ADDRESS_P (r) = 1;
+  P3100_DOWNCAST_ADDRESS_P (r) = P3100_DOWNCAST_ADDRESS_P (sub);
+  return r;
+}
+
+static tree ubsan_maybe_instrument_reference_or_call (location_t, tree, tree,
+						      enum ubsan_null_ckind,
+						      bool = false);
+
+/* P3100: if OP, the object pointer of OP->*PM, is the address of a member
+   subobject, (p->s).*pm, check the pointer the object is reached through,
+   p, instead: that is the dereference, and the ubsan pass then checks
+   neither the address of the member nor the addresses formed from it
+   (ubsan_ptrmem_derived_p), so it is reported once, and for a member at a
+   nonzero offset too.  Return true if OP is such an address, with *RESULT
+   the address formed from the checked pointer, or NULL_TREE if it needs no
+   check.  */
+
+static bool
+ubsan_p3100_instrument_ptrmem_subobject (location_t loc, tree op,
+					 tree *result)
+{
+  if (!flag_contracts_p3100
+      || TREE_CODE (op) != ADDR_EXPR
+      || !handled_component_p (TREE_OPERAND (op, 0)))
+    return false;
+  tree base = TREE_OPERAND (op, 0);
+  while (handled_component_p (base))
+    base = TREE_OPERAND (base, 0);
+  if (!INDIRECT_REF_P (base) && TREE_CODE (base) != MEM_REF)
+    return false;
+  tree ptr = TREE_OPERAND (base, 0);
+  tree stripped = tree_strip_nop_conversions (ptr);
+  if (!POINTER_TYPE_P (TREE_TYPE (ptr))
+      || TREE_CODE (stripped) == ADDR_EXPR
+      || CONSTANT_CLASS_P (stripped))
+    return false;
+  tree r = ubsan_maybe_instrument_reference_or_call (loc, ptr, TREE_TYPE (ptr),
+						     UBSAN_MEMBER_ACCESS);
+  if (!r)
+    {
+      *result = NULL_TREE;
+      return true;
+    }
+  /* Rebuild the address on the checked pointer.  */
+  op = copy_node (op);
+  TREE_SIDE_EFFECTS (op) = 1;
+  tree *slot = &TREE_OPERAND (op, 0);
+  while (handled_component_p (*slot))
+    {
+      *slot = copy_node (*slot);
+      TREE_SIDE_EFFECTS (*slot) = 1;
+      slot = &TREE_OPERAND (*slot, 0);
+    }
+  *slot = copy_node (*slot);
+  TREE_SIDE_EFFECTS (*slot) = 1;
+  TREE_OPERAND (*slot, 0) = r;
+  *result = op;
+  return true;
+}
+
 static tree
 ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
-					  enum ubsan_null_ckind ckind)
+					  enum ubsan_null_ckind ckind,
+					  bool p3100_access)
 {
-  if (!sanitize_flags_p (SANITIZE_ALIGNMENT | SANITIZE_NULL)
-      || current_function_decl == NULL_TREE)
+  if (current_function_decl == NULL_TREE)
     return NULL_TREE;
+
+  tree subobject;
+  if (ckind == UBSAN_MEMBER_ACCESS
+      && ubsan_p3100_instrument_ptrmem_subobject (loc, op, &subobject))
+    return subobject;
+
+  /* P3100: a reference bound to, or a member function called on, an empty
+     base class subobject at a nonzero offset has its object pointer
+     checked (ubsan_p3100_check_base_offset_object), first; the address
+     itself is never null.  */
+  tree base_check = NULL_TREE;
+  if (ckind == UBSAN_REF_BINDING || ckind == UBSAN_MEMBER_CALL)
+    base_check = ubsan_p3100_check_base_offset_object (loc, &op);
+  tree base_op = op;
+
+  /* P3100 routes null-dereference and misalignment to the contract-violation
+     machinery.  This gate covers two of the three syntactic shapes of that UB
+     -- a reference binding (int &r = *p) and a null-this member call
+     (p->f ()); the third, a plain *p, is handled by the sibling gates.  All
+     three must consult the routed reaction, or a configured check applies to
+     some spellings of one dereference and not others.  None of the shapes
+     gated here accesses the object, so a null pointer is reported as the
+     .indirection leaf of the group; the alignment check is that group's
+     .store leaf, as at every access.  The exception is the object pointer
+     of OP->*PM (UBSAN_MEMBER_ACCESS), whose member may yet be read or
+     written: that is not known until the expression is complete, so it is
+     instrumented when either leaf applies, built as .indirection, and
+     retargeted to .access at genericization when the member is accessed
+     (cp_ubsan_retarget_ptrmem_object_checks).  So is the pointer a
+     reference is bound to, for an access through the reference within the
+     expression, which the ubsan pass reports by retargeting the binding's
+     check to .access (ubsan_binding_check_for): with .access alone, the
+     check is built with no reaction.
+
+     Resolve both reactions up front so they can widen the gate below.
+     If P3100_ACCESS, the null check is the .access leaf instead: a member
+     call of a virtual function by its unqualified name that the front end
+     resolved statically (DECISIONS.md E110 (a)).  */
+  const char *p3100_null_group
+    = (p3100_access
+       ? "ub:expr.unary.dereference.nullptr.access"
+       : "ub:expr.unary.dereference.nullptr.indirection");
+  int p3100_null_reaction
+    = resolve_implicit_ub_reaction (current_function_decl, loc,
+				    p3100_null_group);
+  int p3100_align_reaction
+    = resolve_implicit_ub_reaction (current_function_decl, loc,
+				    "ub:basic.align.object.alignment.store");
+  bool p3100_null = (p3100_null_reaction != IMPLICIT_UB_NONE
+		     || ((ckind == UBSAN_MEMBER_ACCESS
+			  || ckind == UBSAN_REF_BINDING)
+			 && (resolve_implicit_ub_reaction
+			     (current_function_decl, loc,
+			      "ub:expr.unary.dereference.nullptr.access")
+			     != IMPLICIT_UB_NONE)));
+  /* A reference bound to, or a member function called on, a member
+     subobject has its null dereference checked on the object pointer, and
+     reported once.  */
+  bool checked_subobject
+    = (flag_contracts_p3100
+       && (ckind == UBSAN_REF_BINDING || ckind == UBSAN_MEMBER_CALL)
+       && ubsan_p3100_checked_subobject_p (op));
+  if (p3100_null && checked_subobject)
+    {
+      p3100_null_reaction = IMPLICIT_UB_NONE;
+      p3100_null = false;
+    }
+  /* A reference bound to, or a member function called on, a glvalue that
+     is a reference already -- a reference variable or parameter converted
+     (`const T &r2 = r', the `static_cast<T &&> (t)' of std::move), to a
+     base class too, a call returning a reference, `r.f ()' -- indirects
+     through no pointer here: the object was reached where that reference
+     was bound, and checked there (ubsan_p3100_reference_glvalue_p).  And
+     the address of an empty base class subobject at a nonzero offset is
+     never null: its object pointer is checked instead
+     (ubsan_p3100_check_base_offset_object).  */
+  if (p3100_null
+      && (ckind == UBSAN_REF_BINDING || ckind == UBSAN_MEMBER_CALL)
+      && (ubsan_p3100_reference_glvalue_p (op)
+	  || ubsan_p3100_base_offset_object (op)))
+    {
+      p3100_null_reaction = IMPLICIT_UB_NONE;
+      p3100_null = false;
+    }
+  /* Nor does the object of OP->*PM that is a reference already, `r.*pm'
+     (DECISIONS.md E92 (a)).  */
+  if (p3100_null
+      && ckind == UBSAN_MEMBER_ACCESS
+      && ubsan_p3100_reference_glvalue_p (op))
+    {
+      p3100_null_reaction = IMPLICIT_UB_NONE;
+      p3100_null = false;
+    }
+  bool p3100_align = (p3100_align_reaction != IMPLICIT_UB_NONE);
+
+  if (!sanitize_flags_p (SANITIZE_ALIGNMENT | SANITIZE_NULL)
+      && !p3100_null && !p3100_align)
+    return (base_check
+	    ? build2 (COMPOUND_EXPR, TREE_TYPE (base_op), base_check, base_op)
+	    : NULL_TREE);
 
   tree type = TREE_TYPE (ptype);
   tree orig_op = op;
   bool instrument = false;
   unsigned int mina = 0;
 
-  if (sanitize_flags_p (SANITIZE_ALIGNMENT))
+  if (sanitize_flags_p (SANITIZE_ALIGNMENT) || p3100_align)
     {
       mina = min_align_of_type (type);
       if (mina <= 1)
 	mina = 0;
     }
+  /* Under -fcontracts-p3100, nor is -fsanitize=null's check of such a
+     subobject's address made: the object pointer's check, P3100's or the
+     sanitizer's, reports the null dereference once (DECISIONS.md E120).
+     With an alignment edge the check is made as it is.  */
+  if (checked_subobject && !mina)
+    return (base_check
+	    ? build2 (COMPOUND_EXPR, TREE_TYPE (base_op), base_check, base_op)
+	    : NULL_TREE);
   while ((TREE_CODE (op) == NOP_EXPR
 	  || TREE_CODE (op) == NON_LVALUE_EXPR)
 	 && TREE_CODE (TREE_TYPE (op)) == POINTER_TYPE)
@@ -936,7 +1401,8 @@ ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
     }
   else
     {
-      if (sanitize_flags_p (SANITIZE_NULL) && TREE_CODE (op) == ADDR_EXPR)
+      if ((sanitize_flags_p (SANITIZE_NULL) || p3100_null)
+	  && TREE_CODE (op) == ADDR_EXPR)
 	{
 	  /* tree_single_nonzero_p will not return true for non-weak
 	     non-automatic decls with -fno-delete-null-pointer-checks,
@@ -950,7 +1416,7 @@ ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
 	  flag_delete_null_pointer_checks
 	    = save_flag_delete_null_pointer_checks;
 	}
-      else if (sanitize_flags_p (SANITIZE_NULL))
+      else if (sanitize_flags_p (SANITIZE_NULL) || p3100_null)
 	instrument = true;
       if (mina && mina > 1)
 	{
@@ -960,32 +1426,187 @@ ubsan_maybe_instrument_reference_or_call (location_t loc, tree op, tree ptype,
 	}
     }
   if (!instrument)
-    return NULL_TREE;
+    return (base_check
+	    ? build2 (COMPOUND_EXPR, TREE_TYPE (base_op), base_check, base_op)
+	    : NULL_TREE);
+  /* P3100: the element at a constant subscript of a pointer, `S &r =
+     sp[1]', `sp[1].f ()', is checked on the pointer itself, as its
+     accesses are (DECISIONS.md E97 (c)), unless the offset changes the
+     alignment tested; the address is then formed from the checked
+     pointer.  So is the derived object of a downcast of `*p' to a
+     reference (P3100_DOWNCAST_ADDRESS_P), by -fsanitize=null's check too
+     where no P3100 null check is made: that address is not null where p
+     is, and the conversion made no null test.  */
+  tree sub = NULL_TREE;
+  tree sub_op = NULL_TREE;
+  if (p3100_null || sanitize_flags_p (SANITIZE_NULL))
+    {
+      sub = ubsan_p3100_constant_subscript (orig_op, mina);
+      if (sub && !p3100_null && !P3100_DOWNCAST_ADDRESS_P (sub))
+	sub = NULL_TREE;
+      /* A member call's object argument, the downcast wrapped by its vptr
+	 check and saved: check p, and leave the argument as it is
+	 (ubsan_p3100_rebuild_subscript returns it).  */
+      if (!sub && ckind == UBSAN_MEMBER_CALL)
+	{
+	  sub = ubsan_p3100_vptr_checked_downcast (orig_op);
+	  if (sub
+	      && mina > 1
+	      && (TREE_INT_CST_LOW (TREE_OPERAND (sub, 1)) & (mina - 1)) != 0)
+	    sub = NULL_TREE;
+	}
+      if (sub)
+	{
+	  sub_op = orig_op;
+	  orig_op = ubsan_p3100_subscript_pointer (sub);
+	}
+    }
   op = save_expr (orig_op);
+  tree value = op;
+  /* The object pointer of OP->*PM gets a temporary of its own even when it
+     could be evaluated again (`this', a parameter declared const): the
+     ubsan pass recognizes the addresses formed from it by that temporary,
+     and does not check them again (ubsan_ptrmem_derived_p).  */
+  if (ckind == UBSAN_MEMBER_ACCESS
+      && TREE_CODE (op) != SAVE_EXPR
+      && !CONSTANT_CLASS_P (op))
+    {
+      op = build1_loc (EXPR_LOCATION (orig_op), SAVE_EXPR, TREE_TYPE (orig_op),
+		       orig_op);
+      TREE_SIDE_EFFECTS (op) = 1;
+      value = op;
+    }
+  /* So does the pointer a reference is bound to under a P3100 null or
+     alignment check, one named UBSAN_P3100_BOUND_NAME: the ubsan pass
+     reports a read or write through the reference within the expression,
+     the same null dereference, by this check, under the .access leaf
+     (ubsan_binding_check_for), and the same misaligned access by its
+     alignment check (ubsan_binding_checks_align_p; GCC-879).  */
+  else if (ckind == UBSAN_REF_BINDING
+	   && (p3100_null
+	       || (mina && p3100_align_reaction != IMPLICIT_UB_NONE))
+	   && !TREE_CONSTANT (orig_op))
+    {
+      tree var = build_decl (loc, VAR_DECL,
+			     get_identifier (UBSAN_P3100_BOUND_NAME),
+			     TREE_TYPE (orig_op));
+      DECL_ARTIFICIAL (var) = 1;
+      DECL_IGNORED_P (var) = 1;
+      DECL_CONTEXT (var) = current_function_decl;
+      op = build4 (TARGET_EXPR, TREE_TYPE (orig_op), var, orig_op, NULL_TREE,
+		   NULL_TREE);
+      TREE_SIDE_EFFECTS (op) = 1;
+      value = var;
+    }
   gcc_assert (POINTER_TYPE_P (ptype));
   if (TREE_CODE (ptype) == REFERENCE_TYPE)
     ptype = build_pointer_type (TREE_TYPE (ptype));
   tree kind = build_int_cst (ptype, ckind);
   tree align = build_int_cst (pointer_sized_int_node, mina);
+  /* UBSAN_NULL_REACTION is the P3100 implicit-UB null reaction,
+     UBSAN_NULL_ENTRY/UBSAN_NULL_DATA the null contract handler entry point and
+     its static data-block address; the UBSAN_NULL_ALIGN_* operands the same
+     for alignment.  Carry the resolved reactions
+     and handlers, mirroring instrument_mem_ref -- the reaction has to
+     travel as an operand rather than be re-derived later, because by
+     expansion time cfun->decl may be an inlined-into function with a
+     different configuration.  */
+  tree reaction = build_int_cst (unsigned_type_node, p3100_null_reaction);
+  /* Only an access with an alignment edge (MINA != 0) has an alignment
+     check to react to; carry NONE otherwise, as instrument_mem_ref does.  */
+  if (!mina)
+    p3100_align_reaction = IMPLICIT_UB_NONE;
+  tree align_reaction
+    = build_int_cst (unsigned_type_node, p3100_align_reaction);
+  tree entryt, data_addrt;
+  implicit_ub_handler_operands (current_function_decl, loc,
+				p3100_null_group,
+				p3100_null_reaction, &entryt, &data_addrt);
+  tree align_entryt, align_data_addrt;
+  implicit_ub_handler_operands (current_function_decl, loc,
+				"ub:basic.align.object.alignment.store",
+				p3100_align_reaction, &align_entryt,
+				&align_data_addrt);
   tree call
     = build_call_expr_internal_loc (loc, IFN_UBSAN_NULL, void_type_node,
-				    3, op, kind, align);
+				    UBSAN_NULL_NUM_OPS, op, kind, align,
+				    reaction, entryt, data_addrt,
+				    align_reaction, align_entryt,
+				    align_data_addrt);
   TREE_SIDE_EFFECTS (call) = 1;
-  return fold_build2 (COMPOUND_EXPR, TREE_TYPE (op), call, op);
+  if (sub)
+    value = fold_convert (TREE_TYPE (sub_op),
+			  ubsan_p3100_rebuild_subscript (sub, value, sub_op));
+  tree res = fold_build2 (COMPOUND_EXPR, TREE_TYPE (value), call, value);
+  if (base_check)
+    res = build2 (COMPOUND_EXPR, TREE_TYPE (res), base_check, res);
+  return res;
+}
+
+/* P3100: build the check that OP, a single-evaluation pointer (a SAVE_EXPR
+   or a decl), is not null, for an indirection through it whose result is
+   not accessed -- `&*p', a discarded `*p', the object expression of a
+   static member -- the .indirection leaf of
+   {expr.unary.dereference.nullptr}; or, if ACCESS, for one that only reads
+   through it what the front end then drops (the base offset a discarded
+   conversion to a virtual base reads), the .access leaf.  Return the
+   IFN_UBSAN_NULL call, which evaluates OP, or NULL_TREE if that leaf
+   resolves to no check here.  -fsanitize=null checks none of these, so
+   nothing is built for it.  */
+
+tree
+ubsan_build_p3100_indirection_check (location_t loc, tree op, bool access)
+{
+  if (!flag_contracts_p3100 || current_function_decl == NULL_TREE)
+    return NULL_TREE;
+  const char *group = (access
+		       ? "ub:expr.unary.dereference.nullptr.access"
+		       : "ub:expr.unary.dereference.nullptr.indirection");
+  int reaction = resolve_implicit_ub_reaction (current_function_decl, loc,
+					       group);
+  if (reaction == IMPLICIT_UB_NONE)
+    return NULL_TREE;
+  tree ptype = TREE_TYPE (op);
+  gcc_assert (POINTER_TYPE_P (ptype));
+  tree entryt, data_addrt;
+  implicit_ub_handler_operands (current_function_decl, loc, group, reaction,
+				&entryt, &data_addrt);
+  /* No alignment check: nothing is accessed.  */
+  tree call
+    = build_call_expr_internal_loc (loc, IFN_UBSAN_NULL, void_type_node,
+				    UBSAN_NULL_NUM_OPS, op,
+				    build_int_cst (ptype, (access
+							   ? UBSAN_LOAD_OF
+							   : UBSAN_REF_BINDING)),
+				    build_int_cst (pointer_sized_int_node, 0),
+				    build_int_cst (unsigned_type_node,
+						   reaction),
+				    entryt, data_addrt,
+				    build_int_cst (unsigned_type_node,
+						   IMPLICIT_UB_NONE),
+				    null_pointer_node, null_pointer_node);
+  TREE_SIDE_EFFECTS (call) = 1;
+  return call;
 }
 
 /* Instrument a NOP_EXPR to REFERENCE_TYPE or INTEGER_CST with REFERENCE_TYPE
-   type if needed.  */
+   type if needed.  P3100: a binding with no location of its own -- the
+   conversion of an implicit reference binding, `int &r = *p', `f (*p)', a
+   reference constant -- is checked at LOC, the location of the innermost
+   expression around it that has one, which configuration matching and the
+   contract_violation's location() use; otherwise the violation would have
+   an empty file name and line 0.  */
 
 void
-ubsan_maybe_instrument_reference (tree *stmt_p)
+ubsan_maybe_instrument_reference (tree *stmt_p, location_t loc)
 {
   tree stmt = *stmt_p;
   tree op = stmt;
   if (TREE_CODE (stmt) == NOP_EXPR)
     op = TREE_OPERAND (stmt, 0);
-  op = ubsan_maybe_instrument_reference_or_call (EXPR_LOCATION (stmt), op,
-						 TREE_TYPE (stmt),
+  if (EXPR_HAS_LOCATION (stmt) || !flag_contracts_p3100)
+    loc = EXPR_LOCATION (stmt);
+  op = ubsan_maybe_instrument_reference_or_call (loc, op, TREE_TYPE (stmt),
 						 UBSAN_REF_BINDING);
   if (op)
     {
@@ -1011,6 +1632,22 @@ ubsan_maybe_instrument_ptrmem_object (location_t loc, tree op)
 }
 
 /* Instrument a CALL_EXPR to a method if needed.  */
+
+/* P3100: instrument OP, the object pointer of a member function called
+   through a pointer to member function, before the `this' adjustment, as
+   a member call's object pointer (cp_ubsan_maybe_instrument_ptrmemfunc_call);
+   or, if ACCESS, the object pointer of a virtual function called by its
+   unqualified name that the front end resolved statically, under the
+   .access leaf (cp_ubsan_maybe_check_devirtualized_call).  Return the
+   instrumented pointer, or NULL_TREE if it needs no check.  */
+
+tree
+ubsan_maybe_instrument_member_call_object (location_t loc, tree op,
+					   bool access)
+{
+  return ubsan_maybe_instrument_reference_or_call (loc, op, TREE_TYPE (op),
+						   UBSAN_MEMBER_CALL, access);
+}
 
 void
 ubsan_maybe_instrument_member_call (tree stmt, bool is_ctor)

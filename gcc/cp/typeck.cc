@@ -3040,8 +3040,14 @@ build_class_member_access_expr (cp_expr object, tree member,
 	   a call to its wrapper.  */
 	result = wrap;
 
-      /* If OBJECT has side-effects, they are supposed to occur.  */
-      if (TREE_SIDE_EFFECTS (object))
+      /* If OBJECT has side-effects, they are supposed to occur.  P3100: so
+	 is an indirection through a pointer, `*p'; the check evaluates
+	 them.  */
+      tree check
+	= cp_ubsan_maybe_check_unaccessed_glvalue (input_location, object);
+      if (check)
+	result = build2 (COMPOUND_EXPR, TREE_TYPE (result), check, result);
+      else if (TREE_SIDE_EFFECTS (object))
 	result = build2 (COMPOUND_EXPR, TREE_TYPE (result), object, result);
     }
   else if (TREE_CODE (member) == FIELD_DECL)
@@ -3182,6 +3188,11 @@ build_class_member_access_expr (cp_expr object, tree member,
       if (TREE_SIDE_EFFECTS (object))
 	result = build2 (COMPOUND_EXPR, TREE_TYPE (result),
 			 object, result);
+      /* P3100: so is an indirection through a pointer, `*p'; the check
+	 evaluates every side effect of OBJECT instead.  */
+      if (tree check
+	  = cp_ubsan_maybe_check_unaccessed_glvalue (input_location, object))
+	result = build2 (COMPOUND_EXPR, TREE_TYPE (member), check, member);
     }
   else if ((using_decl = strip_using_decl (member)) != member)
     result = build_class_member_access_expr (object,
@@ -3996,6 +4007,77 @@ cp_strict_aliasing_warning (location_t loc, tree type, tree expr)
   return strict_aliasing_warning (loc, type, expr);
 }
 
+/* P3100: true if the null check of ub:expr.unary.dereference.nullptr
+   applies at LOC, under either leaf.  */
+
+static bool
+p3100_null_check_applies_p (location_t loc)
+{
+  return (implicit_ub_check_context_p ()
+	  && current_function_decl != NULL_TREE
+	  && ((resolve_implicit_contract_semantic
+	       (current_function_decl, loc,
+		"ub:expr.unary.dereference.nullptr.access") != CES_ASSUME)
+	      || (resolve_implicit_contract_semantic
+		  (current_function_decl, loc,
+		   "ub:expr.unary.dereference.nullptr.indirection")
+		  != CES_ASSUME)));
+}
+
+/* P3100: true if the null check of ub:expr.unary.dereference.nullptr is
+   made at LOC, under either leaf: the semantic is neither assume nor
+   ignore.  */
+
+static bool
+p3100_null_check_made_p (location_t loc)
+{
+  if (!implicit_ub_check_context_p () || current_function_decl == NULL_TREE)
+    return false;
+  static const char *const leaves[]
+    = { "ub:expr.unary.dereference.nullptr.access",
+	"ub:expr.unary.dereference.nullptr.indirection" };
+  for (const char *leaf : leaves)
+    {
+      contract_evaluation_semantic ces
+	= resolve_implicit_contract_semantic (current_function_decl, loc,
+					      leaf);
+      if (ces != CES_ASSUME && ces != CES_IGNORE)
+	return true;
+    }
+  return false;
+}
+
+/* P3100: the pointer operand P of pointer arithmetic, stripped of
+   conversions and of the save build_implicit_pointer_wrap_check's guard
+   makes of it.  */
+
+static tree
+p3100_strip_saved_pointer (tree p)
+{
+  p = tree_strip_nop_conversions (p);
+  if (TREE_CODE (p) == SAVE_EXPR)
+    p = tree_strip_nop_conversions (TREE_OPERAND (p, 0));
+  return p;
+}
+
+/* P3100: SUM being the address `p + c' of an element whose null checks are
+   made on p if c is a constant (P3100_ARITH_ADDRESS_P,
+   P3100_SUBSCRIPT_ADDRESS_P), fold its offset to an integer constant if
+   it is a constant expression -- `p[k]', `*(p + k)' with k a constant
+   variable -- as the checks built before cp_fold test it
+   (ubsan_p3100_constant_subscript; DECISIONS.md E97 (c), E105 (a)).  */
+
+static void
+p3100_fold_element_offset (tree sum)
+{
+  tree off = TREE_OPERAND (sum, 1);
+  if (TREE_CODE (off) == INTEGER_CST)
+    return;
+  tree folded = fold (maybe_constant_value (off));
+  if (TREE_CODE (folded) == INTEGER_CST)
+    TREE_OPERAND (sum, 1) = fold_convert (TREE_TYPE (off), folded);
+}
+
 /* The implementation of the above, and of indirection implied by other
    constructs.  If DO_FOLD is true, fold away INDIRECT_REF of ADDR_EXPR.  */
 
@@ -4062,6 +4144,22 @@ cp_build_indirect_ref_1 (location_t loc, tree ptr, ref_operator errorstring,
       else
 	{
 	  tree ref = build1 (INDIRECT_REF, t, pointer);
+	  /* P3100: an indirection `*(p + c)', `(p + c)->m' or `(p + c)->*pm'
+	     through a pointer plus or minus an integral constant expression
+	     (P3100_ARITH_ADDRESS_P) is checked for null on p itself, as the
+	     subscript p[c] is (DECISIONS.md E99 (a), E105 (a)): mark the
+	     address as an element's, also when it is guarded against
+	     wrapping around the address space (ubsan_p3100_unguarded_sum).  */
+	  if (errorstring == RO_UNARY_STAR
+	      || errorstring == RO_ARROW
+	      || errorstring == RO_ARROW_STAR)
+	    {
+	      tree sum = ubsan_p3100_unguarded_sum (pointer);
+	      if (TREE_CODE (sum) == POINTER_PLUS_EXPR
+		  && P3100_ARITH_ADDRESS_P (sum)
+		  && p3100_null_check_applies_p (loc))
+		P3100_SUBSCRIPT_ADDRESS_P (sum) = 1;
+	    }
 
 	  /* We *must* set TREE_READONLY when dereferencing a pointer to const,
 	     so that we get the proper error message if the result is used
@@ -4372,6 +4470,32 @@ cp_build_array_ref (location_t loc, tree array, tree idx,
     warn_array_subscript_with_type_char (loc, idx);
 
     ret = cp_build_binary_op (input_location, PLUS_EXPR, ar, ind, complain);
+    /* P3100: mark the element's address `p + i' as a subscript's where the
+       null check of ub:expr.unary.dereference.nullptr applies: for a
+       constant subscript, it checks p itself (DECISIONS.md E97 (c),
+       ubsan_p3100_constant_subscript); also when it is guarded against
+       wrapping around the address space (ubsan_p3100_unguarded_sum), p
+       then saved.  */
+    tree sum = ubsan_p3100_unguarded_sum (ret);
+    if (TREE_CODE (sum) == POINTER_PLUS_EXPR
+	&& ((p3100_strip_saved_pointer (TREE_OPERAND (sum, 0))
+	     == tree_strip_nop_conversions (ar))
+	    /* A constant subscript of a sum with a constant, `(p + 1)[1]',
+	       folded into one sum on p (DECISIONS.md E103 (a)).  */
+	    || P3100_ARITH_ADDRESS_P (sum))
+	&& implicit_ub_check_context_p ()
+	&& current_function_decl != NULL_TREE
+	&& ((resolve_implicit_contract_semantic
+	     (current_function_decl, loc,
+	      "ub:expr.unary.dereference.nullptr.access") != CES_ASSUME)
+	    || (resolve_implicit_contract_semantic
+		(current_function_decl, loc,
+		 "ub:expr.unary.dereference.nullptr.indirection")
+		!= CES_ASSUME)))
+      {
+	P3100_SUBSCRIPT_ADDRESS_P (sum) = 1;
+	p3100_fold_element_offset (sum);
+      }
     if (first)
       ret = build2_loc (loc, COMPOUND_EXPR, TREE_TYPE (ret), first, ret);
     ret = cp_build_indirect_ref (loc, ret, RO_ARRAY_INDEXING, complain);
@@ -4702,7 +4826,22 @@ cp_build_function_call_vec (tree function, vec<tree, va_gc> **params,
     {
       fndecl = NULL_TREE;
 
+      bool indirection
+	= (flag_contracts_p3100
+	   && TREE_CODE (TREE_TYPE (function)) == FUNCTION_TYPE
+	   && p3100_indirection_glvalue_p (function));
+      location_t loc = cp_expr_loc_or_input_loc (function);
+
       function = build_addr_func (function, complain);
+
+      /* P3100: the conversion to a pointer folded the indirection away;
+	 check the pointer, as a reference bound to the glvalue is
+	 checked.  */
+      if (indirection && function != error_mark_node)
+	if (tree check
+	    = cp_ubsan_maybe_check_unaccessed_indirection (loc, &function))
+	  function = build2 (COMPOUND_EXPR, TREE_TYPE (function), check,
+			     function);
     }
 
   if (function == error_mark_node)
@@ -5789,10 +5928,42 @@ cp_build_binary_op (const op_location_t &location,
 	      result_type = TREE_TYPE (ptr_operand);
 	      break;
 	    }
-	  return cp_pointer_int_sum (location, code,
-				     ptr_operand,
-				     int_operand,
-				     complain);
+	  tree sum = cp_pointer_int_sum (location, code,
+					 ptr_operand,
+					 int_operand,
+					 complain);
+	  /* P3100: a pointer plus or minus an integral constant expression,
+	     `p + c', `c + p', `p - c', is the shape of DECISIONS.md E99 (a)
+	     (and E105 (a)) if it is indirected through
+	     (cp_build_indirect_ref_1); so is the sum guarded against wrapping
+	     around the address space (ubsan_p3100_unguarded_sum).  */
+	  if (flag_contracts_p3100)
+	    {
+	      tree plus = ubsan_p3100_unguarded_sum (sum);
+	      /* A chain with constants, `p + 1 + 2', folds into one sum on
+		 p: its pointer operand is such a sum already, on the same p
+		 (DECISIONS.md E103 (a)).  */
+	      tree inner = tree_strip_nop_conversions (ptr_operand);
+	      bool chain
+		= (TREE_CODE (plus) == POINTER_PLUS_EXPR
+		   && TREE_CODE (inner) == POINTER_PLUS_EXPR
+		   && P3100_ARITH_ADDRESS_P (inner)
+		   && (p3100_strip_saved_pointer (TREE_OPERAND (plus, 0))
+		       == p3100_strip_saved_pointer (TREE_OPERAND (inner, 0))));
+	      if (TREE_CODE (plus) == POINTER_PLUS_EXPR
+		  && (chain
+		      || (p3100_strip_saved_pointer (TREE_OPERAND (plus, 0))
+			  == tree_strip_nop_conversions (ptr_operand)))
+		  && (TREE_CODE (maybe_constant_value
+				 (tree_strip_any_location_wrapper
+				  (int_operand)))
+		      == INTEGER_CST))
+		{
+		  P3100_ARITH_ADDRESS_P (plus) = 1;
+		  p3100_fold_element_offset (plus);
+		}
+	    }
+	  return sum;
 	}
       common = 1;
       break;
@@ -7423,6 +7594,9 @@ build_x_unary_op (location_t loc, enum tree_code code, cp_expr xarg,
 
       exp = cp_build_addr_expr_strict (xarg, complain);
 
+      /* P3100: `&*p' is the pointer itself; check the indirection.  */
+      exp = cp_ubsan_maybe_check_address_of (loc, xarg, exp);
+
       if (TREE_CODE (exp) == PTRMEM_CST)
 	PTRMEM_CST_LOCATION (exp) = loc;
       else
@@ -7458,6 +7632,8 @@ cp_build_addressof (location_t loc, tree arg, tsubst_flags_t complain)
     }
 
   tree exp = cp_build_addr_expr_strict (arg, complain);
+  /* P3100: as for `&*p'.  */
+  exp = cp_ubsan_maybe_check_address_of (loc, arg, exp);
 
   if (processing_template_decl && exp != error_mark_node)
     exp = build_min_non_dep (ADDRESSOF_EXPR, exp, orig_expr, NULL_TREE);
@@ -8855,9 +9031,29 @@ build_static_cast_1 (location_t loc, tree type, tree expr, bool c_cast_p,
 	 is not a virtual base of "D".  Even if we don't have a guarantee
 	 that expr is NULL, if the static_cast is to a reference type,
 	 it is UB if it would be NULL, so omit the non-NULL check.  */
+      bool p3100_downcast = (flag_contracts_p3100
+			     && p3100_null_check_made_p (loc));
       expr = build_base_path (MINUS_EXPR, expr, base,
-			      /*nonnull=*/flag_delete_null_pointer_checks,
+			      /*nonnull=*/(flag_delete_null_pointer_checks
+					   || p3100_downcast),
 			      complain);
+      /* P3100: the derived object's address, `p - offset' with the base at
+	 a nonzero offset, is not null where p is: a null check of a
+	 reference bound to it, of a member access or member call on it,
+	 checks p itself (P3100_DOWNCAST_ADDRESS_P), the indirection.  Under
+	 -fsanitize=null too, where p is tested instead of the null test the
+	 conversion would otherwise make.  */
+      if (p3100_downcast && expr != error_mark_node)
+	{
+	  tree sum = tree_strip_nop_conversions (expr);
+	  if (TREE_CODE (sum) == POINTER_PLUS_EXPR
+	      && TREE_CODE (TREE_OPERAND (sum, 1)) == INTEGER_CST
+	      && !integer_zerop (TREE_OPERAND (sum, 1)))
+	    {
+	      P3100_SUBSCRIPT_ADDRESS_P (sum) = 1;
+	      P3100_DOWNCAST_ADDRESS_P (sum) = 1;
+	    }
+	}
 
       /* Check the dynamic type of the "D*", as for the pointer form below.
 	 INTYPE is the class "B" here, so pass "B*".  If build_base_path

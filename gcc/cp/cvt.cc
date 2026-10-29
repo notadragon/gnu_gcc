@@ -1383,6 +1383,11 @@ convert_to_void (tree expr, impl_conv_void implicit, tsubst_flags_t complain)
 		    gcc_unreachable ();
 		}
 
+	    /* P3100: but a reference cast of `*p', or the conversion of `*p'
+	       to a base class, is an indirection through p; check it.  */
+	    if (tree check = cp_ubsan_maybe_check_unaccessed_glvalue (loc,
+								      expr))
+	      return check;
 	    /* Since this was an implicit dereference, we should also act as if
 	       it was never there.  */
 	    return convert_to_void (TREE_OPERAND (expr, 0), implicit, complain);
@@ -1488,7 +1493,10 @@ convert_to_void (tree expr, impl_conv_void implicit, tsubst_flags_t complain)
                 && !warning_suppressed_p (expr, OPT_Wunused_value)
                 && !is_reference)
               warning_at (loc, OPT_Wunused_value, "value computed is not used");
-            expr = TREE_OPERAND (expr, 0);
+	    /* P3100: the indirection is still evaluated; check it, or the
+	       object pointer of a base class conversion, `*(B *) p'.  */
+	    tree check = cp_ubsan_maybe_check_unaccessed_glvalue (loc, expr);
+	    expr = check ? check : TREE_OPERAND (expr, 0);
           }
 
 	break;
@@ -1543,6 +1551,16 @@ convert_to_void (tree expr, impl_conv_void implicit, tsubst_flags_t complain)
 
 	break;
       }
+
+    case COMPONENT_REF:
+    case ARRAY_REF:
+      /* P3100: a member, or an element of an array member, of `*p', `p->m',
+	 is an indirection through p whose result is not accessed, unless it
+	 is volatile, and read; check it.  */
+      if (!TREE_THIS_VOLATILE (expr) && !CP_TYPE_VOLATILE_P (TREE_TYPE (expr)))
+	if (tree check = cp_ubsan_maybe_check_unaccessed_glvalue (loc, expr))
+	  return check;
+      break;
 
     case TARGET_EXPR:
       /* Don't bother with the temporary object returned from a function if

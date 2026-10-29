@@ -468,6 +468,7 @@ extern GTY(()) tree cp_global_trees[CPTI_MAX];
       ICS_ELLIPSIS_FLAG (in _CONV)
       DECL_INITIALIZED_P (in VAR_DECL)
       TYPENAME_TYPE_TAG_BIT_1 (in TYPENAME_TYPE)
+      CALL_EXPR_P3100_VIRTUAL_P (in CALL_EXPR, AGGR_INIT_EXPR)
       STMT_IS_FULL_EXPR_P (in _STMT)
       TARGET_EXPR_LIST_INIT_P (in TARGET_EXPR)
       DECL_FINAL_P (in FUNCTION_DECL)
@@ -4578,6 +4579,16 @@ struct GTY(()) lang_decl {
 /* In a CALL_EXPR appearing in a template, true if Koenig lookup
    should be performed at instantiation time.  */
 #define KOENIG_LOOKUP_P(NODE) TREE_LANG_FLAG_0 (CALL_EXPR_CHECK (NODE))
+
+/* P3100: in a CALL_EXPR, true if it calls a virtual function by its
+   unqualified name, `p->f ()', and the front end resolved the call
+   statically (a `final' function or class, an object of known dynamic
+   type): the call reads no vtable pointer, but its null check of the
+   object pointer is the .access leaf of ub:expr.unary.dereference.nullptr,
+   as a virtual call's is (DECISIONS.md E110 (a)).  Also in the
+   AGGR_INIT_EXPR of such a call returning a class by value.  */
+#define CALL_EXPR_P3100_VIRTUAL_P(NODE) \
+  TREE_LANG_FLAG_1 (CALL_OR_AGGR_INIT_CHECK (NODE))
 
 /* True if the arguments to NODE should be evaluated in left-to-right
    order regardless of PUSH_ARGS_REVERSED.  */
@@ -9580,6 +9591,24 @@ void cp_tree_c_finish_parsing ();
 /* In cp-ubsan.cc */
 extern void cp_ubsan_maybe_instrument_member_call (tree);
 extern void cp_ubsan_instrument_member_accesses (tree *);
+extern void cp_ubsan_retarget_ptrmem_object_checks (tree);
+extern tree cp_ubsan_maybe_check_unaccessed_indirection (location_t, tree *,
+							 bool = false);
+extern bool p3100_indirection_glvalue_p (tree);
+extern tree cp_ubsan_maybe_check_address_of (location_t, tree, tree);
+extern tree cp_ubsan_maybe_check_unaccessed_glvalue (location_t, tree);
+extern bool cp_ubsan_keep_addressof_call_p (tree);
+extern bool cp_ubsan_virtual_base_glvalue_p (tree);
+extern bool cp_ubsan_maybe_check_vbase_conversion (location_t, tree *,
+						   tree = NULL_TREE);
+extern bool cp_ubsan_maybe_check_dynamic_type_read (location_t, tree *);
+extern bool cp_ubsan_maybe_check_virtual_call_object (tree);
+extern bool cp_ubsan_maybe_check_devirtualized_call (tree);
+extern void cp_ubsan_maybe_check_aggr_init_call (tree);
+extern tree cp_ubsan_maybe_check_empty_copy_source (location_t, tree);
+extern tree cp_ubsan_maybe_check_empty_copy_bounds (location_t, tree);
+extern bool cp_ubsan_maybe_instrument_ptrmemfunc_call (tree);
+extern bool cp_ubsan_fold_cast_call_p (tree);
 extern tree cp_ubsan_maybe_instrument_downcast	(location_t, tree, tree, tree);
 extern tree cp_ubsan_maybe_instrument_cast_to_vbase (location_t, tree, tree);
 extern void cp_ubsan_maybe_initialize_vtbl_ptrs (tree);

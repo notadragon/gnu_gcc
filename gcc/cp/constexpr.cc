@@ -3951,6 +3951,27 @@ cxx_eval_internal_function (const constexpr_ctx *ctx, tree t,
   switch (CALL_EXPR_IFN (t))
     {
     case IFN_UBSAN_NULL:
+      /* P3100: a null check the front end built (the object pointer of
+	 `p->*pm', an indirection whose result is not accessed) is not
+	 evaluated, as -fsanitize=null's is not; but a speculative
+	 evaluation, whose result may replace the expression at run time
+	 (a folded constexpr call), must not drop a check that fails.  */
+      if (ctx->manifestly_const_eval != mce_true
+	  && call_expr_nargs (t) > UBSAN_NULL_REACTION
+	  && !integer_zerop (CALL_EXPR_ARG (t, UBSAN_NULL_REACTION)))
+	{
+	  tree ptr = CALL_EXPR_ARG (t, UBSAN_NULL_PTR);
+	  ptr = cxx_eval_constant_expression (ctx, ptr, vc_prvalue,
+					      non_constant_p, overflow_p,
+					      jump_target);
+	  if (*non_constant_p || integer_zerop (ptr))
+	    {
+	      *non_constant_p = true;
+	      return t;
+	    }
+	}
+      return void_node;
+
     case IFN_UBSAN_BOUNDS:
     case IFN_UBSAN_VPTR:
     case IFN_FALLTHROUGH:
@@ -8558,6 +8579,29 @@ cxx_eval_indirect_ref (const constexpr_ctx *ctx, tree t,
 	{
 	  if (!ctx->quiet)
 	    error ("dereferencing a null pointer");
+	  *non_constant_p = true;
+	  return t;
+	}
+
+      /* P3100: an indirection through a null pointer whose result is not
+	 accessed is undefined too, and checked at run time under the
+	 .indirection leaf where it applies -- by a null check the front end
+	 built (see cxx_eval_internal_function) or, for the object of an
+	 element or member whose address is formed, `&(*pp)[i]', one the
+	 ubsan pass builds later.  A speculative evaluation, whose result may
+	 replace the expression at run time (a folded constexpr call), must
+	 not drop that check.  */
+      tree p3100_fn = (ctx->call ? ctx->call->fundef->decl
+		       : current_function_decl);
+      if (lval && integer_zerop (op0)
+	  && flag_contracts_p3100
+	  && ctx->manifestly_const_eval != mce_true
+	  && p3100_fn
+	  && (resolve_implicit_ub_reaction
+	      (p3100_fn, cp_expr_loc_or_input_loc (t),
+	       "ub:expr.unary.dereference.nullptr.indirection")
+	      != IMPLICIT_UB_NONE))
+	{
 	  *non_constant_p = true;
 	  return t;
 	}

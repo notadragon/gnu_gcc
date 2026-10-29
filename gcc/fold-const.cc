@@ -9510,9 +9510,13 @@ fold_unary_loc (location_t loc, enum tree_code code, tree type, tree op0)
 
 	  /* If -fsanitize=alignment, avoid this optimization in GENERIC
 	     when the pointed type needs higher alignment than
-	     the p+ first operand's pointed type.  */
+	     the p+ first operand's pointed type.  P3100: so for the
+	     implicit alignment check of a reference binding
+	     (ub:basic.align.object.alignment.store), which any site may
+	     configure: folded, `int &r = *(int *) (buf + o)' would check
+	     the address of buf alone.  */
 	  if (!in_gimple_form
-	      && sanitize_flags_p (SANITIZE_ALIGNMENT)
+	      && (sanitize_flags_p (SANITIZE_ALIGNMENT) || flag_contracts_p3100)
 	      && (min_align_of_type (TREE_TYPE (type))
 		  > min_align_of_type (TREE_TYPE (TREE_TYPE (arg00)))))
 	    return NULL_TREE;

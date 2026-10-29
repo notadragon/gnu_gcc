@@ -5492,6 +5492,11 @@ keep_unused_object_arg (tree result, tree obj, tree fn)
     return result;
 
   check_postcondition_object_odr_use (obj);
+  /* P3100: an indirection through a pointer, `*p', is evaluated too; the
+     check evaluates every side effect of `obj'.  */
+  if (tree check = cp_ubsan_maybe_check_unaccessed_glvalue (input_location,
+							     obj))
+    return build2 (COMPOUND_EXPR, TREE_TYPE (result), check, result);
   if (!TREE_SIDE_EFFECTS (obj))
     return result;
 
@@ -10323,6 +10328,16 @@ build_trivial_dtor_call (tree instance, bool no_ptr_deref)
   if (!flag_lifetime_dse)
     {
     no_clobber:
+      /* P3100: see below.  */
+      tree obj = instance;
+      if (!no_ptr_deref
+	  && TYPE_PTR_P (TREE_TYPE (obj))
+	  && !VOID_TYPE_P (TREE_TYPE (TREE_TYPE (obj))))
+	obj = cp_build_fold_indirect_ref (obj);
+      if (!REFERENCE_REF_P (obj))
+	if (tree check = cp_ubsan_maybe_check_unaccessed_glvalue (input_location,
+								   obj))
+	  return check;
       return fold_convert (void_type_node, instance);
     }
 
@@ -10336,8 +10351,26 @@ build_trivial_dtor_call (tree instance, bool no_ptr_deref)
 
   /* A trivial destructor should still clobber the object.  */
   tree clobber = build_clobber (TREE_TYPE (instance), CLOBBER_OBJECT_END);
-  return build2 (MODIFY_EXPR, void_type_node,
-		 instance, clobber);
+  tree call = build2 (MODIFY_EXPR, void_type_node, instance, clobber);
+  /* P3100: a pseudo-destructor call `p->~T ()' (NO_PTR_DEREF), or a
+     trivial destructor called through a pointer, `p->~S ()', is an
+     indirection through p; check it before the clobber, or instead of it
+     if evaluating p has side effects, which the check evaluates.  The
+     object `static_cast<T &> (*p)' keeps its reference conversion, whose
+     binding ubsan_maybe_instrument_reference checks.  */
+  if (!REFERENCE_REF_P (instance)
+      /* The clobber of a member or base class subobject of `*p' is a store
+	 through its address, whose computation the ubsan pass checks on
+	 p.  */
+      && !handled_component_p (instance))
+    if (tree check = cp_ubsan_maybe_check_unaccessed_glvalue (input_location,
+							       instance))
+      /* The clobber of a virtual base reads the base's offset through p
+	 again, after the check.  */
+      call = ((TREE_SIDE_EFFECTS (instance)
+	       || cp_ubsan_virtual_base_glvalue_p (instance))
+	      ? check : build2 (COMPOUND_EXPR, void_type_node, check, call));
+  return call;
 }
 
 /* Return true if in an immediate function context, or an unevaluated operand,
@@ -10986,10 +11019,57 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
       else
 	targ = NULL_TREE;
 
-      if (targ)
+      /* P3100: a trivial copy of an empty class from an indirection
+	 through a pointer reads nothing; check the pointer under the
+	 .indirection leaf, as the copy drops the reference binding, or the
+	 object it copies from, a member of `*p' (`E e2 = p->e').  */
+      tree p3100_check = NULL_TREE;
+      tree bounds = NULL_TREE;
+      if (trivial
+	  && is_really_empty_class (DECL_CONTEXT (fn), /*ignore_vptr*/true))
+	{
+	  /* An element of an array of known bound is checked as the address
+	     of the element (DECISIONS.md E95 (a)); its index is saved first,
+	     so that the null check below evaluates it once.  */
+	  bounds
+	    = cp_ubsan_maybe_check_empty_copy_bounds (cp_expr_loc_or_input_loc
+						      (arg), targ ? targ : arg);
+	  if (!targ)
+	    p3100_check
+	      = cp_ubsan_maybe_check_empty_copy_source (cp_expr_loc_or_input_loc
+							(arg), arg);
+	  else if (TREE_CODE (targ) != TARGET_EXPR)
+	    p3100_check
+	      = cp_ubsan_maybe_check_unaccessed_glvalue (cp_expr_loc_or_input_loc
+							 (arg), targ);
+	  if (bounds && p3100_check)
+	    {
+	      p3100_check = build2 (COMPOUND_EXPR, void_type_node,
+				    p3100_check, bounds);
+	      bounds = NULL_TREE;
+	    }
+	}
+
+      if (p3100_check)
+	arg = build2 (COMPOUND_EXPR, DECL_CONTEXT (fn), p3100_check,
+		      build_constructor (DECL_CONTEXT (fn), NULL));
+      else if (targ)
 	arg = targ;
       else
 	arg = cp_build_fold_indirect_ref (arg);
+      /* The bounds check alone keeps the source for constant evaluation,
+	 which evaluates it as before; at run time only the check is
+	 evaluated, the guard's operand (bounds, a run-time-only guard).  */
+      if (bounds)
+	{
+	  tree ctx = DECL_CONTEXT (fn);
+	  tree chk = build2 (COMPOUND_EXPR, ctx, TREE_OPERAND (bounds, 1),
+			     build_constructor (ctx, NULL));
+	  arg = build3 (COND_EXPR, ctx, TREE_OPERAND (bounds, 0), chk, arg);
+	  COND_EXPR_IMPLICIT_UB_GUARD_P (arg) = true;
+	  COND_EXPR_IMPLICIT_UB_RUNTIME_P (arg) = true;
+	  TREE_SIDE_EFFECTS (arg) = 1;
+	}
 
       /* In C++17 we shouldn't be copying a TARGET_EXPR except into a
 	 potentially-overlapping subobject.  */
@@ -11056,6 +11136,16 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
 
       if (is_really_empty_class (type, /*ignore_vptr*/true))
 	{
+	  /* P3100: storing to an element of an array of known bound writes
+	     nothing; check it as the address of the element (DECISIONS.md
+	     E95 (a)), after the source is evaluated.  */
+	  tree bounds = cp_ubsan_maybe_check_empty_copy_bounds (loc, to);
+	  /* P3100: copying from an indirection through a pointer reads
+	     nothing; check the pointer under the .indirection leaf.  */
+	  if (tree check = cp_ubsan_maybe_check_empty_copy_source (loc, arg))
+	    arg = check;
+	  if (bounds)
+	    arg = build2 (COMPOUND_EXPR, void_type_node, arg, bounds);
 	  /* Avoid copying empty classes, but ensure op= returns an lvalue even
 	     if the object argument isn't one.  */
 	  to = force_lvalue (to, complain);
@@ -11176,6 +11266,14 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
       tree c = extract_call_expr (call);
       /* build_new_op will clear this when appropriate.  */
       CALL_EXPR_ORDERED_ARGS (c) = true;
+    }
+  /* P3100: a virtual function called by its unqualified name and resolved
+     statically (DECISIONS.md E110 (a)).  */
+  if (p3100_virtual && (flags & LOOKUP_NONVIRTUAL) && flag_contracts_p3100)
+    {
+      tree c = extract_call_expr (call);
+      if (TREE_CODE (c) == CALL_EXPR || TREE_CODE (c) == AGGR_INIT_EXPR)
+	CALL_EXPR_P3100_VIRTUAL_P (c) = true;
     }
   if (warned_p)
     {

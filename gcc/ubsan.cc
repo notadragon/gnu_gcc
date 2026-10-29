@@ -822,6 +822,76 @@ ubsan_expand_bounds_ifn (gimple_stmt_iterator *gsi)
   return true;
 }
 
+/* P3100: the reaction (enum implicit_ub_reaction, mapped from the resolved
+   semantic as described at its declaration) for an implicit contract assertion
+   of configuration group GROUP at LOC in FNDECL, or IMPLICIT_UB_NONE when P3100
+   is off.  Resolution is per site (LOC feeds per-file/line configuration
+   matching) and per enclosing namespace (from FNDECL); see
+   cp_resolve_implicit_ub_semantic.  */
+
+int
+resolve_implicit_ub_reaction (tree fndecl, location_t loc, const char *group)
+{
+  if (!flag_contracts_p3100)
+    return IMPLICIT_UB_NONE;
+  return lang_hooks.resolve_implicit_ub_semantic (fndecl, loc, group);
+}
+
+/* P3100: if REACTION calls the nothrow contract-violation handler
+   (noexcept_enforce or noexcept_observe), have the language build the
+   handler's entry point and data block for the implicit contract assertion
+   of group GROUP at LOC in FNDECL, set *ENTRY to the entry point's
+   FUNCTION_DECL and *DATA_ADDR to the data block's address, and return true.
+   Otherwise, or if the language builds none, return false.  */
+
+static bool
+build_implicit_ub_handler (tree fndecl, location_t loc, const char *group,
+			   int reaction, tree *entry, tree *data_addr)
+{
+  return ((reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE
+	   || reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE)
+	  && lang_hooks.build_implicit_ub_handler (fndecl, loc, group, reaction,
+						   entry, data_addr));
+}
+
+/* P3100: the handler operands of an IFN_UBSAN_NULL reaction (see
+   build_implicit_ub_handler): set *ENTRY to the address of the handler entry
+   point and *DATA_ADDR to the data block's, or both to null_pointer_node when
+   REACTION calls no handler.  */
+
+void
+implicit_ub_handler_operands (tree fndecl, location_t loc, const char *group,
+			      int reaction, tree *entry, tree *data_addr)
+{
+  tree fn, data;
+  if (build_implicit_ub_handler (fndecl, loc, group, reaction, &fn, &data))
+    {
+      *entry = build_fold_addr_expr (fn);
+      *data_addr = data;
+    }
+  else
+    *entry = *data_addr = null_pointer_node;
+}
+
+/* P3100: the call reacting to a violated implicit contract assertion of
+   group GROUP at LOC in FNDECL whose reaction REACTION is a trap or a call
+   to the nothrow handler (see build_implicit_ub_handler); a trap as well if
+   the language builds no handler.  */
+
+static gimple *
+build_implicit_ub_reaction_call (tree fndecl, location_t loc,
+				 const char *group, int reaction)
+{
+  tree entry, data_addr;
+  if (build_implicit_ub_handler (fndecl, loc, group, reaction,
+				 &entry, &data_addr))
+    return gimple_build_call (entry, 1, data_addr);
+  return gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
+}
+
+/* P3100: true if a sanitizer of BITS is enabled and routed to the
+   contract-violation handler with a semantic that calls it.  */
+
 /* Expand UBSAN_NULL internal call.  The type is kept on the ckind
    argument which is a constant, because the middle-end treats pointer
    conversions as useless and therefore the type of the first argument
@@ -833,12 +903,40 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
   gimple_stmt_iterator gsi = *gsip;
   gimple *stmt = gsi_stmt (gsi);
   location_t loc = gimple_location (stmt);
-  gcc_assert (gimple_call_num_args (stmt) == 3);
-  tree ptr = gimple_call_arg (stmt, 0);
-  tree ckind = gimple_call_arg (stmt, 1);
-  tree align = gimple_call_arg (stmt, 2);
+  gcc_assert (gimple_call_num_args (stmt) == UBSAN_NULL_NUM_OPS);
+  tree ptr = gimple_call_arg (stmt, UBSAN_NULL_PTR);
+  tree ckind = gimple_call_arg (stmt, UBSAN_NULL_CKIND);
+  tree align = gimple_call_arg (stmt, UBSAN_NULL_ALIGN);
   tree check_align = NULL_TREE;
   bool check_null;
+
+  /* P3100: does an implicit ub:expr.unary.dereference.nullptr contract
+     assertion apply at this site?  The reaction was resolved once at pass_ubsan
+     (pre-inline), where cfun->decl was the true enclosing function whose
+     namespace the contract config matched, and carried here as
+     UBSAN_NULL_REACTION.  We
+     must not re-resolve it against the current cfun->decl: after inlining this
+     statement may live in a caller in a different namespace, where the config
+     would no longer match and the check would be wrongly dropped.  When it
+     does apply, its reaction takes precedence over the sanitizer's on the null
+     edge.  IMPLICIT_UB_NONE (0) means no contract -- the pure-sanitizer path,
+     byte-for-byte as before.  */
+  int p3100_reaction
+    = tree_to_shwi (gimple_call_arg (stmt, UBSAN_NULL_REACTION));
+  bool have_contract = (p3100_reaction != IMPLICIT_UB_NONE);
+  /* P3100: the alignment sub-condition carries its own reaction
+     (UBSAN_NULL_ALIGN_REACTION) and handler entry/data (UBSAN_NULL_ALIGN_ENTRY,
+     UBSAN_NULL_ALIGN_DATA), resolved independently of the null one at
+     pass_ubsan.  IMPLICIT_UB_NONE means "no alignment contract" (sanitizer or
+     nothing).  */
+  int align_reaction
+    = tree_to_shwi (gimple_call_arg (stmt, UBSAN_NULL_ALIGN_REACTION));
+  bool have_align_contract = (align_reaction != IMPLICIT_UB_NONE);
+  /* Read the alignment handler entry/data now, while STMT is still the IFN call:
+     the null-check lowering below reassigns STMT to the GIMPLE_COND it replaces
+     the call with, after which gimple_call_arg would no longer work.  */
+  tree align_entry = gimple_call_arg (stmt, UBSAN_NULL_ALIGN_ENTRY);
+  tree align_data = gimple_call_arg (stmt, UBSAN_NULL_ALIGN_DATA);
 
   basic_block cur_bb = gsi_bb (gsi);
 
@@ -854,7 +952,7 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
 	  gsi_insert_before (&gsi, g, GSI_SAME_STMT);
 	}
     }
-  check_null = sanitize_flags_p (SANITIZE_NULL);
+  check_null = sanitize_flags_p (SANITIZE_NULL) || have_contract;
   if (check_null && POINTER_TYPE_P (TREE_TYPE (ptr)))
     {
       addr_space_t as = TYPE_ADDR_SPACE (TREE_TYPE (TREE_TYPE (ptr)));
@@ -904,15 +1002,57 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
   if (dom_info_available_p (CDI_DOMINATORS))
     set_immediate_dominator (CDI_DOMINATORS, then_bb, cond_bb);
 
-  /* Put the ubsan builtin call into the newly created BB.  */
-  if (flag_sanitize_trap & ((check_align ? SANITIZE_ALIGNMENT + 0 : 0)
-			    | (check_null ? SANITIZE_NULL + 0 : 0)))
-    g = gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
-  else
+  /* P3100: a contract assertion on this dereference uses the contract reaction,
+     taking precedence over the sanitizer.  This then_bb is the NULL edge's
+     reaction (null contract, operands 3/4/5) -- or, in the alignment-only case
+     (no null edge), the alignment reaction (operands 6/7/8).  In the both-edges
+     case the ALIGNMENT edge gets its own separate then-block further below, so a
+     null-deref contract and an alignment contract at the same access each fire
+     with their own semantic.  */
+  bool null_contract_edge = (have_contract && check_null);
+  bool align_contract_edge
+    = (have_align_contract && check_align != NULL_TREE && !check_null);
+  bool use_contract_reaction = null_contract_edge || align_contract_edge;
+
+  /* Build the reaction gimple for one edge of the check.  When REACTION is a
+     P3100 contract reaction it is a nothrow handler call (noexcept_enforce/
+     observe) or a trap (quick_enforce); when REACTION is IMPLICIT_UB_NONE it
+     is the stock -fsanitize= reaction (trap, or the
+     __ubsan_handle_type_mismatch_v1[_abort] handler) selected by
+     SANITIZE_MASK.  ENTRY/DATA_ADDR are the handler entry point and static
+     data-block address carried on the IFN (built at pass_ubsan while the C++
+     langhook was still available); PTR_ARG is the pointer operand the
+     sanitizer handler wants.  The null and alignment edges share this builder
+     so their reactions stay in lockstep.  */
+  auto build_reaction = [&] (int reaction, tree entry, tree data_addr,
+			     sanitize_code_type sanitize_mask,
+			     tree ptr_arg) -> gimple *
     {
+      if (reaction != IMPLICIT_UB_NONE)
+	{
+	  /* The entry/data were built at pass_ubsan (front-end present,
+	     pre-inline cfun->decl) and carried on the IFN.  We must not
+	     rebuild them here via the langhook: this runs post-inline and,
+	     under LTO, at LTRANS where no C++ langhook exists (it would return
+	     false and degrade to a trap).  A null entry means quick_enforce /
+	     no handler -> trap.  */
+	  if ((reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE
+	       || reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE)
+	      && entry != NULL_TREE && !integer_zerop (entry))
+	    /* noexcept_enforce / noexcept_observe: call the nothrow contract
+	       handler entry point (the decl encodes noreturn for enforce; for
+	       observe it returns and the then-block falls through to the real
+	       access -- "report then proceed").  No EH region needed.  */
+	    return gimple_build_call (entry, 1, data_addr);
+	  /* IMPLICIT_UB_TRAP (quick_enforce).  Throwing enforce/observe are
+	     excluded from this check's allowed set on the front-end side and
+	     clamped away, so they never reach here.  */
+	  return gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
+	}
+      if (flag_sanitize_trap & sanitize_mask)
+	return gimple_build_call (builtin_decl_implicit (BUILT_IN_TRAP), 0);
       enum built_in_function bcode
-	= (flag_sanitize_recover & ((check_align ? SANITIZE_ALIGNMENT + 0 : 0)
-				    | (check_null ? SANITIZE_NULL + 0 : 0)))
+	= (flag_sanitize_recover & sanitize_mask)
 	  ? BUILT_IN_UBSAN_HANDLE_TYPE_MISMATCH_V1
 	  : BUILT_IN_UBSAN_HANDLE_TYPE_MISMATCH_V1_ABORT;
       tree fn = builtin_decl_implicit (bcode);
@@ -927,10 +1067,33 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
 			     fold_convert (unsigned_char_type_node, ckind),
 			     NULL_TREE);
       data = build_fold_addr_expr_loc (loc, data);
-      g = gimple_build_call (fn, 2, data,
-			     check_align ? check_align
-			     : build_zero_cst (pointer_sized_int_node));
-    }
+      return gimple_build_call (fn, 2, data, ptr_arg);
+    };
+
+  /* Put the reaction for the first edge (null, or -- in the alignment-only
+     case -- alignment) into the newly created then_bb.  STMT is still the IFN
+     call here, so its per-edge entry/data operands are readable.  */
+  {
+    int reaction = use_contract_reaction
+		   ? (align_contract_edge ? align_reaction : p3100_reaction)
+		   : IMPLICIT_UB_NONE;
+    tree entry = use_contract_reaction
+		 ? gimple_call_arg (stmt, align_contract_edge
+					  ? UBSAN_NULL_ALIGN_ENTRY
+					  : UBSAN_NULL_ENTRY)
+		 : NULL_TREE;
+    tree data_addr = use_contract_reaction
+		     ? gimple_call_arg (stmt, align_contract_edge
+					      ? UBSAN_NULL_ALIGN_DATA
+					      : UBSAN_NULL_DATA)
+		     : NULL_TREE;
+    sanitize_code_type sanitize_mask
+      = ((check_align ? SANITIZE_ALIGNMENT + 0 : 0)
+	 | (check_null ? SANITIZE_NULL + 0 : 0));
+    tree ptr_arg = check_align ? check_align
+			       : build_zero_cst (pointer_sized_int_node);
+    g = build_reaction (reaction, entry, data_addr, sanitize_mask, ptr_arg);
+  }
   gimple_stmt_iterator gsi2 = gsi_start_bb (then_bb);
   gimple_set_location (g, loc);
   gsi_insert_after (&gsi2, g, GSI_NEW_STMT);
@@ -951,12 +1114,13 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
 
   if (check_align)
     {
+      basic_block cond2_bb = NULL;
       if (check_null)
 	{
 	  /* Split the block with the condition again.  */
 	  e = split_block (cond_bb, stmt);
 	  basic_block cond1_bb = e->src;
-	  basic_block cond2_bb = e->dest;
+	  cond2_bb = e->dest;
 
 	  /* Make an edge coming from the 'cond1 block' into the 'then block';
 	     this edge is unlikely taken, so set up the probability
@@ -998,6 +1162,40 @@ ubsan_expand_null_ifn (gimple_stmt_iterator *gsip)
       else
 	/* Replace the UBSAN_NULL with a GIMPLE_COND stmt.  */
 	gsi_replace (&gsi, g, false);
+
+      /* P3100: in the both-edges case the alignment condition's TRUE edge was
+	 inherited pointing at the shared then_bb (which holds the NULL edge's
+	 reaction).  When a contract applies to either edge, give the alignment
+	 edge its own then-block with its own reaction, so a null-deref contract
+	 and an alignment contract at the same access each fire independently.
+	 When neither edge is a contract the two share then_bb -- the stock
+	 -fsanitize= codegen, unchanged.  */
+      if (cond2_bb != NULL && (have_contract || have_align_contract))
+	{
+	  basic_block then_align_bb = create_empty_bb (cond2_bb);
+	  add_bb_to_loop (then_align_bb, cond2_bb->loop_father);
+	  loops_state_set (LOOPS_NEED_FIXUP);
+	  make_single_succ_edge (then_align_bb, fallthru_bb, EDGE_FALLTHRU);
+	  edge te = find_edge (cond2_bb, then_bb);
+	  redirect_edge_and_branch (te, then_align_bb);
+	  te->probability = profile_probability::very_unlikely ();
+	  then_align_bb->count = te->count ();
+	  if (dom_info_available_p (CDI_DOMINATORS))
+	    set_immediate_dominator (CDI_DOMINATORS, then_align_bb, cond2_bb);
+
+	  /* Build the alignment edge's reaction with the shared builder: its own
+	     contract reaction (operands 6/7/8, captured above as align_entry/
+	     align_data since STMT is no longer the IFN call) or, when the alignment
+	     edge is a pure sanitizer check, the stock type-mismatch handler.  */
+	  gimple *ag
+	    = build_reaction (have_align_contract ? align_reaction
+						  : IMPLICIT_UB_NONE,
+			      align_entry, align_data, SANITIZE_ALIGNMENT,
+			      check_align);
+	  gimple_set_location (ag, loc);
+	  gimple_stmt_iterator agsi = gsi_start_bb (then_align_bb);
+	  gsi_insert_after (&agsi, ag, GSI_NEW_STMT);
+	}
     }
   return false;
 }
@@ -1436,24 +1634,607 @@ ubsan_expand_vptr_ifn (gimple_stmt_iterator *gsip)
   return true;
 }
 
+/* P3100: the object pointers of the pointer-to-data-member accesses the
+   front end checked for null (ubsan_maybe_instrument_ptrmem_object),
+   collected by pass_ubsan before it instruments anything.  */
+
+static hash_set<tree> *ubsan_ptrmem_checked_ptrs;
+
+/* P3100: whether the pointer T is an address formed, within one
+   expression, from the object pointer of a pointer-to-data-member access
+   the front end checked for null: through conversions, the member's offset,
+   a base or member address, and the null-member-pointer guard, but not
+   through a variable the program declares, whose own uses are dereferences
+   of their own.  T is null only when that pointer is, so a null check of T
+   would report the same null dereference again.  */
+
+static bool
+ubsan_ptrmem_derived_p (tree t, unsigned depth = 0)
+{
+  if (!ubsan_ptrmem_checked_ptrs || depth > 8)
+    return false;
+  while (TREE_CODE (t) == SSA_NAME)
+    {
+      if (ubsan_ptrmem_checked_ptrs->contains (t))
+	return true;
+      if (SSA_NAME_VAR (t) && !DECL_ARTIFICIAL (SSA_NAME_VAR (t)))
+	return false;
+      gimple *def = SSA_NAME_DEF_STMT (t);
+      if (gphi *phi = dyn_cast <gphi *> (def))
+	{
+	  for (unsigned i = 0; i < gimple_phi_num_args (phi); ++i)
+	    if (!ubsan_ptrmem_derived_p (gimple_phi_arg_def (phi, i),
+					 depth + 1))
+	      return false;
+	  return true;
+	}
+      if (!is_gimple_assign (def))
+	return false;
+      switch (gimple_assign_rhs_code (def))
+	{
+	CASE_CONVERT:
+	case POINTER_PLUS_EXPR:
+	case SSA_NAME:
+	  t = gimple_assign_rhs1 (def);
+	  break;
+	case ADDR_EXPR:
+	  {
+	    tree addr = gimple_assign_rhs1 (def);
+	    tree base = get_base_address (TREE_OPERAND (addr, 0));
+	    if (!base || TREE_CODE (base) != MEM_REF)
+	      return false;
+	    t = TREE_OPERAND (base, 0);
+	    break;
+	  }
+	default:
+	  return false;
+	}
+    }
+  return false;
+}
+
+/* P3100: record in *CHECKED the object pointers of the
+   pointer-to-data-member accesses the front end checked for null in FUN,
+   before pass_ubsan adds any check, for ubsan_ptrmem_derived_p.  A
+   reference bound to, or a member function called on, the member of OP->*PM
+   (or an object within it) has its null dereference reported by the check
+   of OP: drop the null reaction of its own check, made on an address formed
+   from OP.  With -fsanitize=null alone too, whose check of OP is the same
+   check (ubsan_maybe_instrument_ptrmem_object), so that a read through the
+   member's address, null when OP is and the member at offset zero, is not
+   reported again (GCC-853).  Under -fcontracts-p3100 with -fsanitize=null,
+   drop such a check altogether when it checks no alignment: OP's check
+   makes the sanitizer's null check where its own P3100 leaf does not
+   apply, so the null dereference is reported once, not again by the
+   sanitizer here -- a dynamic_cast to a reference, `dynamic_cast<W &>
+   (*vp)', whose object pointer the front end checked under .access
+   (cp_ubsan_maybe_check_dynamic_type_read) and whose operand is still
+   bound to a reference (DECISIONS.md E120; GCC-875).  */
+
+static void
+ubsan_note_ptrmem_object_checks (function *fun, hash_set<tree> *checked)
+{
+  basic_block bb;
+  gimple_stmt_iterator gsi;
+  FOR_EACH_BB_FN (bb, fun)
+    for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
+      {
+	gimple *stmt = gsi_stmt (gsi);
+	if (gimple_call_internal_p (stmt, IFN_UBSAN_NULL)
+	    && (tree_to_uhwi (gimple_call_arg (stmt, UBSAN_NULL_CKIND))
+		== UBSAN_MEMBER_ACCESS)
+	    && TREE_CODE (gimple_call_arg (stmt, UBSAN_NULL_PTR)) == SSA_NAME)
+	  checked->add (gimple_call_arg (stmt, UBSAN_NULL_PTR));
+      }
+  if (checked->is_empty ())
+    return;
+  ubsan_ptrmem_checked_ptrs = checked;
+  FOR_EACH_BB_FN (bb, fun)
+    for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi);)
+      {
+	gimple *stmt = gsi_stmt (gsi);
+	if (!gimple_call_internal_p (stmt, IFN_UBSAN_NULL))
+	  {
+	    gsi_next (&gsi);
+	    continue;
+	  }
+	unsigned HOST_WIDE_INT ckind
+	  = tree_to_uhwi (gimple_call_arg (stmt, UBSAN_NULL_CKIND));
+	if (flag_contracts_p3100
+	    && sanitize_flags_p (SANITIZE_NULL)
+	    && (ckind == UBSAN_REF_BINDING || ckind == UBSAN_MEMBER_CALL)
+	    && integer_zerop (gimple_call_arg (stmt, UBSAN_NULL_ALIGN))
+	    && integer_zerop (gimple_call_arg (stmt,
+					       UBSAN_NULL_ALIGN_REACTION))
+	    && ubsan_ptrmem_derived_p (gimple_call_arg (stmt, UBSAN_NULL_PTR)))
+	  {
+	    unlink_stmt_vdef (stmt);
+	    gsi_remove (&gsi, true);
+	    continue;
+	  }
+	if ((ckind == UBSAN_REF_BINDING || ckind == UBSAN_MEMBER_CALL)
+	    && !integer_zerop (gimple_call_arg (stmt, UBSAN_NULL_REACTION))
+	    && ubsan_ptrmem_derived_p (gimple_call_arg (stmt, UBSAN_NULL_PTR)))
+	  {
+	    gimple_call_set_arg (stmt, UBSAN_NULL_REACTION,
+				 build_int_cst (unsigned_type_node,
+						IMPLICIT_UB_NONE));
+	    gimple_call_set_arg (stmt, UBSAN_NULL_ENTRY, null_pointer_node);
+	    gimple_call_set_arg (stmt, UBSAN_NULL_DATA, null_pointer_node);
+	  }
+	gsi_next (&gsi);
+      }
+}
+
+/* P3100: the null checks of the pointers references are bound to that
+   the front end built (ubsan_maybe_instrument_reference), keyed by the
+   pointer's temporary, collected by pass_ubsan before it instruments
+   anything; and those of them already retargeted to an access.  */
+
+static hash_map<tree, gimple *> *ubsan_binding_checks;
+static hash_set<gimple *> *ubsan_retargeted_binding_checks;
+
+/* P3100: the null checks of the pointers references are bound to, pushed
+   onto CHECKS, if the pointer T is an address formed from such a pointer
+   within the expression that binds it -- through conversions, offsets and
+   member addresses, but not through a variable the program declares (a
+   read through a reference variable is a dereference of its own) -- or a
+   join of paths each of which is one (the arms of a conditional, as when
+   the conversion to a reference of the element at a constant subscript
+   guarded against wrapping is folded into the guard's arms,
+   build_implicit_pointer_wrap_check).  A read or write through T is then
+   the same null dereference as the binding on its path.  False, and
+   CHECKS to be ignored, if T is not such an address.  */
+
+static bool
+ubsan_binding_checks_for (tree t, vec<gimple *> *checks, unsigned depth = 0)
+{
+  if (!ubsan_binding_checks || depth > 8)
+    return false;
+  while (TREE_CODE (t) == SSA_NAME)
+    {
+      if (gimple **check = ubsan_binding_checks->get (t))
+	{
+	  checks->safe_push (*check);
+	  return true;
+	}
+      if (SSA_NAME_VAR (t) && !DECL_ARTIFICIAL (SSA_NAME_VAR (t)))
+	return false;
+      gimple *def = SSA_NAME_DEF_STMT (t);
+      if (gphi *phi = dyn_cast <gphi *> (def))
+	{
+	  if (gimple_phi_num_args (phi) == 0)
+	    return false;
+	  for (unsigned i = 0; i < gimple_phi_num_args (phi); ++i)
+	    if (!ubsan_binding_checks_for (gimple_phi_arg_def (phi, i), checks,
+					   depth + 1))
+	      return false;
+	  return true;
+	}
+      if (!is_gimple_assign (def))
+	return false;
+      switch (gimple_assign_rhs_code (def))
+	{
+	CASE_CONVERT:
+	case POINTER_PLUS_EXPR:
+	case SSA_NAME:
+	  t = gimple_assign_rhs1 (def);
+	  break;
+	case ADDR_EXPR:
+	  {
+	    tree addr = gimple_assign_rhs1 (def);
+	    tree base = get_base_address (TREE_OPERAND (addr, 0));
+	    if (!base || TREE_CODE (base) != MEM_REF)
+	      return false;
+	    t = TREE_OPERAND (base, 0);
+	    break;
+	  }
+	default:
+	  return false;
+	}
+    }
+  return false;
+}
+
+static void ubsan_p3100_disable_this_check (gimple *);
+
+/* P3100: record in *CHECKS the P3100 null checks of the pointers
+   references are bound to in FUN, made on a temporary of their own named
+   UBSAN_P3100_BOUND_NAME (ubsan_maybe_instrument_reference_or_call), for
+   ubsan_binding_checks_for -- also those with no reaction, the .indirection
+   leaf not applying, which an access retargets to the .access leaf.  (The
+   check of an indirection whose result is not accessed, `&*p', is not one:
+   `(&*p)->m' indirects twice.)  First give every null check the front end
+   built of a pointer formed from `this' no reaction
+   (ubsan_p3100_disable_this_check).  */
+
+static void
+ubsan_note_binding_checks (function *fun, hash_map<tree, gimple *> *checks)
+{
+  if (!flag_contracts_p3100)
+    return;
+  basic_block bb;
+  gimple_stmt_iterator gsi;
+  FOR_EACH_BB_FN (bb, fun)
+    for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
+      {
+	gimple *stmt = gsi_stmt (gsi);
+	if (!gimple_call_internal_p (stmt, IFN_UBSAN_NULL))
+	  continue;
+	ubsan_p3100_disable_this_check (stmt);
+	if (tree_to_uhwi (gimple_call_arg (stmt, UBSAN_NULL_CKIND))
+	    != UBSAN_REF_BINDING)
+	  continue;
+	tree ptr = gimple_call_arg (stmt, UBSAN_NULL_PTR);
+	if (TREE_CODE (ptr) == SSA_NAME
+	    && !SSA_NAME_IS_DEFAULT_DEF (ptr)
+	    && SSA_NAME_IDENTIFIER (ptr)
+	    && id_equal (SSA_NAME_IDENTIFIER (ptr), UBSAN_P3100_BOUND_NAME))
+	  checks->put (ptr, stmt);
+      }
+  if (!checks->is_empty ())
+    ubsan_binding_checks = checks;
+}
+
+/* P3100: a read or write through the address of the object a reference
+   was bound to, within the expression that binds it -- `S s2 = *sp' (the
+   copy constructor's reference parameter), `int i = static_cast<int &>
+   (*p)', `s = std::move (*sp)' -- is the dereference the binding's null
+   check reports: report it once, under the .access leaf.  Retarget CHECK,
+   the binding's, to that leaf (to no reaction if it does not apply).  An
+   address at a constant offset from a pointer, `S s2 = sp[1]', is checked
+   on that pointer, as the access is without the binding (the gimplifier
+   folds `*(sp + 8)' into an access at an offset from sp), unless the
+   offset would change the alignment the check also tests.  */
+
+static void
+ubsan_retarget_binding_check (gimple *check)
+{
+  if (ubsan_retargeted_binding_checks->add (check))
+    return;
+  tree ptr = gimple_call_arg (check, UBSAN_NULL_PTR);
+  if (TREE_CODE (ptr) == SSA_NAME)
+    {
+      gimple *def = SSA_NAME_DEF_STMT (ptr);
+      if (is_gimple_assign (def)
+	  && gimple_assign_rhs_code (def) == POINTER_PLUS_EXPR
+	  && TREE_CODE (gimple_assign_rhs2 (def)) == INTEGER_CST
+	  && TREE_CODE (gimple_assign_rhs1 (def)) == SSA_NAME)
+	{
+	  unsigned HOST_WIDE_INT align
+	    = tree_to_uhwi (gimple_call_arg (check, UBSAN_NULL_ALIGN));
+	  unsigned HOST_WIDE_INT off
+	    = TREE_INT_CST_LOW (gimple_assign_rhs2 (def));
+	  if (align == 0 || (off & (align - 1)) == 0)
+	    {
+	      gimple_call_set_arg (check, UBSAN_NULL_PTR,
+				   gimple_assign_rhs1 (def));
+	      update_stmt (check);
+	    }
+	}
+    }
+  const char *group = "ub:expr.unary.dereference.nullptr.access";
+  location_t loc = gimple_location (check);
+  int reaction = resolve_implicit_ub_reaction (cfun->decl, loc, group);
+  tree entry, data_addr;
+  implicit_ub_handler_operands (cfun->decl, loc, group, reaction, &entry,
+				&data_addr);
+  gimple_call_set_arg (check, UBSAN_NULL_REACTION,
+		       build_int_cst (unsigned_type_node, reaction));
+  gimple_call_set_arg (check, UBSAN_NULL_ENTRY, entry);
+  gimple_call_set_arg (check, UBSAN_NULL_DATA, data_addr);
+}
+
+/* P3100: CHECK being the null check of the pointer a reference is bound
+   to (ubsan_binding_checks_for) where the object is read or written through
+   `this' (DECISIONS.md E100 (a)), or any front-end null check of a pointer
+   formed from `this' (ubsan_p3100_disable_this_check), give it no null
+   reaction; a later access does not retarget it.  */
+
+static void
+ubsan_disable_binding_check (gimple *check)
+{
+  ubsan_retargeted_binding_checks->add (check);
+  const char *group = "ub:expr.unary.dereference.nullptr.access";
+  location_t loc = gimple_location (check);
+  tree entry, data_addr;
+  implicit_ub_handler_operands (cfun->decl, loc, group, IMPLICIT_UB_NONE,
+				&entry, &data_addr);
+  gimple_call_set_arg (check, UBSAN_NULL_REACTION,
+		       build_int_cst (unsigned_type_node, IMPLICIT_UB_NONE));
+  gimple_call_set_arg (check, UBSAN_NULL_ENTRY, entry);
+  gimple_call_set_arg (check, UBSAN_NULL_DATA, data_addr);
+}
+
+/* P3100: true if PTR, an SSA name, is formed from a glvalue that is a
+   reference already -- a reference variable or parameter, a reference read
+   from memory (a reference member, a captured reference), the result of a
+   call returning a reference -- by copies, conversions, offsets and member
+   addresses, not through a pointer variable the program declares.  A read
+   or write through it indirects through nothing: the object was reached
+   where the reference was bound, and checked there (DECISIONS.md E92 (a)).  */
+
+static bool
+ubsan_p3100_reference_pointer_p (tree ptr)
+{
+  while (TREE_CODE (ptr) == SSA_NAME)
+    {
+      if (tree var = SSA_NAME_VAR (ptr))
+	if (!DECL_ARTIFICIAL (var))
+	  return TREE_CODE (TREE_TYPE (var)) == REFERENCE_TYPE;
+      if (SSA_NAME_IS_DEFAULT_DEF (ptr))
+	return false;
+      gimple *def = SSA_NAME_DEF_STMT (ptr);
+      if (gcall *call = dyn_cast <gcall *> (def))
+	return TREE_CODE (gimple_call_return_type (call)) == REFERENCE_TYPE;
+      if (!is_gimple_assign (def))
+	return false;
+      tree rhs = gimple_assign_rhs1 (def);
+      switch (gimple_assign_rhs_code (def))
+	{
+	CASE_CONVERT:
+	case POINTER_PLUS_EXPR:
+	case SSA_NAME:
+	  ptr = rhs;
+	  break;
+	case ADDR_EXPR:
+	  {
+	    tree base = get_base_address (TREE_OPERAND (rhs, 0));
+	    if (!base || TREE_CODE (base) != MEM_REF)
+	      return false;
+	    ptr = TREE_OPERAND (base, 0);
+	    break;
+	  }
+	default:
+	  /* A reference read from memory.  */
+	  return (gimple_assign_single_p (def)
+		  && TREE_CODE (TREE_TYPE (rhs)) == REFERENCE_TYPE
+		  && (DECL_P (rhs) || REFERENCE_CLASS_P (rhs)));
+	}
+    }
+  return false;
+}
+
+/* P3100: true if PTR, an SSA name, is formed from the `this' pointer of the
+   member function being instrumented, or from the captured `this' of a
+   lambda, by copies, conversions, offsets and member addresses.  A read or
+   write through `this' is not checked: the null dereference is reported
+   where the member function is called (DECISIONS.md E100 (a)).  */
+
+static bool
+ubsan_p3100_this_pointer_p (tree ptr)
+{
+  tree fn = cfun->decl;
+  tree this_parm = (TREE_CODE (TREE_TYPE (fn)) == METHOD_TYPE
+		    ? DECL_ARGUMENTS (fn) : NULL_TREE);
+  while (TREE_CODE (ptr) == SSA_NAME)
+    {
+      if (SSA_NAME_IS_DEFAULT_DEF (ptr))
+	return this_parm != NULL_TREE && SSA_NAME_VAR (ptr) == this_parm;
+      gimple *def = SSA_NAME_DEF_STMT (ptr);
+      if (!is_gimple_assign (def))
+	return false;
+      tree rhs = gimple_assign_rhs1 (def);
+      switch (gimple_assign_rhs_code (def))
+	{
+	CASE_CONVERT:
+	case POINTER_PLUS_EXPR:
+	case SSA_NAME:
+	  ptr = rhs;
+	  break;
+	case ADDR_EXPR:
+	  {
+	    tree base = get_base_address (TREE_OPERAND (rhs, 0));
+	    if (!base || TREE_CODE (base) != MEM_REF)
+	      return false;
+	    ptr = TREE_OPERAND (base, 0);
+	    break;
+	  }
+	case PARM_DECL:
+	  /* `this' in memory (-O0 with its address taken).  */
+	  return this_parm != NULL_TREE && rhs == this_parm;
+	case COMPONENT_REF:
+	  {
+	    /* The `this' a lambda captured, `__closure->__this'.  */
+	    tree field = TREE_OPERAND (rhs, 1);
+	    return (DECL_NAME (field) != NULL_TREE
+		    && id_equal (DECL_NAME (field), "__this")
+		    && POINTER_TYPE_P (TREE_TYPE (field)));
+	  }
+	default:
+	  return false;
+	}
+    }
+  return false;
+}
+
+/* P3100: STMT being an IFN_UBSAN_NULL check the front end built -- of the
+   pointer a reference is bound to, the object pointer of a member function
+   called or of OP->*PM, an unaccessed indirection -- give it no null
+   reaction if that pointer is formed from `this' (ubsan_p3100_this_pointer_p):
+   no null check is made through `this' in the member function called, nor
+   in a lambda capturing it, since the null dereference is reported where
+   the member function is called (DECISIONS.md E100 (a), E106 (a)).  The
+   sanitizer's check and the alignment check are unchanged.  */
+
+static void
+ubsan_p3100_disable_this_check (gimple *stmt)
+{
+  if (gimple_call_num_args (stmt) <= UBSAN_NULL_REACTION)
+    return;
+  tree reaction = gimple_call_arg (stmt, UBSAN_NULL_REACTION);
+  if (!tree_fits_uhwi_p (reaction)
+      || tree_to_uhwi (reaction) == IMPLICIT_UB_NONE
+      || !ubsan_p3100_this_pointer_p (gimple_call_arg (stmt, UBSAN_NULL_PTR)))
+    return;
+  ubsan_disable_binding_check (stmt);
+}
+
+/* P3100: true if each of CHECKS, the checks of the bindings an access
+   through PTR is covered by (ubsan_binding_checks_for), tests at least
+   the alignment ALIGN the access needs with the same alignment REACTION,
+   and PTR is the pointer it checks, or that pointer at an offset that is
+   a multiple of ALIGN, by copies and conversions: the access is then
+   misaligned exactly when the binding is.  */
+
+static bool
+ubsan_binding_checks_align_p (const vec<gimple *> &checks, tree ptr,
+			      unsigned int align, int reaction)
+{
+  for (gimple *check : checks)
+    {
+      tree calign = gimple_call_arg (check, UBSAN_NULL_ALIGN);
+      tree creaction = gimple_call_arg (check, UBSAN_NULL_ALIGN_REACTION);
+      if (!tree_fits_uhwi_p (calign)
+	  || tree_to_uhwi (calign) < align
+	  || !tree_fits_uhwi_p (creaction)
+	  || tree_to_uhwi (creaction) != (unsigned HOST_WIDE_INT) reaction)
+	return false;
+      tree cptr = gimple_call_arg (check, UBSAN_NULL_PTR);
+      tree t = ptr;
+      for (unsigned depth = 0; t != cptr; ++depth)
+	{
+	  if (TREE_CODE (t) != SSA_NAME || depth > 8)
+	    return false;
+	  gimple *def = SSA_NAME_DEF_STMT (t);
+	  if (!is_gimple_assign (def))
+	    return false;
+	  switch (gimple_assign_rhs_code (def))
+	    {
+	    CASE_CONVERT:
+	    case SSA_NAME:
+	      t = gimple_assign_rhs1 (def);
+	      break;
+	    case POINTER_PLUS_EXPR:
+	      if (TREE_CODE (gimple_assign_rhs2 (def)) != INTEGER_CST
+		  || (TREE_INT_CST_LOW (gimple_assign_rhs2 (def))
+		      & (align - 1)) != 0)
+		return false;
+	      t = gimple_assign_rhs1 (def);
+	      break;
+	    default:
+	      return false;
+	    }
+	}
+    }
+  return true;
+}
+
 /* Instrument a memory reference.  BASE is the base of MEM, IS_LHS says
-   whether the pointer is on the left hand side of the assignment.  */
+   whether the pointer is on the left hand side of the assignment.
+   ADDRESS_ONLY says MEM is only having its address taken (&s->i), so
+   that a P3100 null-dereference check reports the indirection leaf rather
+   than the access leaf.  */
 
 static void
 instrument_mem_ref (tree mem, tree base, gimple_stmt_iterator *iter,
-		    bool is_lhs)
+		    bool is_lhs, bool address_only)
 {
   enum ubsan_null_ckind ikind = is_lhs ? UBSAN_STORE_OF : UBSAN_LOAD_OF;
+  location_t site_loc = gimple_location (gsi_stmt (*iter));
+  /* A P3100 ub:expr.unary.dereference.nullptr assertion also wants the null
+     check on this dereference, even when -fsanitize=null is not enabled.
+     Resolve the reaction HERE, at pass_ubsan (pre-inline), where cfun->decl is
+     the true enclosing function whose namespace the contract config matches.
+     The value is carried as IFN_UBSAN_NULL's UBSAN_NULL_REACTION so it survives
+     inlining and LTO -- ubsan_expand_null_ifn (post-inline) must not re-resolve
+     it, since cfun->decl there may be a caller in a different namespace.  When
+     no contract applies the reaction is IMPLICIT_UB_NONE (0), which every
+     consumer treats exactly as the old "no contract, sanitizer only" path.
+     A load or store is the .access leaf of the group, an address computation
+     the .indirection leaf.  */
+  const char *null_group
+    = (address_only ? "ub:expr.unary.dereference.nullptr.indirection"
+		    : "ub:expr.unary.dereference.nullptr.access");
+  int p3100_reaction
+    = resolve_implicit_ub_reaction (cfun->decl, site_loc, null_group);
+  /* An address formed from the checked object pointer of OP->*PM has its
+     null dereference reported by that check -- for the sanitizer too, which
+     that check is (DECISIONS.md E111 (a)), with or without -fcontracts-p3100
+     (GCC-853), so with no alignment edge nothing is checked here (below).  */
+  bool ptrmem_derived = ubsan_ptrmem_derived_p (TREE_OPERAND (base, 0));
+  if (ptrmem_derived)
+    p3100_reaction = IMPLICIT_UB_NONE;
+  /* The address of a member or base class subobject of the object a
+     reference refers to, `&r.m', `B &b = d' for `D &d', indirects through
+     no pointer: the object was reached where the reference was bound, and
+     checked there.  */
+  if (address_only
+      && TREE_CODE (TREE_TYPE (TREE_OPERAND (base, 0))) == REFERENCE_TYPE)
+    p3100_reaction = IMPLICIT_UB_NONE;
+  /* Nor does a read or write through a reference -- a reference variable,
+     parameter or member, the reference a call returns, `r = 1', `r.m',
+     `id (*p)' read (DECISIONS.md E92 (a)).  */
+  if (ubsan_p3100_reference_pointer_p (TREE_OPERAND (base, 0)))
+    p3100_reaction = IMPLICIT_UB_NONE;
+  /* Nor is a read or write through `this', in the member function called
+     or a lambda capturing it, nor a member's address formed from it
+     (DECISIONS.md E100 (a), E106 (a)): the null dereference is reported
+     where the member function is called.  */
+  bool through_this = ubsan_p3100_this_pointer_p (TREE_OPERAND (base, 0));
+  if (through_this)
+    p3100_reaction = IMPLICIT_UB_NONE;
+  /* An access through the address of the object a reference was just
+     bound to has its null dereference reported by the binding's check,
+     retargeted to the .access leaf; the address alone by that check as it
+     is.  An access through `this' so bound, the copy of `*this', reports
+     nothing: the binding's check is disabled.  */
+  auto_vec<gimple *, 2> binding_checks;
+  bool binding_covered = false;
+  if (ubsan_binding_checks_for (TREE_OPERAND (base, 0), &binding_checks))
+    {
+      for (gimple *check : binding_checks)
+	if (through_this)
+	  ubsan_disable_binding_check (check);
+	else if (!address_only)
+	  ubsan_retarget_binding_check (check);
+      p3100_reaction = IMPLICIT_UB_NONE;
+      /* The binding's check, P3100's or -fsanitize=null's, reports the
+	 null dereference once: with no alignment edge nothing is checked
+	 here (below; DECISIONS.md E120).  */
+      binding_covered = !through_this;
+    }
+  bool p3100_null = (p3100_reaction != IMPLICIT_UB_NONE);
+  /* A P3100 ub:basic.align.object.alignment assertion wants the alignment edge
+     generated even when -fsanitize=alignment is not enabled.  Its reaction is
+     carried independently (operands 6/7/8), and ubsan_expand_null_ifn routes the
+     null and alignment edges to separate then-blocks, so both a null-deref
+     contract and an alignment contract can apply at the same access.  */
+  int p3100_align_reaction
+    = resolve_implicit_ub_reaction (cfun->decl, site_loc,
+				    "ub:basic.align.object.alignment.store");
+  bool want_align_contract = (p3100_align_reaction != IMPLICIT_UB_NONE);
   unsigned int align = 0;
-  if (sanitize_flags_p (SANITIZE_ALIGNMENT))
+  if (sanitize_flags_p (SANITIZE_ALIGNMENT) || want_align_contract)
     {
       align = min_align_of_type (TREE_TYPE (base));
       if (align <= 1)
 	align = 0;
     }
+  /* Only a type that actually needs alignment (> 1) has an alignment edge; if
+     none, the align contract has nothing to check.  This differs from
+     want_align_contract, which is true whenever a config selects an alignment
+     reaction regardless of whether this access has an alignment edge.  */
+  bool p3100_align_active = (want_align_contract && align != 0);
+  /* Nor is the alignment checked here when the binding's check tests the
+     alignment this access needs, with the same reaction -- a class copied
+     from `*(P *) (c + o)', whose copy constructor's reference parameter is
+     bound to it: the misaligned access is reported once, by the binding's
+     check (DECISIONS.md E120; GCC-879).  */
+  if (binding_covered
+      && p3100_align_active
+      && ubsan_binding_checks_align_p (binding_checks,
+				       TREE_OPERAND (base, 0), align,
+				       p3100_align_reaction))
+    {
+      align = 0;
+      p3100_align_active = false;
+    }
   if (align == 0)
     {
-      if (!sanitize_flags_p (SANITIZE_NULL))
+      if (!sanitize_flags_p (SANITIZE_NULL) && !p3100_null)
+	return;
+      if (ptrmem_derived || binding_covered)
 	return;
       addr_space_t as = TYPE_ADDR_SPACE (TREE_TYPE (base));
       if (!ADDR_SPACE_GENERIC_P (as)
@@ -1467,8 +2248,36 @@ instrument_mem_ref (tree mem, tree base, gimple_stmt_iterator *iter,
     ikind = UBSAN_MEMBER_ACCESS;
   tree kind = build_int_cst (build_pointer_type (TREE_TYPE (base)), ikind);
   tree alignt = build_int_cst (pointer_sized_int_node, align);
-  gcall *g = gimple_build_call_internal (IFN_UBSAN_NULL, 3, t, kind, alignt);
-  gimple_set_location (g, gimple_location (gsi_stmt (*iter)));
+  tree reactiont = build_int_cst (unsigned_type_node, p3100_reaction);
+  tree align_reactiont
+    = build_int_cst (unsigned_type_node,
+		     p3100_align_active ? p3100_align_reaction
+					: IMPLICIT_UB_NONE);
+  /* For a P3100 noexcept_enforce/observe check, build the contract violation
+     handler entry point and its static data block HERE, at pass_ubsan, while
+     the C++ front-end langhook is still available and cfun->decl is the true
+     (pre-inline) enclosing function.  The handler entry decl and data-block
+     address are carried on the IFN so ubsan_expand_null_ifn (which runs at
+     sanopt, post-inline and -- crucially -- at LTRANS where no C++ langhook
+     exists) can emit the call by reading the IR instead of re-deriving it.
+     quick_enforce (trap) and the pure-sanitizer path carry null operands and
+     fall back to a trap / the sanitizer handler at expansion time.  The null
+     reaction uses UBSAN_NULL_ENTRY/UBSAN_NULL_DATA; the alignment reaction
+     UBSAN_NULL_ALIGN_ENTRY/UBSAN_NULL_ALIGN_DATA.  */
+  tree entryt, data_addrt;
+  implicit_ub_handler_operands (cfun->decl, site_loc, null_group,
+				p3100_reaction, &entryt, &data_addrt);
+  tree align_entryt, align_data_addrt;
+  implicit_ub_handler_operands (cfun->decl, site_loc,
+				"ub:basic.align.object.alignment.store",
+				p3100_align_active
+				? p3100_align_reaction : IMPLICIT_UB_NONE,
+				&align_entryt, &align_data_addrt);
+  gcall *g = gimple_build_call_internal (IFN_UBSAN_NULL, UBSAN_NULL_NUM_OPS,
+					 t, kind, alignt, reactiont, entryt,
+					 data_addrt, align_reactiont,
+					 align_entryt, align_data_addrt);
+  gimple_set_location (g, site_loc);
   gsi_safe_insert_before (iter, g);
 }
 
@@ -1478,13 +2287,17 @@ static void
 instrument_null (gimple_stmt_iterator gsi, tree t, bool is_lhs)
 {
   /* Handle also e.g. &s->i.  */
+  bool address_only = false;
   if (TREE_CODE (t) == ADDR_EXPR)
-    t = TREE_OPERAND (t, 0);
+    {
+      t = TREE_OPERAND (t, 0);
+      address_only = true;
+    }
   tree base = get_base_address (t);
   if (base != NULL_TREE
       && TREE_CODE (base) == MEM_REF
       && TREE_CODE (TREE_OPERAND (base, 0)) == SSA_NAME)
-    instrument_mem_ref (t, base, &gsi, is_lhs);
+    instrument_mem_ref (t, base, &gsi, is_lhs, address_only);
 }
 
 /* Instrument pointer arithmetics PTR p+ OFF.  */
@@ -2488,6 +3301,13 @@ pass_ubsan::execute (function *fun)
 
   initialize_sanitizer_builtins ();
 
+  hash_set<tree> ptrmem_checked_ptrs;
+  ubsan_note_ptrmem_object_checks (fun, &ptrmem_checked_ptrs);
+  hash_map<tree, gimple *> binding_checks;
+  hash_set<gimple *> retargeted_binding_checks;
+  ubsan_retargeted_binding_checks = &retargeted_binding_checks;
+  ubsan_note_binding_checks (fun, &binding_checks);
+
   FOR_EACH_BB_FN (bb, fun)
     {
       for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi);)
@@ -2638,6 +3458,9 @@ pass_ubsan::execute (function *fun)
       if (gimple_purge_dead_eh_edges (bb))
 	ret = TODO_cleanup_cfg;
     }
+  ubsan_ptrmem_checked_ptrs = NULL;
+  ubsan_binding_checks = NULL;
+  ubsan_retargeted_binding_checks = NULL;
   return ret;
 }
 

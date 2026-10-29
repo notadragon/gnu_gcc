@@ -474,6 +474,7 @@ build_base_path (enum tree_code code,
       else
 	{
 	  tree t = expr;
+	  tree vcheck = NULL_TREE;
 	  if (sanitize_flags_p (SANITIZE_VPTR)
 	      && fixed_type_p == 0)
 	    {
@@ -481,9 +482,24 @@ build_base_path (enum tree_code code,
 							   probe, expr);
 	      if (t == NULL_TREE)
 		t = expr;
+	      /* P3100: the vptr check, `(check, EXPR)', is made first and
+		 the offset read through EXPR itself, as without the check,
+		 so that the read is checked for null on the pointer EXPR is
+		 formed from (`p' of `p[1]', DECISIONS.md E97 (c)).
+		 GCC-861.  */
+	      else if (flag_contracts_p3100
+		       && TREE_CODE (t) == COMPOUND_EXPR
+		       && TREE_OPERAND (t, 1) == expr)
+		{
+		  vcheck = TREE_OPERAND (t, 0);
+		  t = expr;
+		}
 	    }
 	  v_offset = build_vfield_ref (cp_build_fold_indirect_ref (t),
 	  TREE_TYPE (TREE_TYPE (expr)));
+	  if (vcheck && v_offset != error_mark_node)
+	    v_offset = build2 (COMPOUND_EXPR, TREE_TYPE (v_offset), vcheck,
+			       v_offset);
 	}
 
       if (v_offset == error_mark_node)
