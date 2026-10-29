@@ -4903,6 +4903,49 @@ process_outer_var_ref (tree decl, tsubst_flags_t complain,
    the use of "this" explicit.
 
    Upon return, *IDK will be filled in appropriately.  */
+/* True if the current point is inside a lambda in the predicate of a
+   constructor precondition or destructor postcondition (CONTRACT_CLASS_PTR is
+   set), and DECL is a member of that function's class or a base, which the
+   lambda can reach only through its captured `this': still a use of
+   (*this) in the predicate ([expr.prim.id.general]).  A local class's own
+   members are not.  */
+
+static bool
+member_via_lambda_in_cdtor_contract_p (tree decl)
+{
+  if (!contract_class_ptr
+      || !current_function_decl
+      || !LAMBDA_FUNCTION_P (current_function_decl)
+      || !DECL_CONTEXT (decl)
+      || !CLASS_TYPE_P (DECL_CONTEXT (decl)))
+    return false;
+  tree ctype = TREE_TYPE (TREE_TYPE (contract_class_ptr));
+  if (!DERIVED_FROM_P (DECL_CONTEXT (decl), ctype))
+    return false;
+  for (cp_binding_level *b = current_binding_level; b; b = b->level_chain)
+    {
+      if (b->kind == sk_contract)
+	return true;
+      if (b->kind == sk_namespace)
+	return false;
+    }
+  return false;
+}
+
+/* True if the overload set DECL has a static member function in it.  */
+
+static bool
+overload_set_has_static_member_p (tree decl)
+{
+  for (ovl_iterator iter (get_fns (decl)); iter; ++iter)
+    {
+      tree fn = STRIP_TEMPLATE (strip_using_decl (*iter));
+      if (TREE_CODE (fn) == FUNCTION_DECL && DECL_STATIC_FUNCTION_P (fn))
+	return true;
+    }
+  return false;
+}
+
 static cp_expr
 finish_id_expression_1 (tree id_expression,
 			tree decl,
@@ -5244,8 +5287,20 @@ finish_id_expression_1 (tree id_expression,
 	}
       else if (TREE_CODE (decl) == FIELD_DECL)
 	{
-	  if (flag_contracts && processing_contract_condition
-	      && contract_class_ptr == current_class_ptr)
+	  /* CONTRACT_CLASS_PTR is only set for a constructor precondition or a
+	     destructor postcondition, where a member must be named through an
+	     explicit 'this'.  Test it for non-nullness first: it and
+	     CURRENT_CLASS_PTR are both null in an explicit object member
+	     function, which has no 'this' at all, and comparing them alone made
+	     this constructor/destructor diagnostic fire there.  Falling through
+	     instead gives such a function the same "invalid use of non-static
+	     data member" diagnostic its body already gets.  */
+	  if (flag_contracts
+	      && ((processing_contract_condition
+		   && contract_class_ptr
+		   && contract_class_ptr == current_class_ptr)
+		  || member_via_lambda_in_cdtor_contract_p (decl))
+	      && !cp_unevaluated_operand)
 	    {
 	      error ("%qD 'this' required when accessing a member within a "
 		  "constructor precondition or destructor postcondition "
@@ -5274,10 +5329,25 @@ finish_id_expression_1 (tree id_expression,
 		      && DECL_FUNCTION_MEMBER_P (first_fn)
 		      && !shared_member_p (decl))))
 	    {
-	      /* A set of member functions.  */
-	      if (flag_contracts && processing_contract_condition
-		  && contract_class_ptr == current_class_ptr)
+	      /* A set of member functions.  See the FIELD_DECL case above for
+		 why CONTRACT_CLASS_PTR is tested for non-nullness.  */
+	      if (flag_contracts
+		  && ((processing_contract_condition
+		       && contract_class_ptr
+		       && contract_class_ptr == current_class_ptr)
+		      || member_via_lambda_in_cdtor_contract_p (first_fn))
+		  && !cp_unevaluated_operand)
 		{
+		  /* Only a call that selects a non-static member function
+		     goes through (*this) ([over.call.func]/3).  For a set that
+		     also has a static member, build the call on a dummy
+		     object, as in a static member function: overload
+		     resolution then diagnoses a non-static selection.  */
+		  if (overload_set_has_static_member_p (decl))
+		    return finish_class_member_access_expr
+		      (build_dummy_object (DECL_CONTEXT (first_fn)),
+		       id_expression, /*template_p=*/false,
+		       tf_warning_or_error);
 		  error ("%qD 'this' required when accessing a member within a "
 		      "constructor precondition or destructor postcondition "
 		      "contract check", decl);
