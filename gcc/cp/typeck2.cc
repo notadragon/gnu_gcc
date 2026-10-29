@@ -34,6 +34,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "intl.h"
 #include "gcc-rich-location.h"
 #include "target.h"
+#include "c-family/c-ubsan.h"
 
 static tree
 process_init_constructor (tree type, tree init, int nested, int flags,
@@ -2639,6 +2640,14 @@ build_m_component_ref (tree datum, tree component, tsubst_flags_t complain)
 				       | cp_type_quals (TREE_TYPE (datum))));
 
       datum = cp_build_addr_expr (datum, complain);
+
+      /* Check the object pointer for null (and alignment) here, where it is
+	 still an operand: once the offset is added below, a check of the
+	 resulting address no longer sees it.  */
+      if (!processing_template_decl
+	  && !cp_unevaluated_operand
+	  && current_function_decl != NULL_TREE)
+	datum = ubsan_maybe_instrument_ptrmem_object (input_location, datum);
 
       /* Convert object to the correct base.  */
       if (binfo)
