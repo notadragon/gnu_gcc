@@ -45,7 +45,7 @@ foo ()
 
   bool y = true;
   auto f7 = [=]
-    pre([=]{ return y; }()) {}; // TODO : 
+    pre([=]{ return y; }()) {};  // { dg-error {'y' is not implicitly captured by a contract assertion} } outer capture of y is invalid.
 
   int x = 4;
   auto f8 = [&] 

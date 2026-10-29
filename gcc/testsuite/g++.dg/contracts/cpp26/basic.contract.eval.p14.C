@@ -2,8 +2,9 @@
 // basic.contract.eval/p14
 // Note 10 : If the contract-violation handler returns normally and the evaluation semantic is observe, control flow
 // continues normally after the point of evaluation of the contract assertion. — end note
-// { dg-do compile { target c++23 } }
+// { dg-do run { target c++26 } }
 // { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe" }
+// { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 
 bool check(int i){
   if (i > 10)
