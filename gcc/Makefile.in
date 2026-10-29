@@ -1345,6 +1345,7 @@ C_COMMON_OBJS = c-family/c-common.o c-family/c-cppbuiltin.o c-family/c-dump.o \
   c-family/contracts-config.o \
   c-family/contracts-prove.o \
   c-family/contracts-prove-shadow.o \
+  c-family/contracts-prove-override.o \
   c-family/contracts-prove-fold.o
 
 # Analyzer object files

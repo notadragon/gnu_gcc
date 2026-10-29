@@ -272,6 +272,12 @@ extern tree get_orig_func_for_wrapper	(tree);
 
 extern void start_function_contracts		(tree);
 extern void maybe_apply_function_contracts	(tree);
+struct override_shadows;
+extern override_shadows *begin_override_shadows	(tree);
+extern void start_override_shadows		(override_shadows *, tree);
+extern void add_override_post_obligations	(tree);
+extern void add_override_base_post_obligations	();
+extern void place_override_shadows_alone	(override_shadows *);
 extern void finish_function_outlined_contracts	(tree);
 extern void set_contract_functions		(tree, tree, tree);
 

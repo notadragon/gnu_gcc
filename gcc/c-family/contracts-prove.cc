@@ -33,6 +33,7 @@ along with GCC; see the file COPYING3.  If not see
 static const contract_proof_strategy *const contract_proof_strategies[] = {
   &contract_prove_fold_strategy,
   &contract_prove_shadow_strategy,
+  &contract_prove_override_strategy,
   NULL
 };
 

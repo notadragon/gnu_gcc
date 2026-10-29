@@ -3520,6 +3520,56 @@ The destructor call of a temporary that an initialization elides (a
 prvalue that initializes an object directly) is never made, and has no
 analysis evaluation.
 
+A call through a base class evaluates the contract assertions of the
+overridden function @code{B::f}, which the caller sees, and those of the
+final overrider @code{D::f}, which it does not (@option{-fcontracts-p3097}).
+So the body of each virtual function @code{D::f} defined in the translation
+unit is analyzed once more for each function @code{B::f} it overrides,
+directly or indirectly, in an @dfn{override shadow} that takes the
+preconditions of @code{B::f} as given (@option{-fcontracts-prove-override}),
+and in which, in order, each precondition of @code{D::f} is analyzed at
+entry, each postcondition of @code{D::f} at each return, ahead of its own
+check, and each postcondition of @code{B::f} at each return, after all of
+the checks of @code{D::f} -- those whose analysis evaluation, resolved for
+the function they belong to, is @code{prove} or @code{diagnose}.  There,
+@code{this} is the @code{B} base class subobject; a parameter of
+@code{B::f} is the corresponding parameter of @code{D::f}, as it was on
+entry in a postcondition of @code{B::f} unless @code{D::f} receives it by
+reference or by invisible reference (a class with a nontrivial copy
+constructor or destructor), since the check of that postcondition evaluates
+it with its own copy; and the result of @code{D::f} is converted to the
+return type of @code{B::f} for a covariant return.  A @code{B::f} without
+contract assertions gives an override shadow with nothing given, so the
+preconditions of @code{D::f} must hold for any argument.  Such an
+evaluation is diagnosed at the definition of @code{D::f}, as one that
+``cannot be proven for a call through'' @code{B::f}, and is never assumed
+in the code (@option{-fcontracts-prove-assume}): @code{D::f} also serves
+calls that never established the preconditions of @code{B::f}, and the
+check of a postcondition of @code{B::f} is not in @code{D::f}.  A proof
+relying on a precondition of @code{B::f} is sound only when its label
+allows nothing but @code{enforce}, @code{quick_enforce},
+@code{noexcept_enforce} and @code{assume}.  A @code{D::f} that the
+translation unit does not compile -- an inline function whose class's
+virtual table another translation unit emits -- is analyzed there and not
+diagnosed here.  A pure virtual or undefined @code{D::f} gets no override
+shadow.  A virtual destructor, an implicitly defined one included,
+overrides the virtual destructors of its bases; their postconditions are
+analyzed after it has destroyed its members and bases, in the
+complete-object destructor only (the one a @code{delete} through a base
+class runs).  A base class occurring as more than one subobject gives one
+override shadow per subobject when the contract assertions of @code{B::f}
+name @code{this}, and a single one otherwise.  A postcondition with captures
+(@option{-fcontracts-p3098}) is settled at once, by folding.
+
+Without override shadows (at @option{-O0}, or with
+@option{-fno-contracts-prove-override}) each of these evaluations is one
+of @code{D::f} itself, with nothing taken from the preconditions of
+@code{B::f}: a precondition of @code{D::f} is proven only if it folds to
+@code{true}, a postcondition of @code{D::f} needs nothing beyond its own
+analysis evaluation, and the postconditions of @code{B::f} are analyzed in
+the proof shadow of @code{D::f} (@option{-fcontracts-prove-shadow}) after
+all of its checks, as above, or else by folding.
+
 In a contract configuration (@option{-fcontract-configuration}), an entry
 whose @code{match} has @code{"analysis": true} selects the semantic of the
 analysis evaluation.  Only such entries are considered for the analysis
@@ -3708,6 +3758,20 @@ an assumption in the function's code, as if evaluated with
 optimizations after the shadow is decided may take it to hold.
 
 It is accepted for C and Objective-C too.
+
+@opindex fcontracts-prove-override
+@opindex fno-contracts-prove-override
+@item -fcontracts-prove-override
+A proving strategy of its own, enabled by @option{-fcontracts-p4405} and
+disabled by @option{-fno-contracts-prove-override}: analyze the body of
+each virtual function in an override shadow per function it overrides,
+a proof shadow that takes the preconditions of the overridden function as
+given (see @option{-fcontracts-p4405} above).  It is separate from
+@option{-fcontracts-prove-shadow}, which it does not need, because each
+override shadow costs one more optimization of the function.  Its shadows
+run where a proof shadow would, and its evaluations are diagnosed at the
+same time.  It is accepted for C and Objective-C too, where it has no
+effect.
 
 @opindex fcoroutines
 @opindex fno-coroutines

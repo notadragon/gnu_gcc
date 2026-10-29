@@ -43,6 +43,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "stor-layout.h"
 #include "intl.h"
 #include "cgraph.h"
+#include "contracts-shadow.h"
 #include "opts.h"
 #include "output.h"
 #include "predict.h"
@@ -5805,6 +5806,8 @@ apply_postconditions (tree fndecl)
 {
   if (flag_contract_checks_outlined && DECL_POST_FN (fndecl))
     {
+      /* D4405: the override shadows' regions stay in FNDECL.  */
+      add_override_post_obligations (NULL_TREE);
       add_post_condition_fn_call (fndecl);
       return;
     }
@@ -5854,6 +5857,10 @@ apply_postconditions (tree fndecl)
 	      break;
 	    }
 	}
+
+      /* D4405: its obligations in the override shadows, ahead of it.  */
+      if (orig_contract)
+	add_override_post_obligations (orig_contract);
 
       /* If this postcondition has captures, gate on the initialized flag.  */
       tree *flag_p = NULL;
@@ -5973,6 +5980,19 @@ wrap_postconditions_in_retval_cleanup (tree fndecl, tree stmts)
 void
 maybe_apply_function_contracts (tree fndecl)
 {
+  /* D4405: the override shadows (begin_override_shadows), by themselves
+     when FNDECL has no active postconditions (place_override_shadows_alone),
+     and otherwise their regions at entry ahead of everything else below and
+     the obligations of the postconditions with the postconditions' checks
+     (add_override_base_post_obligations).  */
+  override_shadows *overrides = begin_override_shadows (fndecl);
+  if (overrides
+      && (!handle_contracts_p (fndecl) || !has_active_postconditions (fndecl)))
+    {
+      place_override_shadows_alone (overrides);
+      return;
+    }
+
   if (!handle_contracts_p (fndecl))
     /* We did nothing and the original function body statement list will be
        popped by our caller.  */
@@ -6103,6 +6123,9 @@ maybe_apply_function_contracts (tree fndecl)
 
   /* For other cases, we call a function to process the check.  */
 
+  if (overrides)
+    start_override_shadows (overrides, cur_stmt_list);
+
   /* If we have a pre, but not a post, then just emit that and we are done.  */
   if (!do_post)
     {
@@ -6153,6 +6176,7 @@ maybe_apply_function_contracts (tree fndecl)
 	 destroys it.  */
       tree post_stmts = push_stmt_list ();
       apply_postconditions (fndecl);
+      add_override_base_post_obligations ();
       post_stmts = pop_stmt_list (post_stmts);
       TREE_OPERAND (eh_else, 0) = push_stmt_list ();
       add_stmt (wrap_checks_directly
@@ -6175,6 +6199,7 @@ maybe_apply_function_contracts (tree fndecl)
     {
       tree post_stmts = push_stmt_list ();
       apply_postconditions (fndecl);
+      add_override_base_post_obligations ();
       post_stmts = pop_stmt_list (post_stmts);
       add_stmt (wrap_checks_directly
 		? wrap_postconditions_in_retval_cleanup (fndecl, post_stmts)
@@ -12579,6 +12604,967 @@ contract_wrapper_settled_p (tree wrapper)
     if (!contract_evaluation_settled_p (contract, fndecl))
       return false;
   return true;
+}
+
+/* D4405R0, "Virtual Functions": override shadows.  A call through a base
+   class B evaluates the contract assertions of B::f, which the caller
+   sees, and those of the final overrider D::f, which it cannot.  So for
+   each function B::f that a virtual D::f defined here overrides, directly
+   or indirectly, an override shadow of D::f's body takes B::f's
+   preconditions as given and attempts to prove, in order: D::f's
+   preconditions at entry; D::f's postconditions at each return, each ahead
+   of its own runtime check; and B::f's postconditions after all of D::f's
+   checks, where the P3097 wrapper evaluates them.  Each is an analysis
+   evaluation of the assertion being proven, with its own analysis
+   semantic, resolved against the function it belongs to; when every one is
+   ignore, there is no override shadow.  A B::f without contract assertions
+   gets one too, with no premises: D::f's preconditions must then hold for
+   any argument (DECISIONS.md E156).  The pair is registered with the proof
+   shadows' middle end (contract_shadow_register_override), which issues
+   its diagnostics, and the proving strategies see it in each query.  An
+   override proof is never assumed in the real code, which also serves
+   direct calls, where B::f's preconditions were never established, and the
+   diagnostics are issued at D::f's definition, naming B::f (DECISIONS.md
+   E155).
+
+   In B::f's postconditions, `this' is a snapshot of D::f's `this'
+   converted to the B subobject; a parameter that D::f receives by value,
+   but not by invisible reference, is a snapshot of it, which is what the
+   wrapper's own copy holds whatever D::f does to its parameter (E153),
+   and any other parameter is D::f's own; the result name is D::f's result,
+   converted to B::f's return type for a covariant return as the covariant
+   thunk converts it.  The snapshots of `this' and the parameters are taken
+   at entry, and every snapshot is assigned only inside a region of the
+   pair's kind, so the real function, which sheds the regions before SSA,
+   never uses them.
+
+   maybe_apply_function_contracts drives this.  begin_override_shadows
+   makes the pairs, D::f's preconditions' obligations and B::f's
+   postconditions'; apply_postconditions places D::f's postconditions'
+   ahead of their checks (add_override_post_obligations), and
+   maybe_apply_function_contracts B::f's after them
+   (add_override_base_post_obligations), which also places the regions at
+   entry -- snapshots, premises and obligations -- for the pairs that placed
+   a marker (finish_override_shadows).  A D::f without active
+   postconditions gets the regions alone, or, for B::f's postconditions, a
+   try/finally of their own (place_override_shadows_alone).  An obligation
+   that no strategy may defer (at -O0, say, or a postcondition with
+   captures) is decided at once.
+
+   Override shadows are a proving strategy of their own,
+   -fcontracts-prove-override (contract_proof_override_shadows_p;
+   DECISIONS.md E157).  Without it, each pair's evaluations are obligations
+   of D::f itself, with no premise from B::f: D::f's preconditions are
+   decided at once, so only folding settles them; D::f's postconditions
+   need no more than their own analysis evaluations; and B::f's
+   postconditions, rewritten as above, are proven in D::f's ordinary
+   shadow after D::f's checks.  Their diagnostics name B::f all the same.
+
+   A virtual destructor overrides too, an implicitly defined one included
+   (DECISIONS.md E152): its body for the override shadows is what it runs --
+   its own statements, then the destruction of the members and bases, so
+   B::~B's postconditions are proven after B::~B has run.  In a class with
+   virtual bases the regions are placed only in the complete-object
+   destructor (override_in_charge), which is what a delete through a base
+   class runs; the base-object destructor, which leaves the virtual bases
+   alone, is never the target of a virtual call.
+
+   A base class occurring as more than one subobject gives one pair per
+   subobject when B::f's contract assertions name `this', which then reads
+   a different object in each, and one pair otherwise (DECISIONS.md
+   E154).  */
+
+/* cp_walk_tree callback: stop at `this', the real one or the placeholder
+   of a predicate parsed on a declaration.  */
+
+static tree
+find_this_parameter_r (tree *tp, int *walk_subtrees, void *)
+{
+  if (TYPE_P (*tp))
+    *walk_subtrees = 0;
+  else if (TREE_CODE (*tp) == PARM_DECL && is_this_parameter (*tp))
+    return *tp;
+  return NULL_TREE;
+}
+
+/* True if a contract assertion of FN names `this', so that it reads the
+   subobject a call through FN's class is made on.  */
+
+static bool
+contracts_name_this_p (tree fn)
+{
+  tree specs = get_fn_contract_specifiers (fn);
+  if (!specs)
+    return false;
+  for (tree c : tree_vec_range (specs))
+    {
+      tree cond = CONTRACT_CONDITION (c);
+      if (cond && cond != error_mark_node
+	  && !CONTRACT_CONDITION_DEFERRED_P (c)
+	  && cp_walk_tree_without_duplicates (&cond, find_this_parameter_r,
+					      NULL))
+	return true;
+    }
+  return false;
+}
+
+/* Push onto FNS each function that FNDECL, a member of the class of
+   COMPLETE, overrides in a base class of BINFO, directly or indirectly --
+   every one, not only the first on each path, which look_for_overrides
+   stops at -- and onto BINFOS the base class (in FNDECL's class) it is
+   found in: once per function, the first base class it is found in, or,
+   when its contract assertions name `this', once per base class subobject
+   (DECISIONS.md E154; a virtual base is one subobject however often it is
+   reached).  */
+
+static void
+collect_overridden_functions (tree complete, tree binfo, tree fndecl,
+			      vec<tree> &fns, vec<tree> &binfos)
+{
+  tree base_binfo;
+  for (unsigned i = 0; BINFO_BASE_ITERATE (binfo, i, base_binfo); ++i)
+    {
+      if (tree fn = look_for_overrides_here (BINFO_TYPE (base_binfo), fndecl))
+	{
+	  tree sub = base_binfo;
+	  if (BINFO_VIRTUAL_P (sub))
+	    sub = binfo_for_vbase (BINFO_TYPE (sub), complete);
+	  bool per_subobject = (fns.contains (fn)
+				&& contracts_name_this_p (fn));
+	  bool found = false;
+	  for (unsigned j = 0; j < fns.length (); ++j)
+	    if (fns[j] == fn && (!per_subobject || binfos[j] == sub))
+	      found = true;
+	  if (!found)
+	    {
+	      fns.safe_push (fn);
+	      binfos.safe_push (sub);
+	    }
+	}
+      collect_overridden_functions (complete, base_binfo, fndecl, fns,
+				    binfos);
+    }
+}
+
+/* An override pair of the function being finished: an overridden function
+   and what its override shadow places.  */
+
+struct override_pair
+{
+  /* B::f, and the base class (in D) it was first found in.  */
+  tree base;
+  tree binfo;
+  /* The pair's number once registered, else 0.  */
+  unsigned id;
+  /* A marker of the pair was placed, so its regions at entry are needed;
+     one of them for a postcondition of B::f.  */
+  bool marked;
+  bool base_post_marked;
+  /* At entry: the assignments of the snapshots of `this' and of the
+     parameters, and the markers of D::f's preconditions.  */
+  tree snapshots;
+  tree pre_obligations;
+  /* After D::f's postconditions' checks: the assignment of the result's
+     snapshot, if any, then the markers of B::f's postconditions.  */
+  tree post_obligations;
+  /* Copies of D::f's postconditions, for their markers, if any may be
+     deferred.  */
+  tree post_copies;
+  /* The snapshot of `this' (a B *), of each parameter of D::f that needs
+     one, and the result as B::f's postconditions see it.  */
+  tree this_snapshot;
+  hash_map<tree, tree> *parm_snapshots;
+  tree result;
+};
+
+/* The override shadows of the function being finished.  */
+
+struct override_shadows
+{
+  ~override_shadows ()
+  {
+    for (override_pair &p : pairs)
+      delete p.parm_snapshots;
+  }
+
+  tree fndecl;
+  /* Whether a strategy may defer the evaluations in FNDECL's body
+     (contract_proof_deferral_ok_p), and whether the pairs' evaluations are
+     made in override shadows (contract_proof_override_shadows_p): if not,
+     each is an obligation of FNDECL itself, with no premise from the
+     overridden function -- FNDECL's preconditions are decided at once,
+     FNDECL's postconditions need no more than their own analysis
+     evaluations, and the overridden functions' postconditions are proven
+     in FNDECL's ordinary shadow.  */
+  bool deferrable;
+  bool shadows;
+  auto_vec<override_pair> pairs;
+  /* The snapshot variables, and the statement list of the block
+     maybe_apply_function_contracts builds, which declares them and starts
+     with the regions at entry (finish_override_shadows).  */
+  auto_vec<tree> vars;
+  tree list;
+};
+
+/* While maybe_apply_function_contracts runs, the override shadows of the
+   function it finishes, if any (begin_override_shadows).  */
+
+static override_shadows *current_override_shadows;
+
+/* A new variable of TYPE in the body of OV's function, for a snapshot.  */
+
+static tree
+make_override_snapshot (override_shadows *ov, tree type)
+{
+  char name[32];
+  sprintf (name, "__contract_override_%u", ov->vars.length ());
+  tree var = build_decl (DECL_SOURCE_LOCATION (ov->fndecl), VAR_DECL,
+			 get_identifier (name), cv_unqualified (type));
+  DECL_ARTIFICIAL (var) = 1;
+  DECL_IGNORED_P (var) = 1;
+  TREE_USED (var) = 1;
+  DECL_CONTEXT (var) = ov->fndecl;
+  layout_decl (var, 0);
+  ov->vars.safe_push (var);
+  return var;
+}
+
+/* The region `if (.CONTRACT_SHADOW_GUARD (ID)) STMT;', executed only in
+   override pair ID's shadow.  */
+
+static tree
+override_region (unsigned id, tree stmt)
+{
+  location_t loc = DECL_SOURCE_LOCATION (current_function_decl);
+  contract_shadow_note_region ();
+  tree guard = build_call_expr_internal_loc (loc, IFN_CONTRACT_SHADOW_GUARD,
+					     boolean_type_node, 1,
+					     build_int_cst (unsigned_type_node,
+							    id));
+  return build3_loc (loc, COND_EXPR, void_type_node, guard, stmt,
+		     build_empty_stmt (loc));
+}
+
+/* STMT, code of OV's override shadows, as placed in OV's function: in a
+   destructor with an in-charge parameter (of a class with virtual bases),
+   for the complete-object destructor only, which is what a delete through
+   a base class runs; the base-object destructor, which does not destroy
+   the virtual bases, is never the target of a virtual call.  The clones
+   fold the test.  */
+
+static tree
+override_in_charge (override_shadows *ov, tree stmt)
+{
+  if (!stmt || !DECL_HAS_IN_CHARGE_PARM_P (ov->fndecl))
+    return stmt;
+  return build_if_in_charge (stmt);
+}
+
+/* Register P, a pair of OV, if not yet done, and return its number.  */
+
+static unsigned
+register_override_pair (override_shadows *ov, override_pair *p)
+{
+  if (!p->id)
+    p->id = contract_shadow_register_override (ov->fndecl, p->base);
+  return p->id;
+}
+
+/* The kind of the regions of P, a pair of OV: the pair's number when it
+   has an override shadow, and 0, the ordinary shadow's, otherwise.  */
+
+static unsigned
+override_kind (override_shadows *ov, override_pair *p)
+{
+  return ov->shadows ? register_override_pair (ov, p) : 0;
+}
+
+/* What PARM, a parameter of OV's function, is in P's B::f's
+   postconditions: a snapshot taken at entry, unless D::f receives it by
+   reference or by invisible reference (E153).  */
+
+static tree
+override_parm_snapshot (override_shadows *ov, override_pair *p, tree parm)
+{
+  tree type = TREE_TYPE (parm);
+  if (TYPE_REF_P (type) || TREE_ADDRESSABLE (type))
+    return parm;
+  if (!p->parm_snapshots)
+    p->parm_snapshots = new hash_map<tree, tree>;
+  if (tree *snap = p->parm_snapshots->get (parm))
+    return *snap;
+  tree snap = make_override_snapshot (ov, type);
+  p->parm_snapshots->put (parm, snap);
+  append_to_statement_list_force (build2 (MODIFY_EXPR, TREE_TYPE (snap),
+					  snap, parm),
+				  &p->snapshots);
+  return snap;
+}
+
+/* The snapshot of OV's function's `this' converted to P's base class,
+   taken at entry, or error_mark_node.  */
+
+static tree
+override_this_snapshot (override_shadows *ov, override_pair *p)
+{
+  if (p->this_snapshot)
+    return p->this_snapshot;
+  tree conv = build_base_path (PLUS_EXPR, DECL_ARGUMENTS (ov->fndecl),
+			       p->binfo, /*nonnull=*/1, tf_none);
+  if (conv == error_mark_node)
+    return p->this_snapshot = error_mark_node;
+  tree snap = make_override_snapshot (ov, TREE_TYPE (conv));
+  append_to_statement_list_force (build2 (MODIFY_EXPR, TREE_TYPE (snap),
+					  snap, conv),
+				  &p->snapshots);
+  return p->this_snapshot = snap;
+}
+
+/* The result of OV's function as P's B::f's postconditions see it, or
+   error_mark_node: for a covariant return, a snapshot of the result
+   converted to B::f's return type -- null-checked for a pointer, as the
+   covariant thunk converts it -- and otherwise the result itself, or, if
+   ADDRESSABLE, the address of a postcondition's result binding being taken,
+   a snapshot of it when it is not returned in memory, so that the binding
+   has one home (postcondition_needs_retval_temp_p).  A snapshot is
+   assigned in a region placed after D::f's postconditions' checks.  */
+
+static tree
+override_result (override_shadows *ov, override_pair *p, bool addressable)
+{
+  if (p->result)
+    return p->result;
+  tree fndecl = ov->fndecl;
+  tree res = DECL_RESULT (fndecl);
+  tree dtype = TREE_TYPE (TREE_TYPE (fndecl));
+  tree btype = TREE_TYPE (TREE_TYPE (p->base));
+  tree type = dtype;
+  tree init = NULL_TREE;
+  if (!res)
+    return p->result = error_mark_node;
+  if (!same_type_ignoring_top_level_qualifiers_p (dtype, btype))
+    {
+      bool ref = TYPE_REF_P (dtype);
+      if (ref ? !TYPE_REF_P (btype) : !(TYPE_PTR_P (dtype)
+					 && TYPE_PTR_P (btype)))
+	return p->result = error_mark_node;
+      tree binfo = lookup_base (TYPE_MAIN_VARIANT (TREE_TYPE (dtype)),
+				TYPE_MAIN_VARIANT (TREE_TYPE (btype)),
+				ba_unique, NULL, tf_none);
+      if (!binfo || binfo == error_mark_node)
+	return p->result = error_mark_node;
+      tree ptr = (ref ? build_nop (build_pointer_type (TREE_TYPE (dtype)), res)
+		  : res);
+      init = build_base_path (PLUS_EXPR, ptr, binfo, /*nonnull=*/ref,
+			      tf_none);
+      if (init == error_mark_node)
+	return p->result = error_mark_node;
+      init = build_nop (btype, init);
+      type = btype;
+    }
+  else if (addressable
+	   && !aggregate_value_p (dtype, fndecl)
+	   && trivially_copyable_p (dtype))
+    init = res;
+  if (!init)
+    return p->result = res;
+  tree snap = make_override_snapshot (ov, type);
+  if (addressable)
+    TREE_ADDRESSABLE (snap) = 1;
+  append_to_statement_list_force
+    (override_region (override_kind (ov, p),
+		      build2 (INIT_EXPR, TREE_TYPE (snap), snap, init)),
+     &p->post_obligations);
+  return p->result = snap;
+}
+
+/* What a predicate of the overridden function becomes in the overriding
+   function's override shadow: its parameters (PARMS, which also maps a
+   postcondition's result binding) and `this' (THIS_EXPR, the overriding
+   function's `this' converted to the base class).  For B::f's
+   postconditions SNAPSHOTS is true: the parameters that need one map to
+   P's snapshots, and `this' to P's (override_parm_snapshot,
+   override_this_snapshot).  */
+
+struct override_remap_data
+{
+  hash_map<tree, tree> *parms;
+  tree this_expr;
+  bool snapshots;
+  override_shadows *ov;
+  override_pair *p;
+};
+
+/* cp_walk_tree callback rewriting an unshared copy of a predicate of the
+   overridden function (override_remap_data).  Stops at a parameter it
+   cannot map and at anything unsharing does not copy or that declares or
+   initializes an object of its own (a saved expression, a temporary, a
+   statement, a lambda): such a predicate is not used.  */
+
+static tree
+override_remap_r (tree *tp, int *walk_subtrees, void *data_)
+{
+  override_remap_data *data = static_cast<override_remap_data *> (data_);
+  tree t = *tp;
+  if (TYPE_P (t))
+    {
+      *walk_subtrees = 0;
+      return NULL_TREE;
+    }
+  switch (TREE_CODE (t))
+    {
+    case SAVE_EXPR:
+    case TARGET_EXPR:
+    case AGGR_INIT_EXPR:
+    case BIND_EXPR:
+    case STATEMENT_LIST:
+    case DECL_EXPR:
+    case STMT_EXPR:
+    case LAMBDA_EXPR:
+      return t;
+    case PARM_DECL:
+      *walk_subtrees = 0;
+      /* The real `this' or the placeholder of a predicate parsed on a
+	 declaration.  */
+      if (is_this_parameter (t))
+	{
+	  tree e = (data->snapshots
+		    ? override_this_snapshot (data->ov, data->p)
+		    : unshare_expr (data->this_expr));
+	  if (e == error_mark_node)
+	    return t;
+	  *tp = e;
+	  return NULL_TREE;
+	}
+      if (tree *r = data->parms->get (t))
+	{
+	  tree e = *r;
+	  if (data->snapshots && TREE_CODE (e) == PARM_DECL)
+	    e = override_parm_snapshot (data->ov, data->p, e);
+	  *tp = e;
+	  return NULL_TREE;
+	}
+      return t;
+    default:
+      return NULL_TREE;
+    }
+}
+
+/* Map in PARMS each parameter of BASE but `this' (and the in-charge and
+   VTT parameters of a destructor) to the corresponding parameter of
+   FNDECL.  */
+
+static void
+map_override_parms (tree base, tree fndecl, hash_map<tree, tree> &parms)
+{
+  for (tree bp = FUNCTION_FIRST_USER_PARM (base),
+	 dp = FUNCTION_FIRST_USER_PARM (fndecl);
+       bp && dp; bp = DECL_CHAIN (bp), dp = DECL_CHAIN (dp))
+    parms.put (bp, dp);
+}
+
+/* True if CONTRACT, of FN, has a usable predicate and a prove or diagnose
+   analysis evaluation.  */
+
+static bool
+override_obligation_p (tree contract, tree fn)
+{
+  return (CONTRACT_CONDITION (contract) != error_mark_node
+	  && !CONTRACT_CONDITION_DEFERRED_P (contract)
+	  && contract_semantic_proving_p (ensure_analysis_semantic (contract,
+								    fn)));
+}
+
+/* Offer the obligation of CONTRACT, with the analysis semantic ANALYSIS
+   and the predicate PRED as the override shadow of P, a pair of OV,
+   evaluates it (OPAQUE if it cannot be described), to the strategies at
+   OV's function's definition; without override shadows, as an obligation
+   of OV's function.  If DEFER, a strategy may defer it: its marker is then
+   appended to LIST.  Returns true if a marker was placed.  */
+
+static bool
+offer_override_obligation (override_shadows *ov, override_pair *p,
+			   tree contract, contract_evaluation_semantic analysis,
+			   tree pred, bool defer, bool opaque, tree *list)
+{
+  unsigned id = register_override_pair (ov, p);
+  tree marker = NULL_TREE;
+  diagnose_unproven_contract (contract, analysis,
+			      DECL_SOURCE_LOCATION (ov->fndecl), NULL_TREE,
+			      NULL_TREE, defer && !opaque ? &marker : NULL,
+			      pred, opaque, id, ov->shadows);
+  if (!marker)
+    return false;
+  append_to_statement_list_force (marker, list);
+  p->marked = true;
+  return true;
+}
+
+/* The obligations of P, a pair of OV, at entry: the preconditions of OV's
+   function, each on a fresh copy.  */
+
+static void
+build_override_pre_obligations (override_shadows *ov, override_pair *p)
+{
+  tree fndecl = ov->fndecl;
+  tree specs = get_fn_contract_specifiers (fndecl);
+  if (!specs)
+    return;
+  tree copies = NULL_TREE;
+  unsigned n = 0;
+  for (tree c : tree_vec_range (specs))
+    {
+      if (!PRECONDITION_P (c))
+	continue;
+      if (!copies)
+	copies = copy_contracts (fndecl, cmk_pre);
+      tree copy = TREE_VEC_ELT (copies, n++);
+      if (!override_obligation_p (c, fndecl)
+	  || CONTRACT_CONDITION (copy) == error_mark_node
+	  || CONTRACT_CONDITION_DEFERRED_P (copy))
+	continue;
+      remap_dummy_this (fndecl, &CONTRACT_CONDITION (copy));
+      /* Without an override shadow, nothing is given: only folding can
+	 settle it.  */
+      offer_override_obligation (ov, p, copy,
+				 ensure_analysis_semantic (c, fndecl),
+				 CONTRACT_CONDITION (copy), ov->shadows,
+				 false, &p->pre_obligations);
+    }
+}
+
+/* The obligations of P, a pair of OV, for the postconditions of OV's
+   function, made only in an override shadow: decided now for one with
+   captures (contract_proof_deferrable_p), and otherwise placed ahead of
+   their checks (add_override_post_obligations), for which this makes
+   copies of them.  */
+
+static void
+build_override_post_obligations (override_shadows *ov, override_pair *p)
+{
+  tree fndecl = ov->fndecl;
+  tree specs = get_fn_contract_specifiers (fndecl);
+  /* Without override shadows, their own analysis evaluations are all
+     there is.  */
+  if (!specs || !ov->shadows)
+    return;
+  bool later = false;
+  for (tree c : tree_vec_range (specs))
+    if (POSTCONDITION_P (c) && override_obligation_p (c, fndecl))
+      {
+	if (!POSTCONDITION_CAPTURES (c))
+	  later = true;
+	else
+	  /* Decided at once, as the postcondition's own analysis
+	     evaluation is (contract_proof_deferrable_p).  */
+	  offer_override_obligation (ov, p, c,
+				     ensure_analysis_semantic (c, fndecl),
+				     NULL_TREE, false, false, NULL);
+      }
+  if (later)
+    p->post_copies = copy_contracts (fndecl, cmk_post);
+}
+
+/* The obligations of P, a pair of OV, for the postconditions of P's B::f,
+   after OV's function's postconditions' checks: in P's post_obligations,
+   their predicates rewritten with the snapshots and the result as the
+   override shadow sees them.  */
+
+static void
+build_override_base_post_obligations (override_shadows *ov, override_pair *p)
+{
+  tree base = p->base;
+  tree specs = get_fn_contract_specifiers (base);
+  if (!specs)
+    return;
+  bool addressable = false;
+  for (tree c : tree_vec_range (specs))
+    if (POSTCONDITION_P (c))
+      if (tree r = POSTCONDITION_IDENTIFIER (c))
+	if (DECL_P (r) && TREE_ADDRESSABLE (r))
+	  addressable = true;
+  for (tree c : tree_vec_range (specs))
+    {
+      if (!POSTCONDITION_P (c) || !override_obligation_p (c, base))
+	continue;
+      contract_evaluation_semantic analysis
+	= ensure_analysis_semantic (c, base);
+      if (!ov->deferrable || POSTCONDITION_CAPTURES (c))
+	{
+	  /* Decided at once (contract_proof_deferrable_p): the captures
+	     are initialized only in the wrapper.  */
+	  offer_override_obligation (ov, p, c, analysis, NULL_TREE, false,
+				     false, NULL);
+	  continue;
+	}
+      hash_map<tree, tree> parms;
+      map_override_parms (base, ov->fndecl, parms);
+      bool opaque = false;
+      tree r = POSTCONDITION_IDENTIFIER (c);
+      if (r && r != error_mark_node && TREE_CODE (r) == PARM_DECL)
+	{
+	  tree result = override_result (ov, p, addressable);
+	  if (result == error_mark_node)
+	    opaque = true;
+	  else
+	    parms.put (r, result);
+	}
+      override_remap_data data = { &parms, NULL_TREE, true, ov, p };
+      tree pred = unshare_expr (CONTRACT_CONDITION (c));
+      if (!opaque && cp_walk_tree (&pred, override_remap_r, &data, NULL))
+	opaque = true;
+      if (offer_override_obligation (ov, p, c, analysis,
+				     opaque ? CONTRACT_CONDITION (c) : pred,
+				     true, opaque, &p->post_obligations))
+	p->base_post_marked = true;
+    }
+}
+
+/* D4405: the override shadows of FNDECL, the function being finished, or
+   null if there are none to place: per overridden function with at least
+   one obligation, FNDECL's preconditions' obligations and that function's
+   postconditions' are built now, FNDECL's postconditions' as their checks
+   are (add_override_post_obligations).  Sets current_override_shadows.
+   Called from maybe_apply_function_contracts, so FNDECL is the current
+   function.  */
+
+override_shadows *
+begin_override_shadows (tree fndecl)
+{
+  if (!flag_contracts
+      || !flag_contracts_p4405
+      || !flag_contracts_p3097
+      || flag_syntax_only
+      || processing_template_decl
+      || !DECL_VIRTUAL_P (fndecl)
+      /* Never the final overrider of a call through a base class.  */
+      || DECL_PURE_VIRTUAL_P (fndecl)
+      || DECL_CLONED_FUNCTION_P (fndecl)
+      || CONTRACT_HELPER (fndecl) != ldf_contract_none
+      || DECL_IS_WRAPPER_FN_P (fndecl))
+    return NULL;
+
+  /* FNDECL's own obligations, in every pair.  */
+  bool own = false;
+  if (tree specs = get_fn_contract_specifiers (fndecl))
+    for (tree c : tree_vec_range (specs))
+      if (override_obligation_p (c, fndecl))
+	own = true;
+
+  auto_vec<tree> bases, binfos;
+  tree ctx = DECL_CONTEXT (fndecl);
+  collect_overridden_functions (ctx, TYPE_BINFO (ctx), fndecl, bases, binfos);
+  if (bases.is_empty ())
+    return NULL;
+
+  override_shadows *ov = new override_shadows;
+  ov->fndecl = fndecl;
+  ov->deferrable = contract_proof_deferral_ok_p (fndecl);
+  ov->shadows = ov->deferrable && contract_proof_override_shadows_p (fndecl);
+  bool any = false;
+  for (unsigned i = 0; i < bases.length (); ++i)
+    {
+      tree base = bases[i];
+      /* A pure virtual function or an uninstantiated template has had
+	 nothing substitute its contracts yet, as for a wrapper.  */
+      maybe_instantiate_contracts (base, /*for_wrapper=*/true);
+      tree base_specs = get_fn_contract_specifiers (base);
+      if (base_specs && contract_any_deferred_p (base_specs))
+	continue;
+      bool base_post = false;
+      if (base_specs)
+	for (tree c : tree_vec_range (base_specs))
+	  if (POSTCONDITION_P (c) && override_obligation_p (c, base))
+	    base_post = true;
+      if (!own && !base_post)
+	continue;
+
+      override_pair pair = {};
+      pair.base = base;
+      pair.binfo = binfos[i];
+      ov->pairs.safe_push (pair);
+      override_pair *p = &ov->pairs.last ();
+      build_override_pre_obligations (ov, p);
+      build_override_post_obligations (ov, p);
+      build_override_base_post_obligations (ov, p);
+      if (p->marked || p->post_copies)
+	any = true;
+    }
+  if (!any)
+    {
+      delete ov;
+      return NULL;
+    }
+  current_override_shadows = ov;
+  return ov;
+}
+
+/* True if OV has a marker for a postcondition of an overridden function,
+   which needs the try/finally of a postcondition check.  */
+
+static bool
+override_shadows_post_p (override_shadows *ov)
+{
+  for (override_pair &p : ov->pairs)
+    if (p.base_post_marked)
+      return true;
+  return false;
+}
+
+/* D4405: in apply_postconditions, ahead of the check of POST, a
+   postcondition of the current function, or of every one if POST is null,
+   its obligations in the current function's override shadows.  */
+
+void
+add_override_post_obligations (tree post)
+{
+  override_shadows *ov = current_override_shadows;
+  if (!ov)
+    return;
+  tree fndecl = ov->fndecl;
+  tree specs = get_fn_contract_specifiers (fndecl);
+  for (override_pair &p : ov->pairs)
+    {
+      if (!p.post_copies)
+	continue;
+      unsigned n = 0;
+      for (tree c : tree_vec_range (specs))
+	{
+	  if (!POSTCONDITION_P (c))
+	    continue;
+	  tree copy = TREE_VEC_ELT (p.post_copies, n++);
+	  if ((post && c != post)
+	      || POSTCONDITION_CAPTURES (c)
+	      || !override_obligation_p (c, fndecl)
+	      || CONTRACT_CONDITION (copy) == error_mark_node
+	      || CONTRACT_CONDITION_DEFERRED_P (copy))
+	    continue;
+	  remap_dummy_this (fndecl, &CONTRACT_CONDITION (copy));
+	  if (CONTRACT_CONDITION (copy) == error_mark_node)
+	    continue;
+	  /* The result, read as the check reads it.  */
+	  remap_retval (fndecl, copy);
+	  tree list = NULL_TREE;
+	  if (offer_override_obligation (ov, &p, copy,
+					 ensure_analysis_semantic (c, fndecl),
+					 CONTRACT_CONDITION (copy), true, false,
+					 &list))
+	    add_stmt (override_in_charge (ov, list));
+	}
+    }
+}
+
+/* The regions at entry of OV's override shadows: per pair that placed a
+   marker, the snapshots, and, in an override shadow, the overridden
+   function's preconditions as premises -- its parameters mapped by
+   position and its `this' to the base class subobject, as the virtual
+   call's wrapper converts it -- and the obligations of OV's function's
+   preconditions.  */
+
+static tree
+override_entry_regions (override_shadows *ov)
+{
+  tree fndecl = ov->fndecl;
+  tree regions = NULL_TREE;
+  for (override_pair &p : ov->pairs)
+    {
+      if (!p.marked)
+	continue;
+      if (p.base_post_marked && p.snapshots)
+	append_to_statement_list_force (override_region (override_kind (ov,
+									&p),
+							 p.snapshots),
+					&regions);
+      /* Without an override shadow, nothing is given.  */
+      if (!ov->shadows)
+	continue;
+      /* Guaranteed only when their labels settle them (DECISIONS.md E151):
+	 they are evaluated by the callers, in any translation unit.  */
+      tree base_specs = get_fn_contract_specifiers (p.base);
+      hash_map<tree, tree> parms;
+      map_override_parms (p.base, fndecl, parms);
+      override_remap_data data
+	= { &parms, build_base_path (PLUS_EXPR, DECL_ARGUMENTS (fndecl),
+				     p.binfo, /*nonnull=*/1, tf_none),
+	    false, ov, &p };
+      if (base_specs && data.this_expr != error_mark_node)
+	for (tree c : tree_vec_range (base_specs))
+	  {
+	    if (!PRECONDITION_P (c)
+		|| CONTRACT_CONDITION (c) == error_mark_node)
+	      continue;
+	    ensure_evaluation_semantic (c, p.base, /*in_ce=*/false);
+	    tree pred = unshare_expr (CONTRACT_CONDITION (c));
+	    if (cp_walk_tree (&pred, override_remap_r, &data, NULL))
+	      continue;
+	    bool guaranteed = contract_premise_settled_p (c);
+	    /* As the premise of an assume evaluation, or of an observe one,
+	       which may not hold.  */
+	    if (tree a = contract_proof_assumption (pred,
+						    guaranteed ? CES_ASSUME
+						    : CES_OBSERVE,
+						    EXPR_LOCATION (c), p.id))
+	      append_to_statement_list_force (a, &regions);
+	  }
+      append_to_statement_list_force (p.pre_obligations, &regions);
+    }
+  return override_in_charge (ov, regions);
+}
+
+/* Put REGIONS (override_entry_regions) at the start of the body of FNDECL,
+   which maybe_apply_function_contracts adds nothing else to: inside the
+   MUST_NOT_THROW_EXPR of a noexcept function, as preconditions are.  */
+
+static void
+prepend_override_shadow_regions (tree fndecl, tree regions)
+{
+  tree *body = &DECL_SAVED_TREE (fndecl);
+  tree first = (TYPE_NOEXCEPT_P (TREE_TYPE (fndecl))
+		? expr_first (*body) : NULL_TREE);
+  if (first && first != error_mark_node
+      && TREE_CODE (first) == MUST_NOT_THROW_EXPR)
+    body = &TREE_OPERAND (first, 0);
+  if (TREE_CODE (*body) == STATEMENT_LIST)
+    {
+      /* The function body is the statement list still being built.  */
+      tree_stmt_iterator i = tsi_start (*body);
+      tsi_link_before (&i, regions, TSI_SAME_STMT);
+    }
+  else
+    {
+      tree list = NULL_TREE;
+      append_to_statement_list_force (regions, &list);
+      append_to_statement_list_force (*body, &list);
+      *body = list;
+    }
+}
+
+/* Be done with OV, the override shadows of the function being finished.  */
+
+static void
+end_override_shadows (override_shadows *ov)
+{
+  if (current_override_shadows == ov)
+    current_override_shadows = NULL;
+  delete ov;
+}
+
+/* Place the regions at entry of OV's override shadows
+   (override_entry_regions) at the start of OV's statement list, declare the
+   snapshots there, and be done with OV.  */
+
+static void
+finish_override_shadows (override_shadows *ov)
+{
+  if (tree regions = override_entry_regions (ov))
+    {
+      tree_stmt_iterator i = tsi_start (ov->list);
+      tsi_link_before (&i, regions, TSI_SAME_STMT);
+    }
+  for (tree var : ov->vars)
+    pushdecl (var);
+  end_override_shadows (ov);
+}
+
+/* D4405: in maybe_apply_function_contracts, LIST is the statement list of
+   the block it builds around the body of OV's function, whose
+   postconditions' checks the block ends with.  */
+
+void
+start_override_shadows (override_shadows *ov, tree list)
+{
+  ov->list = list;
+}
+
+/* D4405: after the current function's postconditions' checks, the
+   obligations of the overridden functions' postconditions in its override
+   shadows; then its regions at entry (finish_override_shadows).  */
+
+void
+add_override_base_post_obligations ()
+{
+  override_shadows *ov = current_override_shadows;
+  if (!ov)
+    return;
+  for (override_pair &p : ov->pairs)
+    if (p.base_post_marked)
+      add_stmt (override_in_charge (ov, p.post_obligations));
+  finish_override_shadows (ov);
+}
+
+/* D4405: place OV's override shadows in the body of their function, which
+   has no active postconditions (maybe_apply_function_contracts): the
+   regions at entry alone when there is nothing else to add, and otherwise
+   in a block, as maybe_apply_function_contracts builds one -- the regions
+   at entry and the function's own active preconditions, then the body, in
+   a try/finally whose normal exit has the overridden functions'
+   postconditions' obligations if any needs a marker.  The real function
+   sheds the regions before SSA, and with them what the try/finally
+   holds.  */
+
+void
+place_override_shadows_alone (override_shadows *ov)
+{
+  tree fndecl = ov->fndecl;
+  bool pre = handle_contracts_p (fndecl) && has_active_preconditions (fndecl);
+  bool post = override_shadows_post_p (ov);
+  if (!pre && !post)
+    {
+      if (tree regions = override_entry_regions (ov))
+	prepend_override_shadow_regions (fndecl, regions);
+      end_override_shadows (ov);
+      return;
+    }
+
+  /* As maybe_apply_function_contracts: inside the MUST_NOT_THROW_EXPR of a
+     noexcept function, if it has one.  */
+  tree fnbody;
+  tree m_n_t_expr = (TYPE_NOEXCEPT_P (TREE_TYPE (fndecl))
+		     ? expr_first (DECL_SAVED_TREE (fndecl)) : NULL_TREE);
+  if (m_n_t_expr && m_n_t_expr != error_mark_node
+      && TREE_CODE (m_n_t_expr) == MUST_NOT_THROW_EXPR)
+    {
+      fnbody = TREE_OPERAND (m_n_t_expr, 0);
+      TREE_OPERAND (m_n_t_expr, 0) = push_stmt_list ();
+    }
+  else
+    {
+      fnbody = DECL_SAVED_TREE (fndecl);
+      DECL_SAVED_TREE (fndecl) = push_stmt_list ();
+    }
+
+  tree compound_stmt = begin_compound_stmt (0);
+  current_binding_level->artificial = true;
+  start_override_shadows (ov, cur_stmt_list);
+  if (pre)
+    apply_preconditions (fndecl);
+  if (!post)
+    {
+      add_stmt (fnbody);
+      finish_override_shadows (ov);
+      finish_compound_stmt (compound_stmt);
+      return;
+    }
+  tree try_fin = build_stmt (UNKNOWN_LOCATION, TRY_FINALLY_EXPR, fnbody,
+			     NULL_TREE);
+  add_stmt (try_fin);
+  TREE_OPERAND (try_fin, 1) = push_stmt_list ();
+  if (flag_exceptions && !type_noexcept_p (TREE_TYPE (fndecl)))
+    {
+      /* Nothing on the exceptional path.  */
+      tree eh_else = build_stmt (UNKNOWN_LOCATION, EH_ELSE_EXPR, NULL_TREE,
+				 NULL_TREE);
+      add_stmt (eh_else);
+      TREE_OPERAND (eh_else, 0) = push_stmt_list ();
+      add_override_base_post_obligations ();
+      TREE_OPERAND (eh_else, 0) = pop_stmt_list (TREE_OPERAND (eh_else, 0));
+      TREE_OPERAND (eh_else, 1) = push_stmt_list ();
+      TREE_OPERAND (eh_else, 1) = pop_stmt_list (TREE_OPERAND (eh_else, 1));
+    }
+  else
+    add_override_base_post_obligations ();
+  TREE_OPERAND (try_fin, 1) = pop_stmt_list (TREE_OPERAND (try_fin, 1));
+  finish_compound_stmt (compound_stmt);
 }
 
 #include "gt-cp-contracts.h"
