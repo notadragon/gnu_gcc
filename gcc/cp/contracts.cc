@@ -12580,6 +12580,40 @@ build_implicit_placement_new_check (location_t loc,
    so constant evaluation is unchanged.  */
 
 tree
+build_implicit_placement_new_align_check (location_t loc,
+					  contract_evaluation_semantic sem,
+					  tree ptr, unsigned HOST_WIDE_INT align)
+{
+  if (sem == CES_ASSUME)
+    return ptr;
+  ptr = cp_save_expr (ptr);
+  tree bits = build2_loc (loc, BIT_AND_EXPR, pointer_sized_int_node,
+			  fold_convert (pointer_sized_int_node, ptr),
+			  build_int_cst (pointer_sized_int_node, align - 1));
+  tree cond = build2_loc (loc, NE_EXPR, boolean_type_node, bits,
+			  build_int_cst (pointer_sized_int_node, 0));
+  return build_implicit_unchanged_guard (loc, sem, ptr, cond,
+					 "misaligned pointer passed to a "
+					 "non-allocating placement new",
+					 true);
+}
+
+/* P3100: build the reaction to a [[noreturn]] function returning to its
+   caller ({dcl.attr.noreturn.eventually.returns}), whose implicit assertion
+   resolved to SEM; LOC is the function's location.  Returns NULL_TREE for
+   "assume" and "ignore", which keep today's behaviour, and otherwise a
+   statement that does not return normally:
+
+     quick_enforce            -> call the terminate handler;
+     enforce/noexcept_enforce -> call the noreturn violation entry point;
+     observe/noexcept_observe -> call the violation entry point, then abort.
+
+   The caller was compiled assuming the call does not return, so there is no
+   valid continuation, as for a pure-virtual call: when an observing handler
+   returns, the program aborts.  A throwing handler unwinds into the caller
+   as an exception from the call.  Builds GENERIC.  */
+
+tree
 build_implicit_pure_virtual_direct_check (location_t loc, tree call)
 {
   if (!implicit_ub_check_context_p () || call == error_mark_node)
