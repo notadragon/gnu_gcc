@@ -221,6 +221,10 @@ extern tree make_postcondition_variable		(cp_expr, tree);
 extern void check_postcondition_param_odr_uses	(tree, tree, location_t,
 						 bool * = NULL);
 extern void check_postcondition_object_odr_use	(tree);
+extern bool postcondition_capture_init_ok_p	(tree, tree, location_t);
+extern tree postcondition_capture_type	(tree *, bool, bool, location_t,
+						 tree *);
+extern bool contextless_postcondition_capture_p	(tree, tree *);
 extern void member_template_spec_contracts	(tree, tree, bool, bool);
 extern void check_postconditions_in_redecl	(tree, tree);
 extern void check_postcondition_redecl_parm_types (tree, tree, tree);

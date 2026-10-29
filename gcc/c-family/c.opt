@@ -1995,6 +1995,10 @@ fcontracts-p3097
 C++ ObjC++ Var(flag_contracts_p3097) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P3097 contract assertions on virtual functions.
 
+fcontracts-p3098
+C++ ObjC++ Var(flag_contracts_p3098) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3098 postcondition captures on contract assertions.
+
 fcontracts-p3099
 C++ ObjC++ Var(flag_contracts_p3099) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P3099 user-defined diagnostic messages for contract assertions.

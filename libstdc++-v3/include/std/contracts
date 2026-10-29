@@ -63,6 +63,10 @@ namespace contracts
     manual = 4,
     cassert = 5,
 #endif
+    // P3098's only with postcondition captures, likewise.
+#ifdef __cpp_contracts_postcondition_captures
+    post_capture = 6,
+#endif
     implicit = 7, // P3100 implicit contract assertion guarding language UB
 
     /* Implementation-defined values should have a minimum value of 1000. */
