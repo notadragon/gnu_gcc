@@ -2946,6 +2946,8 @@ build_class_member_access_expr (cp_expr object, tree member,
 				tree access_path, bool preserve_reference,
 				tsubst_flags_t complain)
 {
+  /* P3100: the object as written, before any conversion to a base.  */
+  tree p3100_object = object;
   tree object_type;
   tree member_scope;
   tree result = NULL_TREE;
@@ -3206,6 +3208,12 @@ build_class_member_access_expr (cp_expr object, tree member,
 	error ("invalid use of %qD", member);
       return error_mark_node;
     }
+
+  /* P3100: a non-static data member of `*this' referred to in a
+     constructor or destructor function-try-block handler.  */
+  if (TREE_CODE (member) == FIELD_DECL)
+    result = build_implicit_handler_member_check (input_location,
+						  p3100_object, result);
 
   if (!preserve_reference)
     /* [expr.ref]

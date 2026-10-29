@@ -12680,6 +12680,86 @@ apply_implicit_noreturn_check (tree fndecl)
    `*this' (or `this') of the enclosing member function, written directly:
    not reached through a lambda's capture of `this' or any other pointer.  */
 
+static bool
+implicit_this_object_p (tree object)
+{
+  if (object == NULL_TREE || TREE_TYPE (object) == NULL_TREE)
+    return false;
+  object = tree_strip_any_location_wrapper (object);
+  tree ptr = object;
+  if (INDIRECT_REF_P (object))
+    ptr = TREE_OPERAND (object, 0);
+  else if (!POINTER_TYPE_P (TREE_TYPE (object)))
+    return false;
+  STRIP_NOPS (ptr);
+  return TREE_CODE (ptr) == PARM_DECL && is_this_parameter (ptr);
+}
+
+/* P3100: build the check for an implicit assertion that is violated
+   wherever it is reached, whose site resolved to SEM: a void statement
+   reporting the violation, with COMMENT, to prepend to the operation, or
+   NULL_TREE for "assume" and "ignore", which have nothing to do (nothing
+   defined could replace the operation, so it goes ahead as written).  The
+   check is a guard whose condition is a constant true marked as not a
+   constant expression, so that manifestly constant evaluation skips it and
+   diagnoses the operation, if at all, as it would without the check, and
+   folding does not drop it.  */
+
+static tree
+build_implicit_unconditional_check (location_t loc,
+				    contract_evaluation_semantic sem,
+				    const char *comment)
+{
+  if (sem == CES_ASSUME || sem == CES_IGNORE)
+    return NULL_TREE;
+  tree reaction = (sem == CES_QUICK
+		   ? build_quick_enforce_reaction (loc)
+		   : build_implicit_violation_call (loc, sem, comment));
+  tree check = build3_loc (loc, COND_EXPR, void_type_node, boolean_true_node,
+			   reaction, void_node);
+  COND_EXPR_IMPLICIT_UB_GUARD_P (check) = true;
+  COND_EXPR_IMPLICIT_UB_RUNTIME_P (check) = true;
+  return check;
+}
+
+/* P3100: EXPR refers to a non-static member of OBJECT, a member access or a
+   member function call.  Referring to a non-static member or base of an
+   object in a function-try-block handler of its constructor or destructor
+   is undefined ({except.handle.handler.ctor.dtor}): every member and base
+   has been destroyed, or was never initialized, by then.  Where OBJECT is
+   `*this' of such a constructor or destructor and the reference is in its
+   handler, return EXPR with the check prepended; otherwise EXPR.  */
+
+tree
+build_implicit_handler_member_check (location_t loc, tree object, tree expr)
+{
+  if (!implicit_ub_check_context_p ()
+      || expr == error_mark_node
+      || !cfun
+      || !cp_function_chain
+      || !in_function_try_handler
+      || current_function_decl == NULL_TREE
+      || !(DECL_CONSTRUCTOR_P (current_function_decl)
+	   || DECL_DESTRUCTOR_P (current_function_decl))
+      || !implicit_this_object_p (object))
+    return expr;
+
+  contract_evaluation_semantic sem
+    = resolve_implicit_contract_semantic (current_function_decl, loc,
+					  "ub:except.handle.handler.ctor.dtor");
+  tree check
+    = build_implicit_unconditional_check (loc, sem,
+					  "member referred to in a "
+					  "constructor or destructor "
+					  "function-try-block handler");
+  if (check == NULL_TREE)
+    return expr;
+  return build2 (COMPOUND_EXPR, TREE_TYPE (expr), check, expr);
+}
+
+/* P3100: set while a template's constructor precondition or destructor
+   postcondition is substituted, where CONTRACT_CLASS_PTR is not.  */
+
 tree
 build_implicit_pure_virtual_direct_check (location_t loc, tree call)
 {
