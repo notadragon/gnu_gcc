@@ -407,6 +407,8 @@ implicit_ub_check_context_p ()
    documented where it is defined, in contracts.cc.  */
 extern contract_evaluation_semantic resolve_implicit_contract_semantic
   (tree, location_t, const char *, uint16_t = CES_ALL_ALLOWED);
+extern tree build_implicit_flow_off_check
+  (tree, location_t, contract_evaluation_semantic);
 extern tree build_implicit_divide_check
   (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
 extern tree build_implicit_float_divide_check
