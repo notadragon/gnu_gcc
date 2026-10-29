@@ -12446,6 +12446,15 @@ tsubst_contract (tree decl, tree t, tree args, tsubst_flags_t complain,
   cp_expr new_condition (cond_t, cond_l);
   CONTRACT_CONDITION (r) = finish_contract_condition (new_condition);
 
+  /* Now that the predicate is concrete, apply [dcl.contract.func]/7 to it.
+     A pack-index-expression has selected its element by this point, which is
+     why no per-element deferral is needed during the expansion above.  */
+  bool diagnosed = false;
+  if (POSTCONDITION_P (r))
+    check_postcondition_param_odr_uses (CONTRACT_CONDITION (r), decl, cond_l,
+					&diagnosed);
+  if (diagnosed)
+    CONTRACT_CONDITION (r) = error_mark_node;
   /* At present, the semantic, kind and comment cannot be dependent.  */
   gcc_checking_assert
     (!type_dependent_expression_p (CONTRACT_EVALUATION_SEMANTIC (r))
