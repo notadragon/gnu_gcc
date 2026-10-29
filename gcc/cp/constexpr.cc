@@ -1210,6 +1210,10 @@ public:
   /* If non-null, only allow modification of existing values of the variables
      in this set.  Set by modifiable_tracker, below.  */
   hash_set<tree> *modifiable;
+  /* If non-null, the innermost contract predicate being evaluated, whose
+     modifications of VALUES are undone once its value is known.  Set by
+     predicate_rollback, below.  */
+  class predicate_rollback *rollback;
   /* If cxx_eval_outermost_constant_expr is called on the consteval block
      operator (), this is the FUNCTION_DECL of that operator ().  */
   tree consteval_block;
@@ -1241,6 +1245,7 @@ public:
   /* Constructor.  */
   constexpr_global_ctx ()
     : constexpr_ops_count (0), cleanups (NULL), modifiable (nullptr),
+      rollback (nullptr),
       consteval_block (NULL_TREE), heap_dealloc_count (0),
       uncaught_exceptions (0), contract_statement (NULL_TREE),
       contract_condition_non_const (false), state_dependent (false) {}
@@ -1276,6 +1281,8 @@ public:
   {
     if (modifiable && !modifiable->contains (t))
       return nullptr;
+    if (rollback)
+      note_modification (t);
     if (tree *p = values.get (t))
       {
 	if (*p != void_node && *p != void_list_node)
@@ -1295,6 +1302,8 @@ public:
        void_list_node), is tracked in modifiable.  If the object is there,
        or its storage remains (as indicated by void_node), then we don't
        track it as modifiable.  */
+    if (rollback)
+      note_modification (t);
     bool already_in_map;
     tree &slot = values.get_or_insert (t, &already_in_map);
     bool newval = !already_in_map || slot == void_list_node;
@@ -1304,6 +1313,8 @@ public:
   }
   void destroy_value (tree t, bool past_storage_end = true)
   {
+    if (rollback)
+      note_modification (t);
     if (TREE_CODE (t) == VAR_DECL
 	|| TREE_CODE (t) == PARM_DECL
 	|| TREE_CODE (t) == RESULT_DECL)
@@ -1313,8 +1324,15 @@ public:
   }
   void clear_value (tree t)
   {
+    if (rollback)
+      note_modification (t);
     values.remove (t);
   }
+  /* Tell every active predicate_rollback that T's entry in VALUES is about
+     to change.  Defined below, once predicate_rollback is complete.  */
+  void note_modification (tree t);
+
+  friend class predicate_rollback;
 };
 
 /* Helper class for constexpr_global_ctx.  In some cases we want to avoid
@@ -1346,6 +1364,136 @@ public:
     global->modifiable = previous_set;
   }
 };
+
+/* Helper class for constexpr_global_ctx.  [basic.contract.eval] leaves it
+   unspecified whether a contract predicate is evaluated at all, and permits
+   an evaluation that produces the predicate's value without its side
+   effects.  During constant evaluation, evaluate the predicate for real --
+   a modification of an object of the enclosing evaluation is fine in a core
+   constant expression -- and then undo everything it modified, so the
+   enclosing evaluation proceeds as if the predicate had not been evaluated.
+
+   Unlike modifiable_tracker, which refuses such a modification (and so
+   makes a predicate that performs one not a constant expression), this lets
+   it happen and rolls it back in the destructor.  The first time an entry
+   of VALUES is about to change, its old value is saved, together with the
+   contents of every CONSTRUCTOR reachable from it.  CONSTRUCTORs are
+   restored in place rather than replaced, because the enclosing evaluation
+   may be building one of them (constexpr_ctx::ctor) while the predicate
+   runs.  An entry that did not exist is removed again, which also disposes
+   of the predicate's own locals and temporaries.  Heap objects that existed
+   when the predicate started and that it deallocated are revived.
+
+   Instances nest: each saves what it needs independently, so an inner one
+   restores the state at its own start and an outer one the state at its
+   own.  */
+
+class predicate_rollback
+{
+  struct saved_value
+  {
+    tree key;
+    tree value;
+    bool present;
+  };
+  constexpr_global_ctx *global;
+  predicate_rollback *previous;
+  hash_set<tree> saved_keys;
+  auto_vec<saved_value> saved_values;
+  hash_set<tree> saved_ctor_set;
+  /* Pairs of a CONSTRUCTOR and a copy of it holding a copy of its elements;
+     even elements are the originals, odd ones the copies.  */
+  auto_vec<tree> saved_ctors;
+  /* DECL_NAME of each heap object that existed at the start.  */
+  unsigned heap_count;
+  auto_vec<tree> heap_names;
+
+  void save_ctor (tree c)
+  {
+    if (saved_ctor_set.add (c))
+      return;
+    tree copy = copy_node (c);
+    CONSTRUCTOR_ELTS (copy) = vec_safe_copy (CONSTRUCTOR_ELTS (c));
+    saved_ctors.safe_push (c);
+    saved_ctors.safe_push (copy);
+    unsigned i;
+    tree val;
+    FOR_EACH_CONSTRUCTOR_VALUE (CONSTRUCTOR_ELTS (c), i, val)
+      if (val && TREE_CODE (val) == CONSTRUCTOR)
+	save_ctor (val);
+  }
+
+public:
+  explicit predicate_rollback (constexpr_global_ctx *g)
+    : global (g), previous (g->rollback),
+      heap_count (g->heap_vars.length ())
+  {
+    for (tree v : global->heap_vars)
+      heap_names.safe_push (DECL_NAME (v));
+    global->rollback = this;
+  }
+
+  /* T's entry is about to change; save it unless already saved.  */
+  void save (tree t)
+  {
+    if (saved_keys.add (t))
+      return;
+    tree *p = global->values.get (t);
+    saved_value sv = { t, p ? *p : NULL_TREE, p != nullptr };
+    saved_values.safe_push (sv);
+    if (p && *p && TREE_CODE (*p) == CONSTRUCTOR)
+      save_ctor (*p);
+  }
+
+  predicate_rollback *outer () const { return previous; }
+
+  ~predicate_rollback ()
+  {
+    global->rollback = previous;
+    unsigned i;
+    for (i = 0; i < saved_ctors.length (); i += 2)
+      {
+	tree c = saved_ctors[i];
+	tree copy = saved_ctors[i + 1];
+	vec<constructor_elt, va_gc> *elts = CONSTRUCTOR_ELTS (copy);
+	vec<constructor_elt, va_gc> *cur = CONSTRUCTOR_ELTS (c);
+	/* Every flag and the type, as they were.  */
+	memcpy (c, copy, tree_size (c));
+	/* The elements, into the vector C has now if it has room, so that
+	   anything holding on to that vector sees the restored elements.  */
+	if (cur && cur->allocated () >= vec_safe_length (elts))
+	  {
+	    cur->truncate (0);
+	    if (elts)
+	      cur->splice (*elts);
+	    CONSTRUCTOR_ELTS (c) = cur;
+	  }
+	else
+	  CONSTRUCTOR_ELTS (c) = elts;
+      }
+    for (const saved_value &sv : saved_values)
+      if (sv.present)
+	global->values.put (sv.key, sv.value);
+      else
+	global->values.remove (sv.key);
+    for (i = 0; i < heap_count; ++i)
+      {
+	tree v = global->heap_vars[i];
+	if (DECL_NAME (v) == heap_names[i])
+	  continue;
+	if (DECL_NAME (v) == heap_deleted_identifier)
+	  --global->heap_dealloc_count;
+	DECL_NAME (v) = heap_names[i];
+      }
+  }
+};
+
+void
+constexpr_global_ctx::note_modification (tree t)
+{
+  for (predicate_rollback *r = rollback; r; r = r->outer ())
+    r->save (t);
+}
 
 /* The constexpr expansion context.  CALL is the current function
    expansion, CTOR is the current aggregate initializer, OBJECT is the
@@ -11361,14 +11509,22 @@ cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
 	bool ctrct_non_const_p = false;
 	bool ctrct_overflow_p = false;
 	tree jmp_target = NULL_TREE;
-	constexpr_ctx new_ctx = *ctx;
-	new_ctx.quiet = true;
-	/* Avoid modification of existing values.  */
-	modifiable_tracker ms (new_ctx.global);
-	tree eval =
-	  cxx_eval_constant_expression (&new_ctx, cond, vc_prvalue,
-					&ctrct_non_const_p,
-					&ctrct_overflow_p, &jmp_target);
+	tree eval;
+	{
+	  constexpr_ctx new_ctx = *ctx;
+	  new_ctx.quiet = true;
+	  /* [basic.contract.eval] permits an evaluation that yields the
+	     predicate's value without its side effects.  Evaluate it, so that
+	     a predicate that modifies an object of the enclosing evaluation is
+	     still a constant expression, and then undo the modification, so
+	     that the enclosing evaluation does not depend on whether, or how
+	     often, the predicate was evaluated.  */
+	  predicate_rollback rb (new_ctx.global);
+	  eval = cxx_eval_constant_expression (&new_ctx, cond, vc_prvalue,
+					       &ctrct_non_const_p,
+					       &ctrct_overflow_p, &jmp_target);
+	}
+
 	/* Not a constant.  */
 	if (ctrct_non_const_p)
  	  {
