@@ -9,7 +9,7 @@
 // This tests the behaviour of a pre condition on a constructor
 //
 // { dg-do run { target c++26 } }
-// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe " }
+// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe" }
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 
 #include <contracts>

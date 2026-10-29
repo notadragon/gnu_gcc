@@ -3,7 +3,7 @@
 // constant-evaluated ([expr.const]) and the predicate is not a core constant
 // expression.
 // { dg-do compile { target c++23 } }
-// { dg-additional-options "-fcontracts  " }
+// { dg-additional-options "-fcontracts" }
 
 extern bool runtime_check ();
 
