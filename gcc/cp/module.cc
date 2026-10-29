@@ -11366,14 +11366,10 @@ trees_out::fn_parms_init (tree fn)
       tree_node_vals (parm);
     }
 
-  if (!streaming_p ())
-    {
-      /* We must walk contract specifiers so the dependency graph is
-	 complete.  */
-      if (tree contracts = get_fn_contract_specifiers (fn))
-	for (tree contract : tree_vec_range (contracts))
-	  tree_node (contract);
-    }
+  /* The contract specifiers: an importer that instantiates a template (or
+     redeclares the function) needs them, and walking them completes the
+     dependency graph.  */
+  tree_node (get_fn_contract_specifiers (fn));
 
   /* Write a reference to contracts pre/post functions, if any, to avoid
      regenerating them in importers.  */
@@ -11425,6 +11421,12 @@ trees_in::fn_parms_init (tree fn)
 	  DECL_READ_P (parm) = true;
 	}
     }
+
+  /* The contract specifiers.  If FN turns out to be a duplicate of an
+     existing declaration, FN is discarded and the existing declaration keeps
+     its own.  */
+  if (tree contracts = tree_node ())
+    set_fn_contract_specifiers (fn, contracts);
 
   /* Reload references to contract functions, if any.  */
   tree pre_fn = tree_node ();
