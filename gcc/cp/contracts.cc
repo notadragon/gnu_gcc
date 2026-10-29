@@ -11831,6 +11831,61 @@ build_implicit_flow_off_check (tree fndecl, location_t loc,
    GENERIC.  */
 
 tree
+build_implicit_coroutine_flow_off_check (tree ARG_UNUSED (fndecl),
+					 location_t loc,
+					 contract_evaluation_semantic sem)
+{
+  if (sem == CES_ASSUME || sem == CES_IGNORE)
+    return NULL_TREE;
+
+  if (sem == CES_QUICK)
+    return build_quick_enforce_reaction (loc);
+
+  tree call = build_implicit_violation_call (loc, sem,
+					     "control flowed off the end of a "
+					     "coroutine");
+  /* enforce/noexcept_enforce: the entry point is noreturn.  observe/
+     noexcept_observe: it returns and control continues to the final suspend.
+     Either way the call is the whole reaction -- no defined return.  */
+  return call;
+}
+
+/* P3100: select the __cxa_pure_virtual terminus for a pure virtual.
+
+   A call that dispatches to a pure virtual function
+   ({class.abstract.pure.virtual}) is core-language UB.  The "check" here is the
+   vtable slot itself: instead of the legacy __cxa_pure_virtual (which prints a
+   message and terminates), point the slot at a semantic-specific terminus that
+   reports the violation through the contract-violation handler as an implicit
+   (assertion_kind::implicit) assertion.  The slot stays a plain function
+   pointer -- only its default value changes.
+
+   The semantic is resolved HERE, where the vtable is emitted, using the class's
+   own definition location and namespace, so per-file/line and per-namespace
+   P3595 configuration selects it per class.  (The vtable is emitted once per
+   program for a class with a key function -- in that function's translation
+   unit -- and in every user translation unit otherwise; the configuration
+   active where the vtable is built therefore governs, and may differ across
+   translation units.  That is an accepted consequence of a shared terminus with
+   no per-call site.)
+
+   The vtable slot is reached only by a dispatched call, so this checks the
+   .indirect leaf of the group (the call made through another member function);
+   a direct call in the class's own constructor or destructor is resolved
+   statically and never reaches the slot (.direct).
+
+   FN_ORIGINAL is the pure virtual filling the slot; its declared exception
+   specification chooses between the throwing terminus and the noexcept
+   (terminate-on-throw) terminus, so a throwing handler on a noexcept pure
+   virtual still terminates rather than escaping into a caller that assumed the
+   call could not throw.
+
+   Returns the terminus FUNCTION_DECL, or NULL_TREE when the caller should keep
+   the legacy __cxa_pure_virtual: -fcontracts-p3100 off, or the resolved
+   semantic is assume/ignore (a pure-virtual call has no defined value to
+   substitute, so ignore is the status quo).  */
+
+tree
 build_implicit_pure_virtual_terminus (tree fn_original)
 {
   if (!flag_contracts_p3100)
