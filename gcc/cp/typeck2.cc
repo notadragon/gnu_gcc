@@ -29,6 +29,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "cp-tree.h"
+#include "contracts.h"
 #include "stor-layout.h"
 #include "varasm.h"
 #include "intl.h"
@@ -2664,14 +2665,32 @@ build_m_component_ref (tree datum, tree component, tsubst_flags_t complain)
 	    return error_mark_node;
 	}
 
+      /* P3100: applying a null pointer to data member (offset -1) is
+	 undefined ({expr.mptr.oper.member.func.null}); a constant one is
+	 not checked.  */
+      contract_evaluation_semantic null_sem = CES_ASSUME;
+      if (implicit_ub_check_context_p () && !TREE_CONSTANT (component))
+	null_sem = (resolve_implicit_contract_semantic
+		    (current_function_decl, input_location,
+		     "ub:expr.mptr.oper.member.func.null.data"));
+
       /* Build an expression for "object + offset" where offset is the
 	 value stored in the pointer-to-data-member.  */
       ptype = build_pointer_type (type);
       datum = convert (ptype, datum);
+      tree offset = NULL_TREE;
       if (!processing_template_decl)
-	datum = build2 (POINTER_PLUS_EXPR, ptype,
-			datum, convert_to_ptrofftype (component));
+	{
+	  offset = convert_to_ptrofftype (component);
+	  if (null_sem != CES_ASSUME)
+	    offset = cp_save_expr (offset);
+	  datum = build2 (POINTER_PLUS_EXPR, ptype, datum, offset);
+	}
       datum = cp_fully_fold (datum);
+      if (null_sem != CES_ASSUME)
+	datum = build_implicit_null_data_member_check (input_location,
+						       null_sem, offset,
+						       datum);
       datum = cp_build_fold_indirect_ref (datum);
       if (datum == error_mark_node)
 	return error_mark_node;

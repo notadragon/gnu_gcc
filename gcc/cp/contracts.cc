@@ -12485,6 +12485,76 @@ build_implicit_pointer_wrap_check (location_t loc,
    refer to it.  RUNTIME marks a COND that is not a constant expression, so
    that manifestly constant evaluation evaluates OP alone.  */
 
+static tree
+build_implicit_unchanged_guard (location_t loc,
+				contract_evaluation_semantic sem,
+				tree op, tree cond, const char *comment,
+				bool runtime)
+{
+  gcc_checking_assert (sem != CES_ASSUME);
+  if (sem == CES_IGNORE)
+    return op;
+  tree guarded = build_implicit_op_guard (loc, sem, op, cond, op, comment, op);
+  if (runtime)
+    COND_EXPR_IMPLICIT_UB_RUNTIME_P (TREE_OPERAND (guarded, 1)) = true;
+  return guarded;
+}
+
+/* P3100: guard DATUM, the address formed by applying a pointer to data member
+   whose byte offset OFFSET (single-evaluation, and evaluated by DATUM) may be
+   the null value -1 ({expr.mptr.oper.member.func.null}, the .data leaf).
+   The representation test is not a constant expression, so constant
+   evaluation is unchanged.  */
+
+tree
+build_implicit_null_data_member_check (location_t loc,
+				       contract_evaluation_semantic sem,
+				       tree offset, tree datum)
+{
+  datum = cp_save_expr (datum);
+  tree cond = build2_loc (loc, EQ_EXPR, boolean_type_node, offset,
+			  build_all_ones_cst (TREE_TYPE (offset)));
+  return build_implicit_unchanged_guard (loc, sem, datum, cond,
+					 "null pointer to data member", true);
+}
+
+/* P3100: guard FN, the function pointer a call through a pointer to member
+   function resolves to, when that pointer may be null
+   ({expr.mptr.oper.member.func.null}, the .function leaf).  PFN and DELTA
+   are its two fields, whose evaluation FN includes.  A null pointer has a
+   zero PFN; where the virtual bit lives in DELTA, a virtual function's PFN
+   is a vtable offset that may be zero too, and only DELTA's low bit tells
+   them apart.  The representation test is not a constant expression, so
+   constant evaluation is unchanged.  */
+
+tree
+build_implicit_null_member_function_check (location_t loc,
+					   contract_evaluation_semantic sem,
+					   tree pfn, tree delta, tree fn)
+{
+  fn = cp_save_expr (fn);
+  tree cond = build2_loc (loc, EQ_EXPR, boolean_type_node, pfn,
+			  build_int_cst (TREE_TYPE (pfn), 0));
+  if (TARGET_PTRMEMFUNC_VBIT_LOCATION == ptrmemfunc_vbit_in_delta)
+    {
+      tree vbit = build2_loc (loc, BIT_AND_EXPR, TREE_TYPE (delta), delta,
+			      build_int_cst (TREE_TYPE (delta), 1));
+      cond = build2_loc (loc, TRUTH_AND_EXPR, boolean_type_node, cond,
+			 build2_loc (loc, EQ_EXPR, boolean_type_node, vbit,
+				     build_int_cst (TREE_TYPE (delta), 0)));
+    }
+  return build_implicit_unchanged_guard (loc, sem, fn, cond,
+					 "null pointer to member function",
+					 true);
+}
+
+/* P3100: guard PTR, the result of a call to a non-allocating (placement)
+   allocation function, which is its pointer argument, before the
+   new-expression initializes an object there.  A null pointer
+   ({expr.new.non.allocating.null}) is checked when NULL_SEM is not
+   CES_ASSUME.  The null test is a constant expression, so constant
+   evaluation diagnoses a null pointer as undefined.  */
+
 tree
 build_implicit_pure_virtual_direct_check (location_t loc, tree call)
 {

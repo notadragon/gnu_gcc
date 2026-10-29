@@ -4674,6 +4674,17 @@ get_member_function_from_ptrfunc (tree *instance_ptrptr, tree function,
       /* Start by extracting all the information from the PMF itself.  */
       e3 = pfn_from_ptrmemfunc (function);
       delta = delta_from_ptrmemfunc (function);
+      /* P3100: a call through a null pointer to member function is undefined
+	 ({expr.mptr.oper.member.func.null}); a constant one is not
+	 checked.  */
+      contract_evaluation_semantic null_sem = CES_ASSUME;
+      tree null_pfn = e3, null_delta = delta;
+      if (implicit_ub_check_context_p ()
+	  && !is_dummy_object (instance_ptr)
+	  && !TREE_CONSTANT (function))
+	null_sem = (resolve_implicit_contract_semantic
+		    (current_function_decl, input_location,
+		     "ub:expr.mptr.oper.member.func.null.function"));
       idx = build1 (NOP_EXPR, vtable_index_type, e3);
       switch (TARGET_PTRMEMFUNC_VBIT_LOCATION)
 	{
@@ -4736,8 +4747,14 @@ get_member_function_from_ptrfunc (tree *instance_ptrptr, tree function,
       *instance_ptrptr = instance_ptr;
 
       if (nonvirtual)
-	/* Now just return the pointer.  */
-	return e3;
+	{
+	  /* Now just return the pointer.  */
+	  if (null_sem != CES_ASSUME)
+	    e3 = build_implicit_null_member_function_check (input_location,
+							    null_sem, null_pfn,
+							    null_delta, e3);
+	  return e3;
+	}
 
       /* Next extract the vtable pointer from the object.  */
       vtbl = build1 (NOP_EXPR, build_pointer_type (vtbl_ptr_type_node),
@@ -4769,6 +4786,10 @@ get_member_function_from_ptrfunc (tree *instance_ptrptr, tree function,
       if (instance_save_expr)
 	e1 = build2 (COMPOUND_EXPR, TREE_TYPE (e1),
 		     instance_save_expr, e1);
+      if (null_sem != CES_ASSUME)
+	e1 = build_implicit_null_member_function_check (input_location,
+							null_sem, null_pfn,
+							null_delta, e1);
 
       function = e1;
     }

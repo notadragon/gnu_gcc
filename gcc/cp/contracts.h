@@ -439,6 +439,10 @@ extern tree build_implicit_known_indirection_check (location_t, tree);
 extern tree p3100_decayed_array_bound (tree, tree * = NULL);
 extern tree build_implicit_pointer_wrap_check
   (location_t, contract_evaluation_semantic, tree, tree);
+extern tree build_implicit_null_data_member_check
+  (location_t, contract_evaluation_semantic, tree, tree);
+extern tree build_implicit_null_member_function_check
+  (location_t, contract_evaluation_semantic, tree, tree, tree);
 extern tree build_implicit_pure_virtual_direct_check
   (location_t, tree);
 extern tree build_implicit_pure_virtual_terminus (tree);
