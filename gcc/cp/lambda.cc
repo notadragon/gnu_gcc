@@ -2165,12 +2165,109 @@ prune_lambda_captures (tree body)
 // extra scope is empty, we must use the empty scope counter, which
 // might not be the live one.
 
+/* Diagnose the captures of the current lambda that were made only by its
+   contract assertions: an entity odr-used only within contract assertions of
+   a lambda is not implicitly captured ([expr.prim.lambda.closure]/10).
+
+   This runs after prune_lambda_captures, because naming a constant variable
+   without odr-using it is no capture at all: the provisional capture made
+   when the name was seen is folded away, and must not be diagnosed.  A lambda
+   in a template is not pruned, though -- neither the template, nor (in
+   practice) the instantiation, which keeps a capture of a constant that is
+   only read -- so there a capture of a constant variable is not diagnosed:
+   whether it was odr-used is not known.
+
+   The instantiation of a lambda in a template comes here again, from
+   tsubst_lambda_expr.  That is where a parameter pack named only in a
+   contract assertion is first captured, since a pack is not captured until
+   its elements are known.  A capture already diagnosed in the template has
+   its flag cleared, so that the instantiation's copy of it is not reported a
+   second time.  */
+
+static void
+check_contract_only_captures (tree lam)
+{
+  bool in_template = (processing_template_decl
+		      || dependent_type_p (TREE_TYPE (lam)));
+  /* The instantiation of a lambda in a template keeps every capture of a
+     constant variable, odr-used or not (it is not pruned), but its body
+     has folded the uses that are not odr-uses away: what odr-uses one is a
+     use of its proxy that is still there, as prune_lambda_captures finds.  */
+  bool instantiation_p = !in_template && LAMBDA_EXPR_REGEN_INFO (lam);
+  hash_map<tree,tree*> const_vars;
+  if (instantiation_p)
+    cp_walk_tree_without_duplicates (&cur_stmt_list, mark_const_cap_r,
+				     &const_vars);
+  for (tree le = LAMBDA_EXPR_CAPTURE_LIST (lam); le; le = TREE_CHAIN (le))
+    {
+      tree cap_fld = TREE_PURPOSE (le);
+      if (TREE_CODE (cap_fld) != FIELD_DECL
+	  || !DECL_CONTRACT_CAPTURE_P (cap_fld))
+	continue;
+      if (tree var = var_to_maybe_prune (le))
+	{
+	  if (in_template)
+	    continue;
+	  if (instantiation_p)
+	    {
+	      tree **use = const_vars.get (var);
+	      if (!use || TREE_CODE (**use) == DECL_EXPR)
+		continue;
+	    }
+	}
+
+      auto_diagnostic_group d;
+      tree expr = TREE_VALUE (le);
+      location_t loc = DECL_SOURCE_LOCATION (cap_fld);
+
+      /* EXPR is the capture's initializer, which is only a DECL when the
+	 entity is captured directly from the enclosing function.  Capture it
+	 from two lambdas out and the initializer reads through the enclosing
+	 closure instead, so DECL_SOURCE_LOCATION would be applied to
+	 something that has no such field -- silently garbage in a release
+	 build, and a tree-check ICE with checking enabled.  A VLA's is the
+	 {&a[0], bound} constructor build_capture_proxy takes apart.  Recover
+	 the variable being captured, and fall back to the expression and its
+	 own location rather than ever reading a location out of a non-DECL.  */
+      tree decl = expr;
+      if (DECL_VLA_CAPTURE_P (cap_fld)
+	  && TREE_CODE (decl) == CONSTRUCTOR)
+	{
+	  decl = CONSTRUCTOR_ELT (decl, 0)->value;
+	  STRIP_NOPS (decl);
+	  if (TREE_CODE (decl) == ADDR_EXPR)
+	    decl = TREE_OPERAND (decl, 0);
+	  if (TREE_CODE (decl) == ARRAY_REF)
+	    decl = TREE_OPERAND (decl, 0);
+	}
+      STRIP_NOPS (decl);
+      if (INDIRECT_REF_P (decl))
+	{
+	  decl = TREE_OPERAND (decl, 0);
+	  STRIP_NOPS (decl);
+	}
+      if (DECL_P (decl))
+	decl = strip_normal_capture_proxy (decl);
+      tree named = DECL_P (decl) ? decl : expr;
+      error_at (loc, "%qE is not implicitly captured by a contract"
+		" assertion", named);
+      location_t dloc = (DECL_P (decl)
+			 ? DECL_SOURCE_LOCATION (decl)
+			 : cp_expr_loc_or_loc (expr, loc));
+      inform (dloc, "%q#E declared here", named);
+      DECL_CONTRACT_CAPTURE_P (cap_fld) = false;
+    }
+}
+
 void
 finish_lambda_function (tree body)
 {
   finish_function_body (body);
 
   prune_lambda_captures (cur_stmt_list);
+
+  if (flag_contracts)
+    check_contract_only_captures (current_lambda_expr ());
 
   /* Finish the function and generate code for it if necessary.  */
   tree fn = finish_function (/*inline_p=*/true);
