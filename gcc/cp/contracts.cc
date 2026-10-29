@@ -679,6 +679,20 @@ all_contracts_statically_nonthrowing (tree contracts, tree fndecl,
   return true;
 }
 
+/* True if an evaluation of CONTRACT with the semantic SEM is lowered as an
+   optimizer assumption (build_contract_assumption): one with the P3100
+   assume semantic, unless CONTRACT is a postcondition with captures, which
+   are initialized only for an evaluation that checks the predicate.  Such
+   an evaluation needs the contract in the function body, as a check
+   does.  */
+
+static bool
+contract_lowered_as_assumption_p (tree contract, uint16_t sem)
+{
+  return (sem == CES_ASSUME
+	  && !(POSTCONDITION_P (contract) && POSTCONDITION_CAPTURES (contract)));
+}
+
 /* Return true if CONTRACT is checked or assumed under the current build
    configuration.  Returns true if either the runtime or the constexpr
    evaluation semantic is non-ignore, since either can require the
@@ -698,6 +712,11 @@ contract_active_p (tree contract, tree fndecl)
   bool runtime_active = !contract_semantic_emits_no_check (runtime);
   if (!PRECONDITION_P (contract) && contract_semantic_proving_p (analysis))
     runtime_active = true;
+  /* P3100: an assume evaluation is an optimizer assumption in the body.  */
+  if (contract_lowered_as_assumption_p
+	(contract, ensure_evaluation_semantic (contract, fndecl, false)))
+    runtime_active = true;
+
   /* A dynamic contract is always active at run time regardless of its
      compile-time default: the selector may return a checking semantic even
      when the default is "ignore" (P3595).  */
@@ -7419,6 +7438,13 @@ maybe_contract_wrap_call (tree fndecl, tree call, bool is_virtual_dispatch)
 
   if (!is_virtual)
     {
+      /* P3100: a caller-side assume is an optimizer assumption, made in the
+	 wrapper, which inlining brings into the caller.  */
+      unsigned position = 0;
+      for (tree t = tuple; t && !any_active; t = TREE_CHAIN (t), position++)
+	if (contract_lowered_as_assumption_p (TREE_VEC_ELT (specs, position),
+					      tree_to_uhwi (TREE_VALUE (t))))
+	  any_active = true;
       for (tree t = tuple; t; t = TREE_CHAIN (t))
 	/* A dynamic descriptor (TREE_PURPOSE non-null) forces the wrapper to
 	   be emitted even when the compile-time default is ignore/assume: the
@@ -7559,6 +7585,13 @@ define_one_contract_wrapper_func (tree fndecl, tree wrapdecl)
 	  tree contract = TREE_VEC_ELT (specs, position);
 	  if (!POSTCONDITION_P (contract))
 	    continue;
+	  /* P3100: an assumption, as in maybe_contract_wrap_call.  */
+	  if (contract_lowered_as_assumption_p
+		(contract, get_wrapper_tuple_at (wrapdecl, position)))
+	    {
+	      check_post = true;
+	      break;
+	    }
 	  /* A dynamic postcondition (descriptor present) must be checked even
 	     when its compile-time default is ignore/assume -- the selector may
 	     return a checking semantic at run time.  Mirrors the activeness
@@ -11380,6 +11413,34 @@ contract_local_handler_always_rethrows_p (tree contract,
   return analysis.walk_stmt (body) == RO_RETHROWN;
 }
 
+/* The evaluation of CONTRACT with the P3100 assume semantic: an optimizer
+   assumption of its predicate, lowered as [[assume]] lowers its own
+   (IFN_ASSUME), so the predicate is never evaluated -- one with side effects
+   is outlined into a function that is never called -- and the optimizers
+   may take it to hold where the evaluation happens.  void_node for a
+   postcondition with captures, which are not initialized
+   (contract_lowered_as_assumption_p); NULL_TREE on error.  */
+
+static tree
+build_contract_assumption (tree contract)
+{
+  if (!contract_lowered_as_assumption_p (contract, CES_ASSUME))
+    return void_node;
+  remap_dummy_this (current_function_decl, &CONTRACT_CONDITION (contract));
+  if (CONTRACT_CONDITION (contract) == error_mark_node)
+    return NULL_TREE;
+  if (POSTCONDITION_P (contract) && !flag_contract_checks_outlined)
+    {
+      remap_retval (current_function_decl, contract);
+      if (CONTRACT_CONDITION (contract) == error_mark_node)
+	return NULL_TREE;
+    }
+  tree cond = unshare_expr (CONTRACT_CONDITION (contract));
+  cond = fold_build_cleanup_point_expr (TREE_TYPE (cond), cond);
+  return build_call_expr_internal_loc (EXPR_LOCATION (contract), IFN_ASSUME,
+				       void_type_node, 1, cond);
+}
+
 /* D4405: true if ANALYSIS, the semantic of CONTRACT's analysis
    evaluation, is prove or diagnose and the current function makes that
    evaluation (build_analysis_evaluation).  */
@@ -11445,6 +11506,10 @@ emit_check_for_semantic (tree contract, contract_evaluation_semantic semantic,
     {
     case CES_IGNORE:
     case CES_ASSUME:
+      /* P3100: assume, which never evaluates the predicate either, is an
+	 optimizer assumption.  */
+      if (semantic == CES_ASSUME)
+	return build_contract_assumption (contract);
       return void_node;
     case CES_PROVE:
     case CES_DIAGNOSE:
