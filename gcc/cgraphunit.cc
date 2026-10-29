@@ -209,6 +209,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "ipa-inline.h"
 #include "omp-offload.h"
 #include "symtab-thunks.h"
+#include "contracts-shadow.h"
 
 /* Queue of cgraph nodes scheduled to be added into cgraph.  This is a
    secondary queue used during optimization to accommodate passes that
@@ -2430,6 +2431,10 @@ symbol_table::compile (void)
 
   state = EXPANSION;
 
+  /* P4405 proving hook: the proof shadows first, so that every obligation is
+     decided before anything else is optimized further.  */
+  contract_shadow_expand_first ();
+
   /* Output first asm statements and anything ordered. The process
      flag is cleared for these nodes, so we skip them later.  */
   output_in_order ();
@@ -2627,6 +2632,9 @@ symbol_table::finalize_compilation_unit (void)
 
   /* Finally drive the pass manager.  */
   compile ();
+
+  /* P4405 proving hook: diagnose the obligations no proof shadow proved.  */
+  contract_shadow_finish ();
 
   timevar_pop (TV_CGRAPH);
 }

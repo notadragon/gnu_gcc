@@ -476,6 +476,12 @@ extern gimple_opt_pass *make_pass_early_vrp (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_fast_vrp (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_vrp (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_assumptions (gcc::context *ctxt);
+extern gimple_opt_pass *make_pass_contract_shadow (gcc::context *ctxt);
+extern simple_ipa_opt_pass *make_pass_contract_shadow_clone (gcc::context
+							     *ctxt);
+extern simple_ipa_opt_pass *make_pass_contract_shadow_early (gcc::context
+							     *ctxt);
+extern gimple_opt_pass *make_pass_contract_proven (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_uncprop (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_return_slot (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_reassoc (gcc::context *ctxt);

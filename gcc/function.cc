@@ -85,6 +85,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "gimple-range.h"
 #include "insn-attr.h"
 #include "hierarchical_discriminator.h"
+#include "contracts-shadow.h"
 
 /* So we can assign to cfun in this file.  */
 #undef cfun
@@ -4795,6 +4796,8 @@ set_function_decl (function *new_cfun, tree new_fndecl, bool force)
   if (cfun != new_cfun || force)
     {
       cfun = new_cfun;
+      /* P4405 proving hook.  */
+      contract_shadow_switch_function (new_fndecl);
       invoke_set_current_function_hook (new_fndecl);
       redirect_edge_var_map_empty ();
     }

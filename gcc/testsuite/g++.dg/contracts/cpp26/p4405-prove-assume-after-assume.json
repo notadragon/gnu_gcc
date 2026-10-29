@@ -1,0 +1,4 @@
+[
+  {"match": {"location": "p4405-prove-assume-after-assume.C:23"}, "output": {"semantic": "assume"}},
+  {"match": {}, "output": {"semantic": "prove"}}
+]

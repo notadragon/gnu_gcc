@@ -3562,6 +3562,45 @@ has no effect.
 
 Both are accepted for C and Objective-C too.
 
+@opindex fcontracts-prove-shadow
+@opindex fno-contracts-prove-shadow
+@item -fcontracts-prove-shadow
+Another proving strategy, enabled by @option{-fcontracts-p4405} and
+disabled by @option{-fno-contracts-prove-shadow}: prove what the
+optimizers can show about a copy of the function, its @dfn{proof shadow},
+which is optimized as the function is but never emitted.  In the shadow,
+each evaluation still to be proven tests its predicate; an earlier
+evaluation whose predicate has no side effects is assumed to hold, with
+@code{ignore}, @code{observe}, @code{noexcept_observe} or @code{assume}
+(for a precondition or postcondition, not
+@code{ignore}, which leaves nothing in the function), as
+is one with @code{enforce} or @code{quick_enforce} on its continuing path.
+The function's own code is that of @code{ignore}, and the predicate is
+never evaluated at run time.  The proof is whatever the optimizers can
+show unreachable, including any path with undefined behavior, so it
+depends on the optimization level: the shadow runs through whatever
+optimizations the function's own level selects (fewer at @option{-Og}),
+and not at all at @option{-O0}, where only the other strategies run.  A
+caller-side evaluation of a precondition is proven in the caller's shadow,
+with the arguments substituted for the parameters (at a constructor call
+that creates a temporary, the temporary for @code{this}), when every
+argument it uses is free of side effects.  The evaluations are
+diagnosed at the end of the compilation, under @option{-flto} at the
+compilation step.  The strategy does not run in a coroutine, in a module,
+while writing a precompiled header, with @option{-fanalyzer}, or with
+profile instrumentation or feedback.
+
+With @option{-fcontracts-prove-assume}, an evaluation the shadow proves
+soundly -- relying on no earlier evaluation with @code{ignore},
+@code{observe} or @code{noexcept_observe}, on no unproven one, and on no
+predicate that may have side effects (a call counts unless the function
+called is found to be pure or const, terminating and not throwing) -- is
+an assumption in the function's code, as if evaluated with
+@code{assume}: its predicate is still never evaluated, but the function's
+optimizations after the shadow is decided may take it to hold.
+
+It is accepted for C and Objective-C too.
+
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines

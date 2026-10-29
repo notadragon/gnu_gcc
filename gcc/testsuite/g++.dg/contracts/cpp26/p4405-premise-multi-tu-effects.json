@@ -1,0 +1,7 @@
+[
+  {"match": {"location": "p4405-premise-multi-tu-effects-e.cc:9"}, "output": {"semantic": "ignore"}},
+  {"match": {"location": "p4405-premise-multi-tu-effects-e.cc:19"}, "output": {"semantic": "assume"}},
+  {"match": {"location": "p4405-premise-multi-tu-effects-e.cc:29"}, "output": {"semantic": "diagnose"}},
+  {"match": {"location": "p4405-premise-multi-tu-effects-o.cc:6"}, "output": {"semantic": "observe"}},
+  {"match": {"caller": false}, "output": {"semantic": "enforce"}}
+]

@@ -3956,6 +3956,16 @@ cxx_eval_internal_function (const constexpr_ctx *ctx, tree t,
     case IFN_FALLTHROUGH:
       return void_node;
 
+    /* P4405 proving hook: a proof shadow's region is only ever executed in
+       the shadow, and the assumption made of a proven obligation is only an
+       assumption; constant evaluation skips both, as the program does.  */
+    case IFN_CONTRACT_SHADOW_GUARD:
+    case IFN_CONTRACT_PROVEN:
+      return boolean_false_node;
+    case IFN_CONTRACT_UNPROVEN:
+    case IFN_CONTRACT_ASSUMPTION:
+      return void_node;
+
     case IFN_ASSUME:
       if (!cxx_eval_assert (ctx, CALL_EXPR_ARG (t, 0),
 			    G_("failed %<assume%> attribute assumption"),
@@ -13153,6 +13163,11 @@ potential_constant_expression_1 (tree t, bool want_rval, bool strict, bool now,
 		case IFN_UBSAN_VPTR:
 		case IFN_FALLTHROUGH:
 		case IFN_ASSUME:
+		/* P4405 proving hook (cxx_eval_internal_function).  */
+		case IFN_CONTRACT_SHADOW_GUARD:
+		case IFN_CONTRACT_UNPROVEN:
+		case IFN_CONTRACT_ASSUMPTION:
+		case IFN_CONTRACT_PROVEN:
 		  return true;
 
 		case IFN_ADD_OVERFLOW:

@@ -1344,6 +1344,7 @@ C_COMMON_OBJS = c-family/c-common.o c-family/c-cppbuiltin.o c-family/c-dump.o \
   c-family/c-type-mismatch.o attr-handlers.o \
   c-family/contracts-config.o \
   c-family/contracts-prove.o \
+  c-family/contracts-prove-shadow.o \
   c-family/contracts-prove-fold.o
 
 # Analyzer object files
@@ -1470,6 +1471,7 @@ OBJS = \
 	combine-stack-adj.o \
 	compare-elim.o \
 	context.o \
+	contracts-shadow.o \
 	convert.o \
 	coroutine-passes.o \
 	coverage.o \
@@ -3195,6 +3197,7 @@ GTFILES = $(CPPLIB_H) $(srcdir)/input.h $(srcdir)/coretypes.h \
   $(srcdir)/internal-fn.h \
   $(srcdir)/calls.cc \
   $(srcdir)/analyzer/analyzer-language.cc \
+  $(srcdir)/contracts-shadow.cc \
   @all_gtfiles@
 
 # Compute the list of GT header files from the corresponding C sources,

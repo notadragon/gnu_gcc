@@ -5697,6 +5697,41 @@ expand_MASK_CALL (internal_fn, gcall *)
   gcc_unreachable ();
 }
 
+/* The P4405 proof shadow markers never reach expansion: the pass that makes
+   the shadows (contracts-shadow.cc) replaces them all before SSA.  */
+
+void
+expand_CONTRACT_SHADOW_GUARD (internal_fn, gcall *)
+{
+  gcc_unreachable ();
+}
+
+void
+expand_CONTRACT_UNPROVEN (internal_fn, gcall *)
+{
+  gcc_unreachable ();
+}
+
+void
+expand_CONTRACT_ASSUMPTION (internal_fn, gcall *)
+{
+  gcc_unreachable ();
+}
+
+/* A guard of -fcontracts-prove-assume is folded by contract_proven once its
+   obligation is decided (contracts-shadow.cc); one that is not is false:
+   nothing is assumed.  */
+
+void
+expand_CONTRACT_PROVEN (internal_fn, gcall *stmt)
+{
+  tree lhs = gimple_call_lhs (stmt);
+  if (!lhs)
+    return;
+  rtx target = expand_expr (lhs, NULL_RTX, VOIDmode, EXPAND_WRITE);
+  emit_move_insn (target, const0_rtx);
+}
+
 void
 expand_VARYING (internal_fn, gcall *)
 {

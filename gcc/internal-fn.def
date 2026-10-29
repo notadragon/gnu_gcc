@@ -639,6 +639,32 @@ DEF_INTERNAL_FN (ASSUME, ECF_PURE | ECF_LEAF | ECF_NOTHROW
 /* For if-conversion of inbranch SIMD clones.  */
 DEF_INTERNAL_FN (MASK_CALL, ECF_NOVOPS, NULL)
 
+/* P4405 proof shadows (contracts-shadow.cc).  The front ends place each
+   region `if (.CONTRACT_SHADOW_GUARD (KIND)) { if (!pred) <tail>; }', where
+   <tail> is .CONTRACT_UNPROVEN (ID) for a prove or diagnose evaluation
+   still to be proven and .CONTRACT_ASSUMPTION (GUARANTEED, KIND) for an
+   earlier evaluation the shadow may assume.  KIND, a constant, is 0 for an
+   ordinary region and an override pair's number for a region of that
+   pair's override shadow (D4405R0, "Virtual Functions").  None survives
+   the IPA pass that makes the shadows, before SSA: the guard is folded to
+   false in the real function, which removes the region, and in each shadow
+   to whether the region is executed there -- an ordinary region in every
+   shadow, an override region only in its pair's.  Two guards are never
+   merged: they are not const.  */
+DEF_INTERNAL_FN (CONTRACT_SHADOW_GUARD, ECF_LEAF | ECF_NOTHROW | ECF_NOVOPS,
+		 NULL)
+DEF_INTERNAL_FN (CONTRACT_UNPROVEN, ECF_NORETURN | ECF_LEAF | ECF_NOTHROW
+				    | ECF_NOVOPS, NULL)
+DEF_INTERNAL_FN (CONTRACT_ASSUMPTION, ECF_NORETURN | ECF_LEAF | ECF_NOTHROW
+				      | ECF_NOVOPS, NULL)
+/* Under -fcontracts-prove-assume, the front ends also place
+   `.ASSUME (!.CONTRACT_PROVEN (ID) || pred);' after an obligation's region.
+   The guard, which ends up in the assumption function the condition is
+   outlined into, is folded to whether the shadow proved obligation ID
+   soundly when that function's late optimizations begin
+   (contract_proven).  */
+DEF_INTERNAL_FN (CONTRACT_PROVEN, ECF_CONST | ECF_LEAF | ECF_NOTHROW, NULL)
+
 /* _BitInt support.  */
 DEF_INTERNAL_FN (MULBITINT, ECF_LEAF | ECF_NOTHROW, ". O . R . R . ")
 DEF_INTERNAL_FN (DIVMODBITINT, ECF_LEAF, ". O . O . R . R . ")

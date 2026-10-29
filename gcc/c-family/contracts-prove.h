@@ -214,6 +214,19 @@ extern const contract_proof_strategy contract_prove_fold_strategy;
 
 /* -fcontracts-prove-shadow (contracts-prove-shadow.cc; the middle end's
    contracts-shadow.cc does the proving).  */
+extern const contract_proof_strategy contract_prove_shadow_strategy;
+
+/* For the proof shadows of either kind: true if FNDECL's evaluations may
+   go to a proof shadow, whichever strategy's flag is set.  */
+extern bool contract_prove_shadow_may_defer_p (tree fndecl);
+
+/* For the proof shadows of either kind: the region of kind KIND letting a
+   shadow assume PRED, the predicate of an evaluation at LOC with semantic
+   SEM, or NULL_TREE (contract_proof_strategy's assume).  */
+extern tree contract_prove_shadow_assumption (tree pred,
+					      contract_evaluation_semantic sem,
+					      location_t loc, unsigned kind);
+
 /* Defined by each front end, for the folding strategy: EXPR folded as far
    as the front end can fold it -- in C++ including constant evaluation that
    is not manifestly constant-evaluated -- without changing EXPR or anything
@@ -225,4 +238,11 @@ extern tree c_contract_fold_predicate (tree expr);
    context the front end is describing an evaluation in now -- in C++ the
    template instantiation backtrace, "In instantiation of ..." and
    "required from here" -- or 0 if it has none (always, in C).  */
+extern unsigned c_contract_diagnostic_context ();
+
+/* Re-establish CONTEXT, a nonzero handle from c_contract_diagnostic_context,
+   for a diagnostic when ENTER, and what it replaced when not.  */
+extern void c_contract_switch_diagnostic_context (unsigned context,
+						  bool enter);
+
 #endif /* GCC_C_FAMILY_CONTRACTS_PROVE_H */

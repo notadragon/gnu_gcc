@@ -1,0 +1,7 @@
+[
+  {"match": {"location": "p4405-prove-assume.C:43"}, "output": {"semantic": "assume"}},
+  {"match": {"location": "p4405-prove-assume.C:57"}, "output": {"semantic": "observe"}},
+  {"match": {"location": "p4405-prove-assume.C:64"}, "output": {"semantic": "assume"}},
+  {"match": {"caller": false, "namespace": "ns"}, "output": {"semantic": "enforce"}},
+  {"match": {}, "output": {"semantic": "prove"}}
+]

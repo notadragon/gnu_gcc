@@ -51,6 +51,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "pretty-print-markup.h"
 #include "contracts.h"
 #include "escaped_string.h"
+#include "c-family/contracts-prove.h"
 
 /* The type of functions taking a tree, and some additional data, and
    returning an int.  */
@@ -34892,6 +34893,67 @@ print_template_statistics (void)
 	   (fmt_size_t) type_specializations->size (),
 	   (fmt_size_t) type_specializations->elements (),
 	   type_specializations->collisions ());
+}
+
+/* The contexts kept for the P4405 proof shadows' diagnostics, which are
+   issued at the end of the compilation (contracts-prove.h): each the
+   instantiation context an evaluation was described in, which they print
+   as an error at that point would ("In instantiation of ...", "required
+   from here"), with input_location then.  A handle is an index; 0 is
+   none.  */
+
+static GTY(()) vec<tinst_level *, va_gc> *contract_diagnostic_contexts;
+static vec<location_t> contract_diagnostic_locations;
+/* What a context replaced while its diagnostic is issued.  */
+static GTY(()) tinst_level *contract_diagnostic_saved_level;
+static location_t contract_diagnostic_saved_location;
+
+/* The C++ front end's hook: the current instantiation context, kept (its
+   refcount held) until the end of the compilation.  */
+
+unsigned
+c_contract_diagnostic_context ()
+{
+  if (!current_tinst_level)
+    return 0;
+  if (vec_safe_is_empty (contract_diagnostic_contexts))
+    {
+      vec_safe_push (contract_diagnostic_contexts, (tinst_level *) NULL);
+      contract_diagnostic_locations.safe_push (UNKNOWN_LOCATION);
+    }
+  unsigned last = contract_diagnostic_contexts->length () - 1;
+  if (last
+      && (*contract_diagnostic_contexts)[last] == current_tinst_level
+      && contract_diagnostic_locations[last] == input_location)
+    return last;
+  vec_safe_push (contract_diagnostic_contexts, (tinst_level *) NULL);
+  set_refcount_ptr (contract_diagnostic_contexts->last (),
+		    current_tinst_level);
+  contract_diagnostic_locations.safe_push (input_location);
+  return last + 1;
+}
+
+/* The C++ front end's hook: make CONTEXT the current instantiation context
+   (and its input_location current) when ENTER, and restore what it replaced
+   when not.  */
+
+void
+c_contract_switch_diagnostic_context (unsigned context, bool enter)
+{
+  if (enter)
+    {
+      set_refcount_ptr (contract_diagnostic_saved_level, current_tinst_level);
+      contract_diagnostic_saved_location = input_location;
+      set_refcount_ptr (current_tinst_level,
+			(*contract_diagnostic_contexts)[context]);
+      input_location = contract_diagnostic_locations[context];
+    }
+  else
+    {
+      set_refcount_ptr (current_tinst_level, contract_diagnostic_saved_level);
+      set_refcount_ptr (contract_diagnostic_saved_level);
+      input_location = contract_diagnostic_saved_location;
+    }
 }
 
 #if CHECKING_P

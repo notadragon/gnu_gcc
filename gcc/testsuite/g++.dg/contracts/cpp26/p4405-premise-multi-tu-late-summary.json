@@ -1,0 +1,7 @@
+[
+  {"match": {"location": "p4405-premise-multi-tu-late-summary-e.cc:8"}, "output": {"semantic": "quick_enforce"}},
+  {"match": {"location": "p4405-premise-multi-tu-late-summary-e.cc:9"}, "output": {"semantic": "diagnose"}},
+  {"match": {"location": "p4405-premise-multi-tu-late-summary-i.cc:6"}, "output": {"semantic": "ignore"}},
+  {"match": {"location": "p4405-premise-multi-tu-late-summary-i.cc:7"}, "output": {"semantic": "ignore"}},
+  {"match": {"caller": false}, "output": {"semantic": "enforce"}}
+]

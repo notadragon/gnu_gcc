@@ -1,0 +1,7 @@
+[
+  {"match": {"location": "p4405-premise-multi-tu-shadow-only-e.cc:9"}, "output": {"semantic": "enforce"}},
+  {"match": {"location": "p4405-premise-multi-tu-shadow-only-e.cc:19"}, "output": {"semantic": "assume"}},
+  {"match": {"location": "p4405-premise-multi-tu-shadow-only-e.cc:27"}, "output": {"semantic": "diagnose"}},
+  {"match": {"location": "p4405-premise-multi-tu-shadow-only-i.cc:7"}, "output": {"semantic": "ignore"}},
+  {"match": {"caller": false}, "output": {"semantic": "enforce"}}
+]

@@ -1,0 +1,278 @@
+# Copyright (C) 2026 Free Software Foundation, Inc.
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with GCC; see the file COPYING3.  If not see
+# <http://www.gnu.org/licenses/>.
+
+# Object-code identity checks for contract analysis (D4405): an analysis
+# that only diagnoses must not change the code that is emitted.
+#
+#   { dg-final { contracts-same-object-code REF VARIANT... } }
+#
+# compiles the test once more with the test's own options followed by REF,
+# and once with the test's own options followed by each VARIANT (an empty
+# VARIANT is the test's own options alone), all to object files, and
+# reports one PASS or FAIL per VARIANT: whether that object holds the same
+# object code as REF's.  Any diagnostic from these compilations is a FAIL.
+# The test's -fdump- options are dropped from them, so that the test's own
+# dumps are left for its scans.
+#
+# The comparison is of content, not of layout.  Each object is reduced to
+# a sorted list of pieces: the disassembly (with relocations) and the
+# contents of each section, its relocations, the symbol table, the
+# members of each COMDAT group, and each frame description entry (its
+# instructions, the CIE it uses and the relocations inside it).  So the
+# order in which sections are emitted -- which can follow the order in
+# which the compiler happened to finish functions -- does not count, but
+# any difference in what a section holds does.  A function placed in a
+# shared section in a different order is a difference; tests that do not
+# want that can use -ffunction-sections.
+#
+# Needs objdump and readelf for an ELF target; UNSUPPORTED otherwise.
+
+# Split TEXT into a sorted list of pieces, each starting at a line that
+# matches HEADER_RE; lines before the first header are dropped.  Pieces
+# whose header matches SKIP_RE (if not empty) are dropped too.
+
+proc contracts-object-pieces { text header_re { skip_re "" } } {
+    set pieces [list]
+    set cur ""
+    set have 0
+    foreach line [split $text "\n"] {
+	if { [regexp -- $header_re $line] } {
+	    if { $have } {
+		lappend pieces $cur
+	    }
+	    if { $skip_re != "" && [regexp -- $skip_re $line] } {
+		set have 0
+	    } else {
+		set have 1
+		set cur [string trimright $line]
+	    }
+	} elseif { $have } {
+	    append cur "\n" [string trimright $line]
+	}
+    }
+    if { $have } {
+	lappend pieces $cur
+    }
+    # The blank line that separates pieces is missing after the last one.
+    set trimmed [list]
+    foreach piece $pieces {
+	lappend trimmed [string trimright $piece]
+    }
+    return [lsort $trimmed]
+}
+
+# Run one binutils PROG with ARGS on host; return its output, or raise an
+# error naming it if it fails.
+
+proc contracts-object-tool { prog args } {
+    set result [remote_exec host $prog [join $args]]
+    if { [lindex $result 0] != 0 } {
+	error "$prog $args: [lindex $result 1]"
+    }
+    # remote_exec may hand back the output with CRLF line endings.
+    return [string map [list "\r" ""] [lindex $result 1]]
+}
+
+# The frame description entries of OBJ as order-independent pieces.
+
+proc contracts-object-frames { objdump obj } {
+    # Relocations of .eh_frame, by offset.
+    set relocs [list]
+    set text [contracts-object-tool $objdump -r -j .eh_frame $obj]
+    foreach line [split $text "\n"] {
+	if { [regexp {^([0-9a-f]+)\s+(\S+)\s+(.*)$} $line \
+		  dummy off type value] } {
+	    lappend relocs [list [expr 0x$off] $type [string trim $value]]
+	}
+    }
+
+    set text [contracts-object-tool $objdump --dwarf=frames $obj]
+    set entries [list]
+    set cur ""
+    foreach line [split $text "\n"] {
+	if { [regexp {^[0-9a-f]{8} } $line] } {
+	    if { $cur != "" } {
+		lappend entries $cur
+	    }
+	    set cur [string trimright $line]
+	} elseif { $cur != "" } {
+	    append cur "\n" [string trimright $line]
+	}
+    }
+    if { $cur != "" } {
+	lappend entries $cur
+    }
+
+    # CIEs by offset, as their text without the offset.
+    set cies [dict create]
+    foreach entry $entries {
+	set head [lindex [split $entry "\n"] 0]
+	if { [regexp {^([0-9a-f]+) \S+ \S+ CIE} $head dummy off] } {
+	    regsub {^[0-9a-f]+ } $entry "" body
+	    dict set cies [expr 0x$off] $body
+	}
+    }
+
+    set pieces [list]
+    foreach entry $entries {
+	set lines [split $entry "\n"]
+	set head [lindex $lines 0]
+	if { ![regexp {^([0-9a-f]+) ([0-9a-f]+) \S+ FDE cie=([0-9a-f]+) (.*)$} \
+		   $head dummy off len cie rest] } {
+	    continue
+	}
+	set off [expr 0x$off]
+	set end [expr $off + 4 + 0x$len]
+	set cie [expr 0x$cie]
+	set piece "FDE $rest"
+	if { [dict exists $cies $cie] } {
+	    append piece "\nCIE: [dict get $cies $cie]"
+	}
+	foreach r $relocs {
+	    set roff [lindex $r 0]
+	    if { $roff >= $off && $roff < $end } {
+		append piece "\nreloc +[expr $roff - $off] [lindex $r 1] [lindex $r 2]"
+	    }
+	}
+	append piece "\n" [join [lrange $lines 1 end] "\n"]
+	lappend pieces $piece
+    }
+    return [lsort $pieces]
+}
+
+# The order-independent pieces of object OBJ.
+
+proc contracts-object-digest { objdump readelf obj } {
+    set digest [list]
+    # In an instruction, drop the symbol objdump names a target address
+    # after: past the end of a section it is whatever symbol comes next in
+    # the object, which depends on the order of the sections.  The
+    # relocations name the real targets.
+    set text [contracts-object-tool $objdump -d -r $obj]
+    regsub -all -line {^(\s+[0-9a-f]+:.*\S) <[^<>]*>$} $text {\1} text
+    lappend digest {*}[contracts-object-pieces $text \
+	{^Disassembly of section }]
+    lappend digest {*}[contracts-object-pieces \
+	[contracts-object-tool $objdump -s $obj] \
+	{^Contents of section } \
+	{^Contents of section (\.eh_frame|\.group):}]
+    lappend digest {*}[contracts-object-pieces \
+	[contracts-object-tool $objdump -r $obj] \
+	{^RELOCATION RECORDS FOR } \
+	{^RELOCATION RECORDS FOR \[\.eh_frame\]}]
+    set symbols [list]
+    set in_table 0
+    foreach line [split [contracts-object-tool $objdump -t $obj] "\n"] {
+	if { [regexp {^SYMBOL TABLE:} $line] } {
+	    set in_table 1
+	} elseif { $in_table && [string trim $line] != "" } {
+	    lappend symbols "symbol [string trimright $line]"
+	}
+    }
+    lappend digest {*}[lsort $symbols]
+    set groups [list]
+    foreach group [contracts-object-pieces \
+		       [contracts-object-tool $readelf -g -W $obj] \
+		       {^COMDAT group section }] {
+	set lines [split $group "\n"]
+	regsub {\[\s*[0-9]+\]} [lindex $lines 0] "" head
+	set members [list]
+	foreach line [lrange $lines 1 end] {
+	    if { [regexp {^\s+\[\s*[0-9]+\]\s+(\S+)} $line dummy member] } {
+		lappend members $member
+	    }
+	}
+	lappend groups "$head [lsort $members]"
+    }
+    lappend digest {*}[lsort $groups]
+    lappend digest {*}[contracts-object-frames $objdump $obj]
+    return $digest
+}
+
+proc contracts-same-object-code { args } {
+    global tool
+    global target_triplet
+
+    if { [llength $args] < 2 } {
+	error "contracts-same-object-code: needs REF and at least one VARIANT"
+    }
+
+    set testcase [testname-for-summary]
+    upvar 2 prog prog
+    upvar 2 tool_flags tool_flags
+    upvar 2 dg-extra-tool-flags extra_tool_flags
+
+    set ref [lindex $args 0]
+    set variants [lrange $args 1 end]
+
+    if { ![is-effective-target elf] } {
+	foreach v $variants {
+	    unsupported "$testcase same object code {$v} as {$ref}"
+	}
+	return
+    }
+    set objdump [find_binutils_prog objdump]
+    set readelf [find_binutils_prog readelf]
+
+    set base "[file rootname [file tail $prog]].same-object"
+    set n 0
+    set ref_digest ""
+    foreach opts [concat [list $ref] $variants] {
+	set obj "$base-$n.o"
+	set flags "$tool_flags $extra_tool_flags $opts"
+	# The test's own dumps are not ours to overwrite.
+	regsub -all {(^|\s)-fdump-\S+} $flags " " flags
+	set comp_output [${tool}_target_compile $prog $obj object \
+			     [list "additional_flags=$flags"]]
+	set comp_output [${tool}-dg-prune $target_triplet $comp_output]
+	set what [expr { $n == 0 ? "reference {$ref}" : "{$opts}" }]
+	set digest ""
+	if { [string trim $comp_output] != "" || ![file exists $obj] } {
+	    verbose -log "contracts-same-object-code: compiling with $what:"
+	    verbose -log $comp_output
+	} elseif { [catch { contracts-object-digest $objdump $readelf $obj } \
+			digest_or_err] } {
+	    verbose -log "contracts-same-object-code: $digest_or_err"
+	} else {
+	    set digest $digest_or_err
+	}
+	file delete $obj
+
+	if { $n == 0 } {
+	    if { $digest == "" } {
+		foreach v $variants {
+		    fail "$testcase same object code {$v} as {$ref}"
+		}
+		return
+	    }
+	    set ref_digest $digest
+	} elseif { $digest == "" } {
+	    fail "$testcase same object code {$opts} as {$ref}"
+	} elseif { $digest == $ref_digest } {
+	    pass "$testcase same object code {$opts} as {$ref}"
+	} else {
+	    fail "$testcase same object code {$opts} as {$ref}"
+	    foreach a $digest b $ref_digest {
+		if { $a != $b } {
+		    verbose -log "first difference, with {$opts}:\n$a"
+		    verbose -log "with reference {$ref}:\n$b"
+		    break
+		}
+	    }
+	}
+	incr n
+    }
+}

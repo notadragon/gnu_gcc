@@ -40,6 +40,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "dbgcnt.h"
 #include "debug.h"
 #include "attribs.h"
+#include "contracts-shadow.h"
 
 /* Return true when NODE has ADDR reference.  */
 
@@ -128,7 +129,8 @@ possible_inline_candidate_p (symtab_node *node)
 static void
 process_references (symtab_node *snode,
 		    symtab_node **first,
-		    hash_set<symtab_node *> *reachable)
+		    hash_set<symtab_node *> *reachable,
+		    bool boundary_only = false)
 {
   int i;
   struct ipa_ref *ref = NULL;
@@ -138,6 +140,7 @@ process_references (symtab_node *snode,
       symtab_node *body = node->ultimate_alias_target ();
 
       if (node->definition && !node->in_other_partition
+	  && !boundary_only
 	  && ((!DECL_EXTERNAL (node->decl) || node->alias)
 	      || (possible_inline_candidate_p (node)
 		  /* We use variable constructors during late compilation for
@@ -369,6 +372,12 @@ symbol_table::remove_unreachable_nodes (FILE *file)
     {
       bool in_boundary_p = !reachable.contains (first);
       symtab_node *node = first;
+      /* P4405 proving hook.  Once inlining is done, what a proof shadow
+	 (or a body inlined into one) calls or refers to stays only as a
+	 declaration unless something else needs it: shadows are never
+	 emitted, and must not keep anything alive that would be.  */
+      cgraph_node *shadow_node = dyn_cast <cgraph_node *> (node);
+      bool shadow_p = shadow_node && contract_shadow_boundary_p (shadow_node);
 
       first = (symtab_node *)first->aux;
 
@@ -416,7 +425,7 @@ symbol_table::remove_unreachable_nodes (FILE *file)
 		  enqueue_node (next, &first, &reachable);
 	    }
 	  /* Mark references as reachable.  */
-	  process_references (node, &first, &reachable);
+	  process_references (node, &first, &reachable, shadow_p);
 	}
 
       if (cgraph_node *cnode = dyn_cast <cgraph_node *> (node))
@@ -428,7 +437,8 @@ symbol_table::remove_unreachable_nodes (FILE *file)
 	      struct cgraph_edge *e;
 	      /* Keep alive possible targets for devirtualization.  */
 	      if (opt_for_fn (cnode->decl, optimize)
-		  && opt_for_fn (cnode->decl, flag_devirtualize))
+		  && opt_for_fn (cnode->decl, flag_devirtualize)
+		  && !shadow_p)
 		{
 		  struct cgraph_edge *next;
 		  for (e = cnode->indirect_calls; e; e = next)
@@ -445,6 +455,7 @@ symbol_table::remove_unreachable_nodes (FILE *file)
 	          symtab_node *body = e->callee->function_symbol ();
 		  if (e->callee->definition
 		      && !e->callee->in_other_partition
+		      && (!shadow_p || !e->inline_failed)
 		      && (!e->inline_failed
 			  || !DECL_EXTERNAL (e->callee->decl)
 			  || e->callee->alias

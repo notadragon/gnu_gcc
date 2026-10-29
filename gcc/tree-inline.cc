@@ -66,6 +66,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "symtab-thunks.h"
 #include "symtab-clones.h"
 #include "asan.h"
+#include "contracts-shadow.h"
 
 /* I'm not real happy about this, but we need to handle gimple and
    non-gimple trees.  */
@@ -5057,6 +5058,10 @@ expand_call_inline (basic_block bb, gimple *stmt, copy_body_data *id,
       BLOCK_SOURCE_LOCATION (id->block) = loc;
       prepend_lexical_block (block, id->block);
     }
+
+  /* P4405 proving hook: what the proof shadows may rely on this TU's code
+     for.  */
+  contract_shadow_note_inline (id->dst_node, fn, stmt);
 
   /* Local declarations will be replaced by their equivalents in this map.  */
   st = id->decl_map;

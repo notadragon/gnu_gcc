@@ -2062,6 +2062,10 @@ fcontracts-prove-fold
 C ObjC C++ ObjC++ Var(flag_contracts_prove_fold) Init(0) LangEnabledBy(C ObjC C++ ObjC++,fcontracts-p4405)
 Prove a prove or diagnose evaluation whose predicate folds to true (P4405).
 
+fcontracts-prove-shadow
+C ObjC C++ ObjC++ Var(flag_contracts_prove_shadow) Init(0) LangEnabledBy(C ObjC C++ ObjC++,fcontracts-p4405)
+Prove a prove or diagnose evaluation by optimizing a proof shadow of the function (P4405).
+
 fcoroutines
 C++ ObjC++ LTO Var(flag_coroutines)
 Enable C++ coroutines (experimental).
