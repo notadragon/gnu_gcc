@@ -1995,6 +1995,13 @@ fcontracts-p3097
 C++ ObjC++ Var(flag_contracts_p3097) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P3097 contract assertions on virtual functions.
 
+fcontracts-p3099
+C++ ObjC++ Var(flag_contracts_p3099) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3099 user-defined diagnostic messages for contract assertions.
+
+; Not streamed into the LTO options section: lto-streamer-in.cc re-arms it
+; when a contract null check survives to LTRANS, so that pass_sanopt, which
+; gates on it, expands the check.
 fcontracts-p3290
 C++ ObjC++ Var(flag_contracts_p3290) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P3290 contract violation trigger API and assert integration.

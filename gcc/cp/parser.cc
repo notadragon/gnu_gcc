@@ -34241,10 +34241,25 @@ cp_parser_late_contract_condition (cp_parser *parser, tree fn, tree contract)
 				  end->type == CPP_EOF
 				  ? get_finish (EXPR_LOCATION (contract))
 				  : end->location);
+
+  tree message = cp_parser_contract_message (parser);
+
   /* Commit to changes.  */
   update_late_contract (contract, fn, result, parsed_condition, comment);
   if (undeduced_result_type_p)
     --processing_template_decl;
+  /* Now that the condition is no longer deferred -- and we've left the
+     result-variable's template-processing scope -- finalize the diagnostic
+     message the same way grok_contract does for non-deferred contracts, so a
+     late-parsed (member-function) postcondition's message is a bare STRING_CST
+     (or NULL) rather than a raw location-wrapped / cexpr expression.  The
+     message is not result-dependent, so extracting it here (with
+     processing_template_decl restored) lets a cexpr_str message be
+     constant-evaluated.  */
+  finish_contract_message (contract, message, parsed_condition,
+			   EXPR_LOCATION (contract));
+  if (failed_captures)
+    invalidate_contract (contract);
 
   /* Leave our temporary scope for the postcondition result.  */
   processing_postcondition = old_pc;
@@ -34493,6 +34508,22 @@ cp_parser_diagnostic_message (cp_parser *parser, bool *non_string_p)
    Returns the parsed message tree, or NULL_TREE if no comma follows or
    -fcontracts-p3099 is not active.  */
 
+static tree
+cp_parser_contract_message (cp_parser *parser)
+{
+  if (!flag_contracts_p3099
+      || !cp_lexer_next_token_is (parser->lexer, CPP_COMMA))
+    return NULL_TREE;
+
+  cp_lexer_consume_token (parser->lexer);
+  return cp_parser_diagnostic_message (parser);
+}
+
+/* Parse an optional assertion-control-specifier: < constant-expression >
+   Returns the parsed expression tree or NULL_TREE if no label present.
+   The < must be the next token; > is handled eagerly (as for template args).
+   Requires -fcontracts-p3400; without it, diagnoses and returns NULL_TREE.  */
+
 static cp_expr
 cp_parser_contract_result_name (cp_parser *parser, bool postcondition_p,
 				tree *attrs /* = NULL */)
@@ -34610,6 +34641,9 @@ cp_parser_contract_assert (cp_parser *parser, cp_token *token)
   cp_expr condition = cp_parser_conditional_expression (parser);
   cp_token *end = cp_lexer_peek_token (parser->lexer);
   char *comment = cp_parser_contract_comment (first, end, end->location);
+
+  tree message = cp_parser_contract_message (parser);
+
   gcc_checking_assert (scope_chain && scope_chain->bindings
 		       && scope_chain->bindings->kind == sk_contract);
   /* Build the contract.  */
