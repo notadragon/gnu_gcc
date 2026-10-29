@@ -862,6 +862,125 @@ fill_query_groups (contract_query *q, tree contract,
    Overload resolution does not depend on the semantic's value, so any one
    will do.  */
 
+static bool
+label_has_compute_semantic (tree label)
+{
+  return build_compute_semantic_call (label, CES_ENFORCE) != NULL_TREE;
+}
+
+/* Core of the compute_semantic P3400 facet: apply LABEL's compute_semantic to
+   SEM, if present.  Sets *IN_ALLOWED to whether the (possibly transformed)
+   result lies within ALLOWED_MASK.  Returns the raw computed value when the
+   facet is present, else SEM unchanged (with *IN_ALLOWED true).  */
+
+static uint16_t
+compute_semantic_core (tree label, uint16_t sem, uint16_t allowed_mask,
+		       bool *in_allowed, location_t loc)
+{
+  *in_allowed = true;
+  if (!label || label == error_mark_node)
+    return sem;
+  tree cs_result = call_label_method (label, sem, loc);
+  if (cs_result && TREE_CODE (cs_result) == INTEGER_CST)
+    {
+      /* A value that is not a semantic is never in the allowed set.  */
+      unsigned HOST_WIDE_INT computed
+	= tree_fits_uhwi_p (cs_result) ? tree_to_uhwi (cs_result) : 0;
+      *in_allowed = (computed > CES_INVALID && computed <= CES_LAST
+		     && (allowed_mask & (1 << computed)) != 0);
+      return *in_allowed ? (uint16_t) computed : sem;
+    }
+  return sem;
+}
+
+/* The contracts whose compute_semantic result has been diagnosed as outside
+   the allowed set.  The runtime and the constant-evaluation semantic are
+   resolved separately, and both can land on the same rejected result: the
+   assertion is diagnosed once.  */
+
+static GTY(()) hash_set<tree> *compute_semantic_diagnosed;
+
+/* Apply the compute_semantic P3400 facet of LABEL to SEM for the P3595
+   dynamic-dispatch path: when the compute_semantic result lands outside the
+   allowed set ALLOWED_MASK, return CES_INVALID (the sentinel that stage 2
+   turns into a runtime enforced violation) instead of issuing a
+   compile-time error.  */
+
+static uint16_t
+apply_compute_semantic_value (tree label, uint16_t sem, uint16_t allowed_mask,
+			      location_t loc)
+{
+  bool in_allowed;
+  uint16_t computed = compute_semantic_core (label, sem, allowed_mask,
+					     &in_allowed, loc);
+  return in_allowed ? computed : (uint16_t) CES_INVALID;
+}
+
+/* D4405: LABEL.analysis_semantic(), implicitly converted to
+   std::contracts::evaluation_semantic, or NULL_TREE if LABEL's type does not
+   model analysis_semantic_label: the member does not exist, cannot be called
+   without arguments, is inaccessible, or its result is not implicitly
+   convertible to evaluation_semantic.  */
+
+static void
+apply_compute_semantic_split (tree contract,
+			      contract_evaluation_semantic *runtime,
+			      contract_evaluation_semantic *analysis,
+			      uint16_t runtime_mask, uint16_t analysis_mask,
+			      bool in_ce, location_t loc)
+{
+  tree label = CONTRACT_LABEL (contract);
+  if (!label || label == error_mark_node)
+    return;
+  tree cs_result = call_label_method (label, *runtime, loc);
+  if (!cs_result || TREE_CODE (cs_result) != INTEGER_CST)
+    return;
+  unsigned HOST_WIDE_INT computed
+    = tree_fits_uhwi_p (cs_result) ? tree_to_uhwi (cs_result) : 0;
+  bool ok;
+  if (in_ce)
+    {
+      ok = (computed > CES_INVALID && computed <= CES_LAST
+	    && (runtime_mask & (1 << computed)) != 0);
+      if (ok)
+	*runtime = contract_constant_evaluation_semantic
+		     ((contract_evaluation_semantic) computed);
+    }
+  else if (computed == CES_PROVE || computed == CES_DIAGNOSE)
+    {
+      contract_evaluation_semantic a
+	= contract_analysis_stronger (*analysis,
+				      (contract_evaluation_semantic) computed);
+      ok = ((analysis_mask & (1 << a)) != 0
+	    && (runtime_mask & (1 << CES_IGNORE)) != 0);
+      if (ok)
+	{
+	  *analysis = a;
+	  *runtime = CES_IGNORE;
+	}
+    }
+  else
+    {
+      /* A value that is not a semantic is never in the allowed set.  */
+      ok = (computed > CES_INVALID && computed <= CES_LAST
+	    && (runtime_mask & (1 << computed)) != 0);
+      if (ok)
+	*runtime = (contract_evaluation_semantic) computed;
+    }
+  if (ok)
+    return;
+  if (!compute_semantic_diagnosed)
+    compute_semantic_diagnosed = hash_set<tree>::create_ggc (8);
+  if (!compute_semantic_diagnosed->add (contract))
+    error_at (loc, "%<compute_semantic%> result is not in the "
+	      "allowed evaluation semantics");
+}
+
+/* D4405: the runtime callee-side semantic slot holds the runtime semantic in
+   its low byte and the semantic of the analysis evaluation above it.  A slot
+   written with a bare semantic (a non-virtual wrapper's copy, holding the
+   caller-side semantic) has an analysis of 0, read as ignore.  */
+
 static tree
 build_contract_semantic_slot (contract_evaluation_semantic runtime,
 			      contract_evaluation_semantic analysis)
