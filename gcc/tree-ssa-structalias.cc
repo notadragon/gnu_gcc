@@ -361,6 +361,25 @@ fndecl_maybe_in_other_partition (tree fndecl)
   return fn_node->in_other_partition;
 }
 
+/* Return true if IPA points-to analysis must model a direct call from
+   CALLER to FNDECL as a call to an unknown function: the body of FNDECL
+   it sees need not be the one the call executes, because the symbol may
+   be interposed (a weak definition, or semantic interposition), or the
+   body must not be used for interprocedural analysis (attribute noipa).
+   The body itself is still analyzed.  */
+
+bool
+fndecl_call_interposable_p (tree caller, tree fndecl)
+{
+  cgraph_node *node = cgraph_node::get (fndecl);
+  if (node == NULL)
+    return false;
+
+  enum availability avail;
+  node->function_symbol (&avail, cgraph_node::get (caller));
+  return avail <= AVAIL_INTERPOSABLE;
+}
+
 /* Return a new variable info structure consisting for a variable
    named NAME, and using constraint graph node NODE.  Append it
    to the vector of variable info structures.  */
@@ -1965,7 +1984,7 @@ ipa_pta_execute (void)
 	}
 
       /* Compute the call-use and call-clobber sets for indirect calls
-	 and calls to external functions.  */
+	 and calls to external and interposable functions.  */
       FOR_EACH_BB_FN (bb, fn)
 	{
 	  gimple_stmt_iterator gsi;
@@ -1981,7 +2000,8 @@ ipa_pta_execute (void)
 	      if (!stmt)
 		continue;
 
-	      /* Handle direct calls to functions with body.  */
+	      /* Handle direct calls to functions with body that cannot be
+		 interposed.  */
 	      decl = gimple_call_fndecl (stmt);
 
 	      {
@@ -1998,7 +2018,8 @@ ipa_pta_execute (void)
 
 	      if (decl
 		  && (fi = lookup_vi_for_tree (decl))
-		  && fi->is_fn_info)
+		  && fi->is_fn_info
+		  && !fndecl_call_interposable_p (node->decl, decl))
 		{
 		  *gimple_call_clobber_set (stmt)
 		     = find_what_var_points_to
@@ -2007,7 +2028,8 @@ ipa_pta_execute (void)
 		     = find_what_var_points_to
 			 (node->decl, first_vi_for_offset (fi, fi_uses));
 		}
-	      /* Handle direct calls to external functions.  */
+	      /* Handle direct calls to external and interposable
+		 functions.  */
 	      else if (decl && (!fi || fi->decl))
 		{
 		  pt = gimple_call_use_set (stmt);

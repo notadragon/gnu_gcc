@@ -212,6 +212,7 @@ varinfo_t first_or_preceding_vi_for_offset (varinfo_t start,
 					    unsigned HOST_WIDE_INT offset);
 void determine_global_memory_access (gcall *, bool *, bool *, bool *);
 bool fndecl_maybe_in_other_partition (tree);
+bool fndecl_call_interposable_p (tree, tree);
 varinfo_t new_var_info (tree t, const char *name, bool add_id);
 void dump_constraint (FILE *file, constraint_t c);
 void dump_constraints (FILE *file, int from);
