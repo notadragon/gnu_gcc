@@ -1162,6 +1162,8 @@ c_cpp_builtins (cpp_reader *pfile)
 	cpp_define (pfile, "__cpp_contracts_labels=202610L");
       if (flag_contracts && flag_contracts_p3098)
 	cpp_define (pfile, "__cpp_contracts_postcondition_captures=202610L");
+      if (flag_contracts && flag_contracts_p4283)
+	cpp_define (pfile, "__cpp_contracts_requires=202610L");
       if (flag_modules)
 	/* The std-defined value is 201907L, but I don't think we can
 	   claim victory yet.  201810 is the p1103 date. */
