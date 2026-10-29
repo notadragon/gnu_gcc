@@ -226,6 +226,7 @@ in the following sections.
 -fcontract-checks-outlined
 -fcontract-evaluation-semantic=@r{[}ignore@r{|}observe@r{|}enforce@r{|}quick_enforce@r{]}
 -fcontract-disable-optimized-checks
+-fno-contract-bypass-rethrowing-local-handler
 -fcontract-comment-from-expression
 -fcontracts-client-check=@r{[}none@r{|}pre@r{|}all@r{]}
 -fcontracts-definition-check=@r{[}on@r{|}off@r{]}
@@ -3405,6 +3406,15 @@ the checking and the remainder of the function body.
 When @code{pre} and @code{post} condition checks are outlined (using
 @option{-fcontract-checks-outlined}), this option disables the optimisation 
 steps for those functions which can avoid unwanted elision of checking steps.
+
+@opindex fcontract-bypass-rethrowing-local-handler
+@opindex fno-contract-bypass-rethrowing-local-handler
+@item -fno-contract-bypass-rethrowing-local-handler
+Where an assertion-control label's local violation handler (P3400) answers
+a violation caused by an exception from the predicate by rethrowing it, the
+exception is by default allowed to propagate directly, without being caught
+to reach that handler; a predicate that is merely false still reaches the
+handler.  This option catches the exception and calls the handler anyway.
 
 @opindex fcontract-comment-from-expression
 @opindex fno-contract-comment-from-expression
