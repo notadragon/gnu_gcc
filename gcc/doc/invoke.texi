@@ -3466,6 +3466,9 @@ does not enable @option{-fcontracts-p4299}, contracts for C
 (@pxref{C Dialect Options}).  This option and each of the options below
 also enable @option{-fcontracts}, in any C++ dialect.
 
+@opindex fcontracts-p3097
+@opindex fno-contracts-p3097
+@item -fcontracts-p3097
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines
