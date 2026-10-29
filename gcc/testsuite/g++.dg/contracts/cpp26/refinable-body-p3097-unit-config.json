@@ -1,0 +1,5 @@
+[
+  {"match": {"location": "refinable-body-p3097-unit-config-k.cc:7", "caller": false}, "output": {"semantic": "enforce"}},
+  {"match": {"location": "refinable-body-p3097-unit-config-k.cc:8", "caller": false}, "output": {"semantic": "enforce"}},
+  {"match": {"caller": false}, "output": {"semantic": "ignore"}}
+]

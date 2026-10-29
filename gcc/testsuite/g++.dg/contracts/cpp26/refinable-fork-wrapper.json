@@ -1,0 +1,7 @@
+[
+  {"match": {"caller": {"location": "refinable-fork-wrapper-u.cc:16"}}, "output": {"semantic": "enforce"}},
+  {"match": {"location": "refinable-fork-wrapper-u.cc:10", "caller": false}, "output": {"semantic": "enforce"}},
+  {"match": {"location": "refinable-fork-wrapper-k.cc:6", "caller": false}, "output": {"semantic": "ignore"}},
+  {"match": {"location": "refinable-fork-wrapper-k.cc:10", "caller": false}, "output": {"semantic": "ignore"}},
+  {"match": {"caller": false}, "output": {"semantic": "enforce"}}
+]

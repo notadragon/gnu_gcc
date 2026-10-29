@@ -1,0 +1,13 @@
+[
+  {"match": {"location": "refinable-fork-label-u.cc:24"}, "output": {"semantic": "enforce"}},
+  {"match": {"location": "refinable-fork-label-u.cc:31"}, "output": {"semantic": "quick_enforce"}},
+  {"match": {"location": "refinable-fork-label-u.cc:38"}, "output": {"semantic": "quick_enforce"}},
+  {"match": {"location": "refinable-fork-label-u.cc:45"}, "output": {"semantic": "quick_enforce"}},
+  {"match": {"location": "refinable-fork-label-u.cc:52"}, "output": {"semantic": "enforce"}},
+  {"match": {"location": "refinable-fork-label-k.cc:24"}, "output": {"semantic": "observe"}},
+  {"match": {"location": "refinable-fork-label-k.cc:31"}, "output": {"semantic": "enforce"}},
+  {"match": {"location": "refinable-fork-label-k.cc:38"}, "output": {"semantic": "noexcept_enforce"}},
+  {"match": {"location": "refinable-fork-label-k.cc:45"}, "output": {"semantic": "enforce"}},
+  {"match": {"location": "refinable-fork-label-k.cc:52"}, "output": {"semantic": "enforce"}},
+  {"match": {"caller": false}, "output": {"semantic": "enforce"}}
+]
