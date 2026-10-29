@@ -419,6 +419,8 @@ extern tree build_implicit_divide_overflow_check
   (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
 extern tree build_implicit_float_cast_check
   (tree, location_t, contract_evaluation_semantic, tree, tree);
+extern tree build_implicit_enum_cast_check
+  (tree, location_t, contract_evaluation_semantic, tree, tree, tree);
 extern tree build_implicit_pure_virtual_direct_check
   (location_t, tree);
 extern tree build_implicit_pure_virtual_terminus (tree);
