@@ -21072,13 +21072,25 @@ finish_function (bool inline_p)
       && !DECL_OMP_DECLARE_REDUCTION_P (fndecl))
     cp_genericize (fndecl);
 
+  /* The evaluation semantic of a contract assertion can differ between
+     translation units ([basic.contract.eval]), so another definition of a
+     function with contract assertions may behave differently from this
+     one.  Mark its body as refinable: calls that do not inline it must not
+     rely on what it does.  cp_genericize marked a function whose body
+     holds a contract check; this covers precondition and postcondition
+     specifiers that are not evaluated in this translation unit.  */
+  if (!processing_template_decl
+      && DECL_HAS_CONTRACTS_P (fndecl))
+    mark_refinable_body (fndecl);
+
   /* If this function can't throw any exceptions, remember that.  */
   if (!processing_template_decl
       && !cp_function_chain->can_throw
       && !flag_non_call_exceptions
       && !decl_replaceable_p (fndecl,
 			      opt_for_fn (fndecl, flag_semantic_interposition))
-      && !lookup_attribute ("noipa", DECL_ATTRIBUTES (fndecl)))
+      && !lookup_attribute ("noipa", DECL_ATTRIBUTES (fndecl))
+      && !refinable_body_p (fndecl))
     TREE_NOTHROW (fndecl) = 1;
 
  cleanup:

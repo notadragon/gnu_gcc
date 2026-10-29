@@ -223,8 +223,8 @@ in the following sections.
 -fconstexpr-depth=@var{n}  -fconstexpr-cache-depth=@var{n}
 -fconstexpr-loop-limit=@var{n}  -fconstexpr-ops-limit=@var{n}
 -fcontracts
+-fcontract-checks-outlined
 -fcontract-evaluation-semantic=@r{[}ignore@r{|}observe@r{|}enforce@r{|}quick_enforce@r{]}
--fcontracts-conservative-ipa  -fcontract-checks-outlined
 -fcontract-disable-optimized-checks
 -fcontracts-client-check=@r{[}none@r{|}pre@r{|}all@r{]}
 -fcontracts-definition-check=@r{[}on@r{|}off@r{]}
@@ -3378,14 +3378,6 @@ an error will be emitted.
 fails, the execution is terminated immediately (without calling any handler).
 At compile-time there is no difference in behaviour between this option and
 the @code{enforce} case, since no handler is invoked at compile time.
-
-@opindex fcontracts-conservative-ipa
-@opindex fno-contracts-conservative-ipa
-@item -fcontracts-conservative-ipa
-This prevents inter-procedural analysis from taking action when the body
-of an inline function is visible in a given TU.  This allows for the case
-that contract evaluation conditions are permitted to differ between TUs which
-means that such actions would be potentially incorrect.
 
 @opindex fcontract-checks-outlined
 @opindex fno-contract-checks-outlined

@@ -1843,6 +1843,31 @@ static tree genericize_spaceship (tree expr)
   return genericize_spaceship (input_location, type, op0, op1);
 }
 
+/* If FN is a contract wrapper, which evaluates the contract assertions of
+   the function it wraps for its caller, the function being genericized
+   holds those evaluations: mark it as a refinable body, as for a contract
+   assertion in its body (see the ASSERTION_STMT case of cp_genericize_r).
+   The wrapper is internal, so marking it alone would leave callers of an
+   inline function that calls it out of line using facts from this
+   translation unit's evaluations.
+
+   Not covered: whether a call is checked on the caller's side is decided
+   by each translation unit, so a function compiled where its calls are not
+   (no wrapper) is not marked, although another unit's definition of it, if
+   it is inline, may check them there and call a violation handler that
+   throws or writes memory; callers of this unit's definition may then use
+   facts (nothrow, pure) from a body that does not do so.  Caller-side
+   checking is taken to be configured alike in every unit that defines the
+   same inline function.  */
+
+static void
+mark_contract_wrapper_caller (tree fn)
+{
+  if (!fn || !DECL_IS_WRAPPER_FN_P (fn))
+    return;
+  mark_refinable_body (current_function_decl);
+}
+
 /* If EXPR involves an anonymous VLA type, prepend a DECL_EXPR for that type
    to trigger gimplify_type_sizes; otherwise a cast to pointer-to-VLA confuses
    the middle-end (c++/88256).  If EXPR is a DECL, use add_stmt and return
@@ -2222,6 +2247,10 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 	gcc_checking_assert (seen_error ());
       else if (tree check = build_contract_check (stmt))
 	{
+	  /* Whatever this translation unit's evaluation semantic, another
+	     definition of the function may evaluate the assertion
+	     differently; see finish_function.  */
+	  mark_refinable_body (current_function_decl);
 	  *stmt_p = check;
 	  return cp_genericize_r (stmt_p, walk_subtrees, data);
 	}
@@ -2507,6 +2536,7 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 	 This is done at multiple_target.cc for target_version semantics.  */
       {
 	tree fn = cp_get_callee_fndecl_nofold (stmt);
+	mark_contract_wrapper_caller (fn);
 	if (TARGET_HAS_FMV_TARGET_ATTRIBUTE
 	    && fn
 	    && DECL_FUNCTION_VERSIONED (fn)
