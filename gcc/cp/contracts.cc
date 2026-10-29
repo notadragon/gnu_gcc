@@ -850,7 +850,175 @@ resolve_implicit_contract_semantic (tree fndecl, location_t loc,
    dereference has no defined lvalue (ignore = raw operation).  COMMENT is the
    contract_violation comment for the reported violation.  */
 
+static char *read_constant_char_array (tree);
+
+/* Lazily extract group names from the label's group_names static constexpr
+   member and cache as a TREE_LIST of STRING_CSTs in CONTRACT_GROUPS.
+   Uses error_mark_node as sentinel for "checked, no groups".  */
+
+static void
+ensure_contract_groups (tree contract)
+{
+  if (CONTRACT_GROUPS (contract) != NULL_TREE)
+    return;
+
+  tree label = CONTRACT_LABEL (contract);
+  if (!label || label == error_mark_node
+      || !TREE_TYPE (label)
+      || !CLASS_TYPE_P (TREE_TYPE (label)))
+    {
+      CONTRACT_GROUPS (contract) = error_mark_node;
+      return;
     }
+
+  tree label_type = TREE_TYPE (label);
+  tree gn_member = lookup_member (label_type,
+				  get_identifier ("group_names"),
+				  /*protect=*/0, /*want_type=*/false,
+				  tf_none);
+  /* The concept requires `__is_const (decltype (t.group_names))'.  A
+     `static constexpr' member is const-qualified already, and so is an array
+     of const elements; a non-const member is not a facet.  P3400 requires
+     const so that nothing implies a label's group membership could change at
+     run time and have an effect -- nothing reads it after translation.  */
+  tree gn_decl = (gn_member && gn_member != error_mark_node
+		  && BASELINK_P (gn_member)
+		  ? BASELINK_FUNCTIONS (gn_member) : gn_member);
+  if (!gn_member || gn_member == error_mark_node
+      || !label_facet_accessible_p (label_type, gn_member)
+      || !gn_decl || !DECL_P (gn_decl)
+      || !CP_TYPE_CONST_P (TREE_TYPE (gn_decl)))
+    {
+      CONTRACT_GROUPS (contract) = error_mark_node;
+      return;
+    }
+
+  tree gn_val = finish_class_member_access_expr
+    (label, get_identifier ("group_names"), false, tf_none);
+  if (!gn_val || gn_val == error_mark_node)
+    {
+      CONTRACT_GROUPS (contract) = error_mark_node;
+      return;
+    }
+
+  /* Read the names as the concept does ([support.contract.control.ident]):
+     group_names[i] converted to const char*, for each of the
+     sizeof (group_names) / sizeof (group_names[0]) elements -- an array of
+     strings, of pointers to strings, or a std::array of either.  */
+  location_t loc = EXPR_LOC_OR_LOC (label, input_location);
+  tree elt0 = grok_array_decl (loc, gn_val, size_zero_node, NULL, tf_none);
+  if (!elt0 || elt0 == error_mark_node)
+    {
+      CONTRACT_GROUPS (contract) = error_mark_node;
+      return;
+    }
+  tree total = cxx_sizeof_or_alignof_type (loc, TREE_TYPE (gn_val),
+					   SIZEOF_EXPR, false, false);
+  tree each = cxx_sizeof_or_alignof_type (loc, TREE_TYPE (elt0),
+					  SIZEOF_EXPR, false, false);
+  if (!tree_fits_uhwi_p (total) || !tree_fits_uhwi_p (each)
+      || integer_zerop (each))
+    {
+      CONTRACT_GROUPS (contract) = error_mark_node;
+      return;
+    }
+  unsigned HOST_WIDE_INT count = tree_to_uhwi (total) / tree_to_uhwi (each);
+
+  tree groups_list = NULL_TREE;
+  for (unsigned HOST_WIDE_INT i = 0; i < count; ++i)
+    {
+      tree elt = grok_array_decl (loc, gn_val, size_int (i), NULL, tf_none);
+      if (elt == error_mark_node)
+	continue;
+      tree conv = perform_implicit_conversion (const_string_type_node,
+					       unshare_expr (elt), tf_none);
+      if (conv == error_mark_node)
+	continue;
+      tree ptr = cxx_constant_value (conv, NULL_TREE, tf_none);
+      const char *str = (ptr && ptr != error_mark_node
+			 ? c_getstr (ptr) : NULL);
+      /* A pointer into a character array inside a constant object -- the
+	 library's own "name"group label keeps its names so -- is more than
+	 c_getstr reads; read the array's value instead.  */
+      char *buf = NULL;
+      if (!str && TREE_CODE (TREE_TYPE (elt)) == ARRAY_TYPE)
+	{
+	  tree val = cxx_constant_value (elt, NULL_TREE, tf_none);
+	  if (val && TREE_CODE (val) == STRING_CST)
+	    str = TREE_STRING_POINTER (val);
+	  else if (val && TREE_CODE (val) == CONSTRUCTOR)
+	    {
+	      buf = read_constant_char_array (val);
+	      str = buf;
+	    }
+	}
+      if (str && str[0] != '\0')
+	groups_list = tree_cons (NULL_TREE,
+				 build_string (strlen (str) + 1, str),
+				 groups_list);
+      XDELETEVEC (buf);
+    }
+
+  CONTRACT_GROUPS (contract) = groups_list
+    ? nreverse (groups_list) : error_mark_node;
+}
+
+/* VAL is the constant value of a character array, a CONSTRUCTOR.  Return
+   its contents as a NUL-terminated string allocated with XNEWVEC, or NULL
+   if an element is not a byte we can read.  Elements the CONSTRUCTOR omits
+   are zero; its elements may be indexed or ranges, and a run of them may be
+   a single RAW_DATA_CST.  */
+
+static char *
+read_constant_char_array (tree val)
+{
+  tree type = TREE_TYPE (val);
+  tree domain = TYPE_DOMAIN (type);
+  if (!domain || !tree_fits_uhwi_p (TYPE_MAX_VALUE (domain)))
+    return NULL;
+  unsigned HOST_WIDE_INT len = tree_to_uhwi (TYPE_MAX_VALUE (domain)) + 1;
+  char *buf = XCNEWVEC (char, len + 1);
+  unsigned HOST_WIDE_INT pos = 0;
+  unsigned k;
+  tree idx, ch;
+  FOR_EACH_CONSTRUCTOR_ELT (CONSTRUCTOR_ELTS (val), k, idx, ch)
+    {
+      unsigned HOST_WIDE_INT lo = pos, hi = pos;
+      if (idx && TREE_CODE (idx) == RANGE_EXPR)
+	{
+	  if (!tree_fits_uhwi_p (TREE_OPERAND (idx, 0))
+	      || !tree_fits_uhwi_p (TREE_OPERAND (idx, 1)))
+	    goto fail;
+	  lo = tree_to_uhwi (TREE_OPERAND (idx, 0));
+	  hi = tree_to_uhwi (TREE_OPERAND (idx, 1));
+	}
+      else if (idx)
+	{
+	  if (!tree_fits_uhwi_p (idx))
+	    goto fail;
+	  lo = hi = tree_to_uhwi (idx);
+	}
+      if (TREE_CODE (ch) == RAW_DATA_CST)
+	{
+	  unsigned HOST_WIDE_INT n = RAW_DATA_LENGTH (ch);
+	  if (lo != hi || lo + n > len)
+	    goto fail;
+	  memcpy (buf + lo, RAW_DATA_POINTER (ch), n);
+	  pos = lo + n;
+	  continue;
+	}
+      if (TREE_CODE (ch) != INTEGER_CST || hi >= len || lo > hi)
+	goto fail;
+      for (unsigned HOST_WIDE_INT p = lo; p <= hi; ++p)
+	buf[p] = (char) TREE_INT_CST_LOW (ch);
+      pos = hi + 1;
+    }
+  return buf;
+
+ fail:
+  XDELETEVEC (buf);
+  return NULL;
+}
 
 /* Populate the groups vec from the contract's cached group names.  */
 
@@ -1190,7 +1358,6 @@ contract_constexpr_terminating_p (const_tree contract)
 {
   contract_evaluation_semantic s = get_constexpr_evaluation_semantic (contract);
   return s == CES_ENFORCE || s == CES_QUICK || s == CES_NOEXCEPT_ENFORCE;
-  gcc_unreachable ();
 }
 
 /* Get location of the last contract in CONTRACTS.  */
