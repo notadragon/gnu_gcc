@@ -49,6 +49,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "builtins.h"
 #include "internal-fn.h"
 #include "ipa-utils.h"
+#include "ubsan.h"
 
 /* Broad overview of how alias analysis on gimple works:
 
@@ -3129,12 +3130,16 @@ call_may_clobber_ref_p_1 (gcall *call, ao_ref *ref, bool tbaa_p)
 	/* Treat these internal calls like ECF_PURE for aliasing,
 	   they don't write to any memory the program should care about.
 	   They have important other side-effects, and read memory,
-	   so can't be ECF_NOVOPS.  */
+	   so can't be ECF_NOVOPS.  P3100: unless a failed check calls the
+	   contract-violation handler, which is user code, and returns.  */
       case IFN_UBSAN_NULL:
       case IFN_UBSAN_BOUNDS:
       case IFN_UBSAN_VPTR:
       case IFN_UBSAN_OBJECT_SIZE:
       case IFN_UBSAN_PTR:
+	if (ubsan_ifn_may_call_handler_p (call))
+	  break;
+	return false;
       case IFN_ASAN_CHECK:
 	return false;
       case IFN_MASK_STORE:

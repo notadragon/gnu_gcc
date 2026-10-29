@@ -1602,7 +1602,13 @@ gimple_call_flags (const gimple *stmt)
   int flags = 0;
 
   if (gimple_call_internal_p (stmt))
-    flags = internal_fn_flags (gimple_call_internal_fn (stmt));
+    {
+      flags = internal_fn_flags (gimple_call_internal_fn (stmt));
+      /* P3100: a signed-overflow check routed to the contract-violation
+	 handler may call user code.  */
+      if ((flags & ECF_CONST) && ubsan_check_ifn_may_call_handler_p (stmt))
+	flags &= ~(ECF_CONST | ECF_LEAF);
+    }
   else
     {
       tree decl = gimple_call_fndecl (stmt);

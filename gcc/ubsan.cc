@@ -52,6 +52,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "realmpfr.h"
 #include "target.h"
 #include "langhooks.h"
+#include "opts.h"
+#include "c-family/contracts-config.h"
 
 /* Map from a tree to a VAR_DECL tree.  */
 
@@ -891,6 +893,209 @@ build_implicit_ub_reaction_call (tree fndecl, location_t loc,
 
 /* P3100: true if a sanitizer of BITS is enabled and routed to the
    contract-violation handler with a semantic that calls it.  */
+
+static bool
+ubsan_routed_to_handler_p (sanitize_code_type bits)
+{
+  while (bits)
+    {
+      sanitize_code_type bit = bits & -bits;
+      bits &= ~bit;
+      if (!(flag_sanitize & bit))
+	continue;
+      enum contract_evaluation_semantic sem
+	= (flag_contracts_p3100 ? resolved_sanitizer_semantic (bit)
+	   : explicit_sanitizer_semantic (bit));
+      if (sem == CES_NOEXCEPT_OBSERVE || sem == CES_NOEXCEPT_ENFORCE)
+	return true;
+    }
+  return false;
+}
+
+/* P3100: true if the internal call STMT, a sanitizer check, may call the
+   contract-violation handler, which is user code, and return: a check with
+   an implicit contract assertion's handler reaction (IFN_UBSAN_NULL's
+   handler-entry operands), or a check of a sanitizer routed to the handler
+   with a semantic that calls it.  Such a call may clobber memory (see
+   call_may_clobber_ref_p_1): the handler may change any object of the
+   program, and code after the check must see it.  */
+
+bool
+ubsan_ifn_may_call_handler_p (const gimple *stmt)
+{
+  sanitize_code_type bits;
+  switch (gimple_call_internal_fn (stmt))
+    {
+    case IFN_UBSAN_NULL:
+      /* The operands are null while the call is being built.  */
+      if (gimple_call_num_args (stmt) == UBSAN_NULL_NUM_OPS)
+	{
+	  tree entry = gimple_call_arg (stmt, UBSAN_NULL_ENTRY);
+	  tree align_entry = gimple_call_arg (stmt, UBSAN_NULL_ALIGN_ENTRY);
+	  if ((entry && !integer_zerop (entry))
+	      || (align_entry && !integer_zerop (align_entry)))
+	    return true;
+	}
+      bits = SANITIZE_NULL | SANITIZE_ALIGNMENT;
+      break;
+    case IFN_UBSAN_BOUNDS:
+      bits = SANITIZE_BOUNDS | SANITIZE_BOUNDS_STRICT;
+      break;
+    case IFN_UBSAN_VPTR:
+      bits = SANITIZE_VPTR;
+      break;
+    case IFN_UBSAN_PTR:
+      bits = SANITIZE_POINTER_OVERFLOW;
+      break;
+    case IFN_UBSAN_OBJECT_SIZE:
+      bits = SANITIZE_OBJECT_SIZE;
+      break;
+    default:
+      return false;
+    }
+  return ubsan_routed_to_handler_p (bits);
+}
+
+/* P3100: true if FNDECL is a sanitizer runtime entry, a __ubsan_handle_*
+   built-in, that may call the contract-violation handler, which is user
+   code, and return: its sanitizer is routed to the handler with a
+   semantic that calls it.  The built-ins are declared leaf (they do not
+   call back into the translation unit), so a call is taken to read and
+   write none of the unit's objects; routed, it is not a leaf call
+   (flags_from_decl_or_type), and the code after a check that reports and
+   continues sees what the handler did.  GCC-858.  */
+
+bool
+ubsan_builtin_may_call_handler_p (const_tree fndecl)
+{
+  if (!fndecl_built_in_p (fndecl, BUILT_IN_NORMAL))
+    return false;
+  sanitize_code_type bits;
+  switch (DECL_FUNCTION_CODE (fndecl))
+    {
+    case BUILT_IN_UBSAN_HANDLE_DIVREM_OVERFLOW:
+    case BUILT_IN_UBSAN_HANDLE_DIVREM_OVERFLOW_ABORT:
+      bits = SANITIZE_DIVIDE | SANITIZE_FLOAT_DIVIDE | SANITIZE_SI_OVERFLOW;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_SHIFT_OUT_OF_BOUNDS:
+    case BUILT_IN_UBSAN_HANDLE_SHIFT_OUT_OF_BOUNDS_ABORT:
+      bits = SANITIZE_SHIFT_BASE | SANITIZE_SHIFT_EXPONENT;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_BUILTIN_UNREACHABLE:
+      bits = SANITIZE_UNREACHABLE;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_MISSING_RETURN:
+      bits = SANITIZE_RETURN;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_VLA_BOUND_NOT_POSITIVE:
+    case BUILT_IN_UBSAN_HANDLE_VLA_BOUND_NOT_POSITIVE_ABORT:
+      bits = SANITIZE_VLA;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_TYPE_MISMATCH_V1:
+    case BUILT_IN_UBSAN_HANDLE_TYPE_MISMATCH_V1_ABORT:
+      bits = SANITIZE_NULL | SANITIZE_ALIGNMENT | SANITIZE_OBJECT_SIZE;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_ADD_OVERFLOW:
+    case BUILT_IN_UBSAN_HANDLE_ADD_OVERFLOW_ABORT:
+    case BUILT_IN_UBSAN_HANDLE_SUB_OVERFLOW:
+    case BUILT_IN_UBSAN_HANDLE_SUB_OVERFLOW_ABORT:
+    case BUILT_IN_UBSAN_HANDLE_MUL_OVERFLOW:
+    case BUILT_IN_UBSAN_HANDLE_MUL_OVERFLOW_ABORT:
+    case BUILT_IN_UBSAN_HANDLE_NEGATE_OVERFLOW:
+    case BUILT_IN_UBSAN_HANDLE_NEGATE_OVERFLOW_ABORT:
+      bits = SANITIZE_SI_OVERFLOW;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_LOAD_INVALID_VALUE:
+    case BUILT_IN_UBSAN_HANDLE_LOAD_INVALID_VALUE_ABORT:
+      bits = SANITIZE_BOOL | SANITIZE_ENUM;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_POINTER_OVERFLOW:
+    case BUILT_IN_UBSAN_HANDLE_POINTER_OVERFLOW_ABORT:
+      bits = SANITIZE_POINTER_OVERFLOW;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_FLOAT_CAST_OVERFLOW:
+    case BUILT_IN_UBSAN_HANDLE_FLOAT_CAST_OVERFLOW_ABORT:
+      bits = SANITIZE_FLOAT_CAST;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_OUT_OF_BOUNDS:
+    case BUILT_IN_UBSAN_HANDLE_OUT_OF_BOUNDS_ABORT:
+      bits = SANITIZE_BOUNDS | SANITIZE_BOUNDS_STRICT;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_NONNULL_ARG:
+    case BUILT_IN_UBSAN_HANDLE_NONNULL_ARG_ABORT:
+      bits = SANITIZE_NONNULL_ATTRIBUTE;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_NONNULL_RETURN_V1:
+    case BUILT_IN_UBSAN_HANDLE_NONNULL_RETURN_V1_ABORT:
+      bits = SANITIZE_RETURNS_NONNULL_ATTRIBUTE;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_INVALID_BUILTIN:
+    case BUILT_IN_UBSAN_HANDLE_INVALID_BUILTIN_ABORT:
+      bits = SANITIZE_BUILTIN;
+      break;
+    case BUILT_IN_UBSAN_HANDLE_DYNAMIC_TYPE_CACHE_MISS:
+    case BUILT_IN_UBSAN_HANDLE_DYNAMIC_TYPE_CACHE_MISS_ABORT:
+      bits = SANITIZE_VPTR;
+      break;
+    default:
+      return false;
+    }
+  return ubsan_routed_to_handler_p (bits);
+}
+
+/* P3100: true if the internal call STMT, a signed-overflow check
+   (IFN_UBSAN_CHECK_ADD, _SUB, _MUL, which RTL expansion turns into the
+   arithmetic and a call of a __ubsan_handle_* function), may call the
+   contract-violation handler: -fsanitize=signed-integer-overflow is routed
+   to the handler with a semantic that calls it.  The functions are const
+   and leaf (internal-fn.def); such a call is neither (gimple_call_flags),
+   so that it is not removed when its value is unused and the code after
+   it sees what the handler did.  GCC-858.  */
+
+bool
+ubsan_check_ifn_may_call_handler_p (const gimple *stmt)
+{
+  switch (gimple_call_internal_fn (stmt))
+    {
+    case IFN_UBSAN_CHECK_ADD:
+    case IFN_UBSAN_CHECK_SUB:
+    case IFN_UBSAN_CHECK_MUL:
+      return ubsan_routed_to_handler_p (SANITIZE_SI_OVERFLOW);
+    default:
+      return false;
+    }
+}
+
+/* P3100: true if NODE's body may hold a sanitizer check that calls the
+   contract-violation handler (ubsan_ifn_may_call_handler_p): it takes the
+   address of a handler entry point, the operand of an implicit contract
+   assertion's IFN_UBSAN_NULL, or a sanitizer whose checks are internal
+   calls is routed to the handler.  Such a check is a call of user code
+   that has no call graph edge until sanopt expands it, so the
+   interprocedural analyses must take the function to read and write any
+   object, as they take a call of an unknown function (ipa-reference).
+   Only the references are looked at, as the body is not available when
+   linking with -flto.  GCC-857.  The signed-overflow checks are
+   IFN_UBSAN_CHECK_* internal calls too (GCC-858).  */
+
+bool
+ubsan_node_may_call_handler_p (cgraph_node *node)
+{
+  if (ubsan_routed_to_handler_p (SANITIZE_NULL | SANITIZE_ALIGNMENT
+				 | SANITIZE_BOUNDS | SANITIZE_BOUNDS_STRICT
+				 | SANITIZE_VPTR | SANITIZE_POINTER_OVERFLOW
+				 | SANITIZE_OBJECT_SIZE | SANITIZE_SI_OVERFLOW))
+    return true;
+  ipa_ref *ref = NULL;
+  for (unsigned i = 0; node->iterate_reference (i, ref); i++)
+    if (ref->use == IPA_REF_ADDR
+	&& is_a <cgraph_node *> (ref->referred)
+	&& DECL_NAME (ref->referred->decl)
+	&& startswith (IDENTIFIER_POINTER (DECL_NAME (ref->referred->decl)),
+		       "__cxa_contract_violation_"))
+      return true;
+  return false;
+}
 
 /* Expand UBSAN_NULL internal call.  The type is kept on the ckind
    argument which is a constant, because the middle-end treats pointer
