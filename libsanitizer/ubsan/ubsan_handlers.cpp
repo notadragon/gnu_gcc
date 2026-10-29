@@ -34,6 +34,11 @@ bool ignoreReport(SourceLocation SLoc, ReportOptions Opts, ErrorType ET) {
   // thread could have acquired it, but not yet printed the report.
   if (Opts.FromUnrecoverableHandler)
     return false;
+  // A report routed to the contract-violation handler is never skipped: the
+  // semantic alone decides what happens to it (as ASan drops its per-PC dedup
+  // when routed).
+  if (IsContractRouted(ET))
+    return false;
   return SLoc.isDisabled() || IsPCSuppressed(ET, Opts.pc, SLoc.getFilename());
 }
 
