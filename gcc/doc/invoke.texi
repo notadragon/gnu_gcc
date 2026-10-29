@@ -225,8 +225,8 @@ in the following sections.
 -fconstexpr-loop-limit=@var{n}  -fconstexpr-ops-limit=@var{n}
 -fcontracts
 -fcontract-analysis-semantic=@r{[}ignore@r{|}diagnose@r{|}prove@r{]}
+-fcontract-evaluation-semantic=@r{[}ignore@r{|}observe@r{|}enforce@r{|}quick_enforce@r{|}assume@r{|}noexcept_enforce@r{|}noexcept_observe@r{|}prove@r{|}diagnose@r{]}
 -fcontract-checks-outlined
--fcontract-evaluation-semantic=@r{[}ignore@r{|}observe@r{|}enforce@r{|}quick_enforce@r{]}
 -fcontract-disable-optimized-checks
 -fno-contract-bypass-rethrowing-local-handler
 -fcontract-comment-from-expression
@@ -235,6 +235,11 @@ in the following sections.
 -fcontract-group-evaluation-semantic=@var{group}:@var{semantic}@r{[},@dots{}@r{]}
 -fcontract-configuration=@var{json}  -fcontract-configuration-file=@var{file}
 -fcontracts-allow-assume
+-fcontracts-p3097  -fcontracts-p3098  -fcontracts-p3099  -fcontracts-p3100
+-fcontracts-p3290  -fcontracts-p3400  -fcontracts-p3850  -fcontracts-p4283
+-fcontracts-p4298  -fcontracts-p4301  -fcontracts-p4405
+-fcontracts-prove-assume  -fcontracts-prove-fold  -fcontracts-prove-override
+-fcontracts-prove-shadow
 -fcoroutines  -fdiagnostics-all-candidates
 -fno-elide-constructors
 -fno-enforce-eh-specs
@@ -395,6 +400,8 @@ Objective-C and Objective-C++ Dialects}.
 -Wclobbered  -Wcomment
 -Wcompare-distinct-pointer-types
 -Wno-complain-wrong-lang  -Wconstant-logical-operand
+-Wno-contract-configuration  -Wno-contract-invalid-label-facet
+-Wno-contract-unproven
 -Wconversion  -Wno-coverage-mismatch  -Wno-cpp
 -Wdangling-else  -Wdangling-pointer  -Wdangling-pointer=@var{n}
 -Wdate-time
@@ -3770,6 +3777,38 @@ also enable @option{-fcontracts}, in any C++ dialect.
 @itemx -fcontracts-p4298
 @itemx -fcontracts-p4301
 @itemx -fcontracts-p4405
+Enable an individual proposed extension to the contracts facility, named
+after the WG21 paper that proposes it.  Where contracts are enabled, each
+defines a feature-test macro, to a date of the form @code{YYYYMML}:
+
+@multitable @columnfractions .12 .48 .40
+@headitem Paper @tab Extension @tab Macro
+@item P3097 @tab contracts on virtual functions
+@tab @code{__cpp_contracts}, raised from @code{202502L}
+@item P3098 @tab postcondition captures
+@tab @code{__cpp_contracts_postcondition_captures}
+@item P3099 @tab the @code{comment} and @code{message} accessors
+@tab @code{__cpp_contracts_message}
+@item P3100 @tab implicit contract assertions for undefined behaviour
+@tab @code{__gcc_contracts_p3100}
+@item P3290 @tab integration with @code{assert}
+@tab @code{__gcc_contracts_p3290}
+@item P3400 @tab assertion-control labels
+@tab @code{__cpp_contracts_labels}
+@item P4283 @tab @code{requires} clauses on contract assertions
+@tab @code{__cpp_contracts_requires}
+@item P4298 @tab non-throwing evaluation semantics
+@tab @code{__cpp_contracts_nonthrowing_semantics}
+@item P4301 @tab context reports for the violation handler
+@tab @code{__cpp_contracts_report}
+@item P4405 @tab the @code{prove} and @code{diagnose} evaluation semantics
+@tab @code{__cpp_contracts_prove}
+@end multitable
+
+@option{-fcontracts-p3100} and @option{-fcontracts-p4298} are accepted for
+C and Objective-C too (@pxref{C Dialect Options}).
+So is @option{-fcontracts-p4405}.
+
 @opindex fcontracts-prove-fold
 @opindex fno-contracts-prove-fold
 @opindex fcontracts-prove-assume
