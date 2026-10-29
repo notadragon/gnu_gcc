@@ -11830,6 +11830,98 @@ build_implicit_flow_off_check (tree fndecl, location_t loc,
    through the CAK_IMPLICIT entry points (assertion_kind::implicit).  Builds
    GENERIC.  */
 
+tree
+build_implicit_pure_virtual_terminus (tree fn_original)
+{
+  if (!flag_contracts_p3100)
+    return NULL_TREE;
+
+  /* Resolve at the pure virtual's own (base) class definition: the config that
+     applies where that class is defined governs every vtable that carries the
+     slot, deterministically across translation units.  */
+  tree class_type = DECL_CONTEXT (fn_original);
+  tree class_decl = (class_type && TYPE_P (class_type))
+		    ? TYPE_MAIN_DECL (class_type) : NULL_TREE;
+  location_t loc = class_decl ? DECL_SOURCE_LOCATION (class_decl)
+			      : input_location;
+  contract_evaluation_semantic sem
+    = resolve_implicit_contract_semantic
+	(class_decl, loc, "ub:class.abstract.pure.virtual.indirect");
+
+  /* assume/ignore keep the status quo: a pure-virtual call has no defined value
+     to substitute, so there is nothing for ignore to do beyond the legacy
+     terminus.  */
+  if (sem == CES_ASSUME || sem == CES_IGNORE)
+    return NULL_TREE;
+
+  /* A throwing handler must not escape a noexcept pure virtual, so promote a
+     throwing enforce/observe to its terminate-on-throw (noexcept) terminus.  */
+  if (TYPE_NOTHROW_P (TREE_TYPE (fn_original)))
+    {
+      if (sem == CES_ENFORCE)
+	sem = CES_NOEXCEPT_ENFORCE;
+      else if (sem == CES_OBSERVE)
+	sem = CES_NOEXCEPT_OBSERVE;
+    }
+
+  const char *name;
+  int ecf = ECF_NORETURN | ECF_COLD;
+  switch (sem)
+    {
+    case CES_QUICK:
+      name = "__cxa_pure_virtual_quick";
+      ecf |= ECF_NOTHROW;
+      break;
+    case CES_ENFORCE:
+      name = "__cxa_pure_virtual_enforce";
+      break;
+    case CES_OBSERVE:
+      name = "__cxa_pure_virtual_observe";
+      break;
+    case CES_NOEXCEPT_ENFORCE:
+      name = "__cxa_pure_virtual_noexcept_enforce";
+      ecf |= ECF_NOTHROW;
+      break;
+    case CES_NOEXCEPT_OBSERVE:
+      name = "__cxa_pure_virtual_noexcept_observe";
+      ecf |= ECF_NOTHROW;
+      break;
+    default:
+      /* assume/ignore were handled above; every other semantic is one of the
+	 five termini.  */
+      gcc_unreachable ();
+    }
+
+  tree id = get_identifier (name);
+  tree fn = get_global_binding (id);
+  if (!fn)
+    fn = push_library_fn (id,
+			  build_function_type_list (void_type_node, NULL_TREE),
+			  NULL_TREE, ecf);
+  return fn;
+}
+
+/* P3100: build the runtime check for a configurable [[assume (COND)]] whose
+   site resolves to a *checking* semantic SEM (never CES_ASSUME/CES_IGNORE).
+   COND is the assumed predicate, which the caller has determined is
+   side-effect-free and evaluable (see build_assume_call), so it is safe to
+   evaluate here even though [[assume]] normally never evaluates its operand.
+   Returns
+
+     if (!COND) <reaction>;
+
+   where <reaction> reports/terminates for SEM through the CAK_IMPLICIT
+   contract-violation entry points, so a handler observes
+   assertion_kind::implicit (the assumed condition being false is
+   {dcl.attr.assume.false.pure} -- this function only ever runs for the
+   checkable/pure subset; see build_assume_call).  The site is inside the
+   function body, so a throwing
+   enforce/observe handler can unwind -- the full front-end semantic set is
+   available, exactly like the other front-end implicit checks.  The caller
+   appends the optimizer "assume" hint for the enforcing family (COND then
+   provably holds).  Runs during parsing/instantiation, so it builds
+   GENERIC.  */
+
 bool
 cp_build_implicit_ub_handler (tree fndecl, location_t loc, const char *group,
 			      int reaction, tree *entry_out,
@@ -12039,6 +12131,64 @@ cp_build_implicit_bounds_check (tree fndecl, location_t loc, tree index,
 
 /* P3100: the offset of the pointer arithmetic P + INTOP or P - INTOP (CODE),
    in sizetype as pointer_int_sum widens it, negated for -.  */
+
+tree
+build_implicit_pure_virtual_direct_check (location_t loc, tree call)
+{
+  if (!implicit_ub_check_context_p () || call == error_mark_node)
+    return call;
+  tree c = extract_call_expr (call);
+  if (c == NULL_TREE
+      || TREE_CODE (c) != CALL_EXPR
+      || TREE_CODE (CALL_EXPR_FN (c)) == OBJ_TYPE_REF)
+    return call;
+  tree callee = cp_get_callee_fndecl_nofold (c);
+  if (callee == NULL_TREE || !DECL_PURE_VIRTUAL_P (callee))
+    return call;
+
+  contract_evaluation_semantic sem
+    = resolve_implicit_contract_semantic (current_function_decl, loc,
+					  "ub:class.abstract.pure.virtual."
+					  "direct");
+  if (sem == CES_ASSUME || sem == CES_IGNORE)
+    return call;
+  if (TYPE_NOTHROW_P (TREE_TYPE (callee)))
+    {
+      if (sem == CES_ENFORCE)
+	sem = CES_NOEXCEPT_ENFORCE;
+      else if (sem == CES_OBSERVE)
+	sem = CES_NOEXCEPT_OBSERVE;
+    }
+
+  tree reaction;
+  if (sem == CES_QUICK)
+    reaction = build_quick_enforce_reaction (loc);
+  else
+    {
+      reaction = build_implicit_violation_call (loc, sem,
+						"pure virtual function "
+						"called");
+      if (sem == CES_OBSERVE || sem == CES_NOEXCEPT_OBSERVE)
+	{
+	  tree list = NULL_TREE;
+	  append_to_statement_list (reaction, &list);
+	  append_to_statement_list (build_call_expr_loc
+				      (loc, builtin_decl_explicit
+					      (BUILT_IN_ABORT), 0),
+				    &list);
+	  reaction = list;
+	}
+    }
+  tree check = build3_loc (loc, COND_EXPR, void_type_node, boolean_true_node,
+			   reaction, void_node);
+  COND_EXPR_IMPLICIT_UB_GUARD_P (check) = true;
+  COND_EXPR_IMPLICIT_UB_RUNTIME_P (check) = true;
+  return build2 (COMPOUND_EXPR, TREE_TYPE (call), check, call);
+}
+
+/* P3100: the outermost object of the glvalue EXPR when it is a variable or
+   parameter named directly, through member and subscript operators; NULL_TREE
+   otherwise.  */
 
 tree
 build_implicit_float_cast_check (tree ARG_UNUSED (fndecl), location_t loc,
