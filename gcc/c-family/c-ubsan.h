@@ -56,6 +56,8 @@ extern tree ubsan_instrument_return (location_t);
 extern tree ubsan_instrument_bounds (location_t, tree, tree *, bool);
 extern bool ubsan_array_ref_instrumented_p (const_tree);
 extern void ubsan_maybe_instrument_array_ref (tree *, bool);
+extern void ubsan_maybe_instrument_array_indirection (tree *);
+extern bool p3100_flexible_array_member_like_p (tree);
 extern void ubsan_maybe_instrument_reference (tree *,
 					      location_t = UNKNOWN_LOCATION);
 extern tree ubsan_build_p3100_indirection_check (location_t, tree,

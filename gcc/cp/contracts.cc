@@ -11928,6 +11928,35 @@ build_implicit_shift_check (tree ARG_UNUSED (fndecl), location_t loc,
    be built without linking to cc1.  */
 
 tree
+cp_build_implicit_bounds_check (tree fndecl, location_t loc, tree index,
+				tree bound, const char *group)
+{
+  if (!flag_contracts_p3100 || fndecl == NULL_TREE)
+    return NULL_TREE;
+
+  contract_evaluation_semantic sem
+    = resolve_implicit_contract_semantic (fndecl, loc, group);
+  if (sem == CES_ASSUME)
+    return NULL_TREE;
+
+  const char *comment
+    = (strcmp (group, "ub:expr.unary.dereference.invalid.known") == 0
+       ? "indirection past the end of an array"
+       : "array subscript out of bounds");
+
+  /* Evaluate the index once and test it against the bound as unsigned, so a
+     negative index (which wraps to a large value) is caught as well.  */
+  tree i = save_expr (index);
+  tree utype = unsigned_type_for (TREE_TYPE (i));
+  tree cond = build2_loc (loc, GE_EXPR, boolean_type_node,
+			  fold_convert (utype, i), fold_convert (utype, bound));
+  return build_implicit_op_guard (loc, sem, i, cond, i, comment);
+}
+
+/* P3100: the offset of the pointer arithmetic P + INTOP or P - INTOP (CODE),
+   in sizetype as pointer_int_sum widens it, negated for -.  */
+
+tree
 build_implicit_float_cast_check (tree ARG_UNUSED (fndecl), location_t loc,
 				 contract_evaluation_semantic sem,
 				 tree expr, tree converted)

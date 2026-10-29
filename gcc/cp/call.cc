@@ -11159,7 +11159,28 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
 	    warning_at (loc, OPT_Winit_list_lifetime,
 			"assignment from temporary %<initializer_list%> does "
 			"not extend the lifetime of the underlying array");
-	  arg = cp_build_fold_indirect_ref (arg);
+	  /* P3100: copy from an array element itself, as a trivial copy
+	     constructor does, rather than through the address its reference
+	     parameter binds: the copy reads the element, so its subscript is
+	     checked as one, `s = sa[2]' under
+	     ub:expr.add.out.of.bounds.known.subscript rather than as an
+	     indirection past the end.  */
+	  tree src = arg;
+	  if (flag_contracts_p3100)
+	    {
+	      STRIP_NOPS (src);
+	      if (TREE_CODE (src) == ADDR_EXPR
+		  && TREE_CODE (TREE_OPERAND (src, 0)) == ARRAY_REF
+		  && same_type_ignoring_top_level_qualifiers_p
+		       (type, TREE_TYPE (TREE_OPERAND (src, 0))))
+		src = TREE_OPERAND (src, 0);
+	      else
+		src = arg;
+	    }
+	  if (src != arg)
+	    arg = src;
+	  else
+	    arg = cp_build_fold_indirect_ref (arg);
 	  val = build2 (MODIFY_EXPR, TREE_TYPE (to), to, arg);
 	}
       else
