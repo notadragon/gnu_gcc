@@ -1,3 +1,6 @@
+// -fcontracts-client-check=all: the preconditions and postconditions of a
+// function, a member function and members of a class template are checked
+// at the call as well as in the callee, so each violation is reported twice.
 // { dg-do run { target c++20 } }
 // { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe -fcontracts-client-check=all" }
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }

@@ -1,0 +1,4 @@
+[
+  {"match": {"caller": {"namespace": "hot"}}, "output": {"semantic": "observe"}},
+  {"match": {"caller": true}, "output": {"semantic": "ignore"}}
+]

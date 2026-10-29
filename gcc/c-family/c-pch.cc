@@ -29,6 +29,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "langhooks.h"
 #include "hosthooks.h"
 #include "diagnostic.h"
+#include "c-family/contracts-config.h"
 
 /* This is a list of flag variables that must match exactly, and their
    names for the error message.  The possible values for *flag_var must
@@ -60,6 +61,9 @@ struct c_pch_validity
 {
   uint32_t pch_write_symbols;
   signed char match[MATCH_SIZE];
+  /* Like -fcontract-evaluation-semantic=, the contract configuration is
+     resolved while a header is parsed.  */
+  hashval_t contract_config;
   size_t target_data_length;
 };
 
@@ -122,6 +126,7 @@ pch_init (void)
 	gcc_assert (v.match[i] == *pch_matching[i].flag_var);
       }
   }
+  v.contract_config = contract_config_hash ();
   target_validity = targetm.get_pch_validity (&v.target_data_length);
 
   if (fwrite (partial_pch, IDENT_LENGTH, 1, f) != 1
@@ -282,6 +287,12 @@ c_common_valid_pch (cpp_reader *pfile, const char *name, int fd)
 	  return 2;
 	}
   }
+  if (v.contract_config != contract_config_hash ())
+    {
+      cpp_warning (pfile, CPP_W_INVALID_PCH,
+		   "%s: contract configuration does not match", name);
+      return 2;
+    }
 
   /* Check the target-specific validity data.  */
   {

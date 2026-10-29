@@ -229,6 +229,8 @@ in the following sections.
 -fcontract-comment-from-expression
 -fcontracts-client-check=@r{[}none@r{|}pre@r{|}all@r{]}
 -fcontracts-definition-check=@r{[}on@r{|}off@r{]}
+-fcontract-group-evaluation-semantic=@var{group}:@var{semantic}@r{[},@dots{}@r{]}
+-fcontract-configuration=@var{json}  -fcontract-configuration-file=@var{file}
 -fcoroutines  -fdiagnostics-all-candidates
 -fno-elide-constructors
 -fno-enforce-eh-specs
@@ -3426,6 +3428,34 @@ This option introduces the ability to disable callee/definition-side checks,
 which are otherwise enabled by default when the contracts feature is active.
 
 The variable @var{mode} has the values '@code{on}' and '@code{off}'.
+
+@opindex fcontract-group-evaluation-semantic
+@item -fcontract-group-evaluation-semantic=@var{group}:@var{semantic}@r{[},@dots{}@r{]}
+Set the evaluation semantic for contract assertions belonging to the
+identification group @var{group}, overriding
+@option{-fcontract-evaluation-semantic} for those assertions.  The argument
+may be a comma-separated list of @var{group}:@var{semantic} elements, and
+the option may be given more than once.  Groups are attached to an
+assertion by an assertion-control label.
+
+@opindex fcontract-configuration
+@item -fcontract-configuration=@var{json}
+@opindex fcontract-configuration-file
+@item -fcontract-configuration-file=@var{file}
+Supply a JSON contract configuration, either inline or from @var{file}.
+A configuration is an array of entries, each pairing a @code{match} object
+against a contract assertion with an @code{output} object giving the
+evaluation semantic to use.  A malformed configuration is an error.
+
+The entries of every configuration, and those of every
+@option{-fcontract-group-evaluation-semantic} option, are considered in
+the order they appear on the command line, and the first entry that
+matches a contract assertion decides its semantic.  After them come the
+entries implied by @option{-fcontracts-client-check} and
+@option{-fcontracts-definition-check}, and last
+@option{-fcontract-evaluation-semantic}, which applies to every contract
+assertion no earlier entry matched, wherever it appears on the command
+line.
 
 @opindex fcoroutines
 @opindex fno-coroutines
@@ -10733,6 +10763,22 @@ if (a && 64) @{ @dots{} @}
 @end smallexample
 If the warning is a false positive, one can clarify the code by using
 e.g. @code{a && (64 != 0)} instead.
+
+@opindex Wcontract-configuration
+@opindex Wno-contract-configuration
+@item -Wno-contract-configuration @r{(C, Objective-C, C++ and Objective-C++ only)}
+Do not warn about a contract configuration (@option{-fcontract-configuration},
+@option{-fcontract-configuration-file}) that is accepted but suspect, such
+as an object with a key that is not recognized, in which case the entry
+is skipped.  This warning is enabled by default.
+
+In C++, it also reports a declaration the translation unit makes with the
+qualified name of a @samp{"C++"}-linkage dynamic selector in the
+configuration but not the selector's type,
+@code{std::contracts::evaluation_semantic ()}: a namespace-scope function of
+that name taking no parameters and returning another type, or a variable of
+that name.  The selector is called with its own type whatever the
+declaration says.
 
 @opindex Wlogical-not-parentheses
 @opindex Wno-logical-not-parentheses
