@@ -13922,6 +13922,17 @@ static void
 cp_parser_lambda_body (cp_parser* parser, tree lambda_expr)
 {
   bool nested = (current_function_decl != NULL_TREE);
+  /* A contract on a declaration is parsed with current_function_decl set
+     but no body, so no cfun: push_function_context saves a placeholder, and
+     pop_function_context would leave that behind as cfun, with no language
+     data, and clear current_function_decl.  Restore both below.  */
+  tree outer_fn = current_function_decl;
+  bool outer_cfun_p = (cfun != NULL);
+  /* No enclosing function body keeps function_depth nonzero there either, so
+     the lambda's finish_function would collect -- freeing the placeholder,
+     which only function_context_stack holds (GCC-667).  */
+  if (nested && !outer_cfun_p)
+    ++function_depth;
   unsigned char local_variables_forbidden_p
     = parser->local_variables_forbidden_p;
   bool in_function_body = parser->in_function_body;
@@ -14000,7 +14011,15 @@ cp_parser_lambda_body (cp_parser* parser, tree lambda_expr)
   parser->local_variables_forbidden_p = local_variables_forbidden_p;
   parser->in_function_body = in_function_body;
   if (nested)
-    pop_function_context();
+    {
+      pop_function_context();
+      if (!outer_cfun_p)
+	{
+	  set_cfun (NULL);
+	  current_function_decl = outer_fn;
+	  --function_depth;
+	}
+    }
   else
     --function_depth;
 }
