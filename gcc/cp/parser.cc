@@ -34499,6 +34499,14 @@ cp_function_contract_specifier_intro (cp_parser *parser)
 
   tree contract_name = token->u.value;
 
+  /* The extension spellings __pre and __post, which (being reserved) can be
+     used in any dialect that enables contracts; return the standard name for
+     them too.  */
+  if (id_equal (contract_name, "__pre"))
+    return get_identifier ("pre");
+  if (id_equal (contract_name, "__post"))
+    return get_identifier ("post");
+
   if (!id_equal (contract_name, "pre") && !id_equal (contract_name, "post"))
     /* If we don't have a valid contract start, we are done.  */
     return NULL_TREE;
