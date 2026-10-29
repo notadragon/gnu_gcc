@@ -478,7 +478,35 @@ struct GTY(()) contract_decl
   location_t note_loc;
 };
 
-static GTY(()) hash_map<tree, contract_decl> *contract_decl_map;
+/* Hash a key of the maps below by something a precompiled header preserves:
+   writing one moves every tree, and a table hashed on the old addresses
+   finds almost nothing when read back (PCH is not rehashed).  A decl or a
+   type hashes by its uid, an identifier by its spelling; anything else --
+   a contract statement, say, which never outlives the function it is
+   in -- by its address.  */
+
+struct contract_pch_hash : ggc_ptr_hash <tree_node>
+{
+  static hashval_t hash (tree t)
+  {
+    if (DECL_P (t))
+      return DECL_UID (t);
+    if (TYPE_P (t))
+      return TYPE_UID (t);
+    if (identifier_p (t))
+      return IDENTIFIER_HASH_VALUE (t);
+    return ggc_ptr_hash <tree_node>::hash (t);
+  }
+};
+
+struct contract_decl_traits
+  : simple_hashmap_traits <contract_pch_hash, contract_decl> {};
+struct pch_traits
+  : simple_hashmap_traits <contract_pch_hash, tree> {};
+
+static GTY(()) hash_map<tree, contract_decl, contract_decl_traits>
+  *contract_decl_map;
+
 
 /* Converts a contract condition to bool and ensures it has a location.  */
 
@@ -645,13 +673,13 @@ check_postconditions_in_redecl (tree olddecl, tree newdecl)
 /* Map from FUNCTION_DECL to a FUNCTION_DECL for either the PRE_FN or POST_FN.
    These are used to parse contract conditions and are called inside the body
    of the guarded function.  */
-static GTY(()) hash_map<tree, tree> *decl_pre_fn;
-static GTY(()) hash_map<tree, tree> *decl_post_fn;
+static GTY(()) hash_map<tree, tree, pch_traits> *decl_pre_fn;
+static GTY(()) hash_map<tree, tree, pch_traits> *decl_post_fn;
 
 /* Given a pre or post function decl (for an outlined check function) return
    the decl for the function for which the outlined checks are being
    performed.  */
-static GTY(()) hash_map<tree, tree> *orig_from_outlined;
+static GTY(()) hash_map<tree, tree, pch_traits> *orig_from_outlined;
 
 /* Makes PRE the precondition function for FNDECL.  */
 
@@ -911,7 +939,7 @@ static GTY(()) hash_map<tree, tree> *decl_wrapper_fn = nullptr;
 
 /* Map from the function decl of a wrapper to the function that it wraps.  */
 
-static GTY(()) hash_map<tree, tree> *decl_for_wrapper = nullptr;
+static GTY(()) hash_map<tree, tree, pch_traits> *decl_for_wrapper = nullptr;
 
 /* Makes wrapper the precondition function for FNDECL.  */
 
