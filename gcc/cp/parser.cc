@@ -1156,6 +1156,14 @@ cp_lexer_get_preprocessor_token (unsigned flags, cp_token *token)
   pending_lang_change = 0;
   token->implicit_extern_c = is_extern_c > 0;
 
+  /* With -fcontracts-p4299, P4299's C spelling _ContractAssert means
+     contract_assert.  (_Pre and _Post are keywords of their own, entered
+     by init_reswords.)  */
+  if (flag_contracts_p4299
+      && token->type == CPP_NAME
+      && id_equal (token->u.value, "_ContractAssert"))
+    token->u.value = get_identifier ("contract_assert");
+
   /* Check to see if this token is a keyword.  */
   if (token->type == CPP_NAME)
     {
@@ -35192,6 +35200,13 @@ cp_function_contract_specifier_intro (cp_parser *parser)
 {
   cp_token *token = cp_lexer_peek_token (parser->lexer);
 
+  /* With -fcontracts-p4299, the keywords _Pre and _Post introduce one too;
+     return the C++ name, so that callers see only pre and post.  */
+  if (token->keyword == RID_C_PRE)
+    return get_identifier ("pre");
+  if (token->keyword == RID_C_POST)
+    return get_identifier ("post");
+
   /* Look for the contextual keywords 'pre' and 'post' as an introducer.  */
   if (token->type != CPP_NAME)
     return NULL_TREE;
@@ -35252,6 +35267,8 @@ static bool
 cp_nth_token_is_contract_intro_p (cp_parser *parser, size_t n)
 {
   cp_token *tok = cp_lexer_peek_nth_token (parser->lexer, n);
+  if (tok->keyword == RID_C_PRE || tok->keyword == RID_C_POST)
+    return true;
   return (tok->type == CPP_NAME
 	  && (id_equal (tok->u.value, "pre")
 	      || id_equal (tok->u.value, "post")

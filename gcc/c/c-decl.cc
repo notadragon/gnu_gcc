@@ -1102,6 +1102,40 @@ declare_parm_level (void)
   current_scope->parm_flag = true;
 }
 
+/* Push a scope inside the parameter scope of a function definition -- for
+   the predicate of a postcondition -- without consuming the pending function
+   body: the next push_scope after this scope is popped still opens it.  */
+
+void
+push_scope_before_function_body (void)
+{
+  bool saved = next_is_function_body;
+  next_is_function_body = false;
+  push_scope ();
+  next_is_function_body = saved;
+}
+
+/* Suspend the pending function body of the definition whose parameters
+   have just been stored, so that scopes pushed while contract predicates
+   are parsed ahead of the body -- a statement expression's among them --
+   are ordinary scopes; return the state for resume_pending_function_body.  */
+
+bool
+suspend_pending_function_body (void)
+{
+  bool saved = next_is_function_body;
+  next_is_function_body = false;
+  return saved;
+}
+
+/* Undo suspend_pending_function_body, which returned SAVED.  */
+
+void
+resume_pending_function_body (bool saved)
+{
+  next_is_function_body = saved;
+}
+
 void
 push_scope (void)
 {
@@ -11582,6 +11616,12 @@ finish_function (location_t end_loc)
       c_finish_return (BUILTINS_LOCATION, integer_zero_node, NULL_TREE);
     }
 
+  /* For void functions with postconditions, inject the postcondition
+     check at the implicit return point (P4299).  */
+  if (flag_contracts_p4299
+      && TREE_CODE (TREE_TYPE (TREE_TYPE (fndecl))) == VOID_TYPE)
+    c_maybe_check_postconditions (end_loc, NULL_TREE);
+
   /* Tie off the statement tree for this function.  */
   DECL_SAVED_TREE (fndecl) = pop_stmt_list (DECL_SAVED_TREE (fndecl));
 
@@ -13809,6 +13849,102 @@ free_attr_access_data ()
     }
 }
 
+/* If -fcontracts-p4299 is enabled and the TU defines
+   handle_contract_violation with the required signature, emit a
+   __handle_contract_violation C-linkage alias.  This is the C
+   equivalent of the C++ alias emitted for
+   ::handle_contract_violation(const contract_violation&).  */
+
+static void
+maybe_emit_c_hcv_alias (tree ext_vars)
+{
+  if (!flag_contracts_p4299)
+    return;
+
+  tree hcv_id = get_identifier ("handle_contract_violation");
+  tree fndecl = NULL_TREE;
+
+  for (tree decl = ext_vars; decl; decl = DECL_CHAIN (decl))
+    {
+      if (TREE_CODE (decl) != FUNCTION_DECL)
+	continue;
+      if (DECL_NAME (decl) != hcv_id)
+	continue;
+      if (DECL_INITIAL (decl) == NULL_TREE
+	  || DECL_INITIAL (decl) == error_mark_node)
+	continue;
+      fndecl = decl;
+      break;
+    }
+
+  if (!fndecl)
+    return;
+
+  /* Validate signature: void (const contract_violation_t *).  */
+  tree fntype = TREE_TYPE (fndecl);
+  bool sig_ok = true;
+
+  /* Return type must be void.  */
+  if (TREE_TYPE (fntype) != void_type_node)
+    sig_ok = false;
+
+  /* Must have exactly one parameter (plus the void sentinel).  */
+  tree args = TYPE_ARG_TYPES (fntype);
+  if (!args || args == void_list_node)
+    sig_ok = false;
+  else if (TREE_CHAIN (args) != void_list_node)
+    sig_ok = false;
+  else
+    {
+      /* Parameter must be a pointer to a struct qualified exactly const.  */
+      tree parm_type = TREE_VALUE (args);
+      if (TREE_CODE (parm_type) != POINTER_TYPE)
+	sig_ok = false;
+      else
+	{
+	  tree pointee = TREE_TYPE (parm_type);
+	  if (TYPE_QUALS (pointee) != TYPE_QUAL_CONST)
+	    sig_ok = false;
+	  tree unqual = TYPE_MAIN_VARIANT (pointee);
+	  if (TREE_CODE (unqual) != RECORD_TYPE)
+	    sig_ok = false;
+	  else
+	    {
+	      tree tag = TYPE_IDENTIFIER (unqual);
+	      if (!tag
+		  || strcmp (IDENTIFIER_POINTER (tag),
+			     "contract_violation_t") != 0)
+		sig_ok = false;
+	    }
+	}
+    }
+
+  if (!sig_ok)
+    {
+      error_at (DECL_SOURCE_LOCATION (fndecl),
+		"%qD must have signature "
+		"%<void(const contract_violation_t *)%> "
+		"to be used as a contract-violation handler",
+		fndecl);
+      return;
+    }
+
+  /* The signature is checked on every target, so a handler that is wrong
+     here is wrong everywhere; only the alias needs alias support.  */
+  if (!TARGET_SUPPORTS_ALIASES)
+    return;
+
+  tree alias_id = get_identifier ("__handle_contract_violation");
+  tree alias_decl = build_decl (DECL_SOURCE_LOCATION (fndecl),
+			       FUNCTION_DECL, alias_id,
+			       TREE_TYPE (fndecl));
+  TREE_PUBLIC (alias_decl) = true;
+  DECL_EXTERNAL (alias_decl) = false;
+  SET_DECL_ASSEMBLER_NAME (alias_decl, alias_id);
+
+  cgraph_node::create_same_body_alias (alias_decl, fndecl);
+}
+
 /* Perform any final parser cleanups and generate initial debugging
    information.  */
 
@@ -13852,6 +13988,9 @@ c_parse_final_cleanups (void)
   FOR_EACH_VEC_ELT (*all_translation_units, i, t)
     c_write_global_declarations_1 (BLOCK_VARS (DECL_INITIAL (t)));
   c_write_global_declarations_1 (BLOCK_VARS (ext_block));
+
+  /* If -fcontracts-p4299, emit __handle_contract_violation alias.  */
+  maybe_emit_c_hcv_alias (BLOCK_VARS (ext_block));
 
   /* Call this to set cpp_implicit_aliases_done on all nodes.  This is
      important for function multiversioning aliases to get resolved.  */
