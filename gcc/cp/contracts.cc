@@ -730,6 +730,20 @@ get_constexpr_evaluation_semantic (const_tree contract)
    (flag-independent) label restriction with this set, so a gated semantic can
    never be present -- from a label or otherwise -- when its flag is off.  */
 
+static inline uint16_t
+contract_base_allowed_mask ()
+{
+  uint16_t mask = CES_ALL_ALLOWED;
+  if (flag_contracts_allow_assume)
+    mask |= (1 << CES_ASSUME);
+  if (flag_contracts_p4298)
+    mask |= (1 << CES_NOEXCEPT_ENFORCE) | (1 << CES_NOEXCEPT_OBSERVE);
+  return mask;
+}
+
+/* Reconstruct a base, callee-side, non-constant-evaluation contract_query
+   from the stored AST fields.  */
+
 static contract_query
 make_contract_query (tree contract, tree fndecl)
 {
@@ -9414,6 +9428,138 @@ finish_contract_control_expr (location_t loc, tree expr)
       return error_mark_node;
     }
   return get_template_parm_object (val, mangle_template_parm_object (val));
+}
+
+/* P3400: true if the evaluation of CONTRACT, a contract assertion of
+   FNDECL or one of its precondition or postcondition specifiers evaluated
+   on its behalf with the callee's semantic, is settled: whatever semantic
+   each translation unit chooses for it, no definition of FNDECL behaves, for
+   a caller that does not inline it, in a way another definition does not.
+   A settled evaluation does not make FNDECL a refinable body (the
+   refinable-body rule: cp_genericize_r and finish_function mark a function
+   holding an evaluation that is not settled, so that calls which do not
+   inline it use no facts derived from this translation unit's definition).
+
+   Settled needs both directions:
+
+   A. Facts derived from one definition's evaluation hold for every other
+      definition's: every semantic the evaluation may use ends the program
+      on a violation (enforce, noexcept_enforce, quick_enforce) or makes the
+      violation undefined (assume), so wherever any definition continues past
+      the evaluation, the predicate held there.  So none of ignore, observe,
+      noexcept_observe, prove and diagnose may be allowed.
+
+   B. No definition's evaluation has an effect visible to a caller that
+      another's lacks: either no semantic it may use lets an exception leave
+      FNDECL -- only enforce does: its violation handler may throw
+      (noexcept_enforce calls the handler as noexcept, and quick_enforce and
+      assume call none) -- or FNDECL is noexcept, where such an exception
+      terminates the program instead, or enforce is the only semantic it
+      may use, so every definition's evaluation may throw alike.
+
+   So the evaluation is settled exactly when the set of semantics it may use
+   is a non-empty subset of {noexcept_enforce, quick_enforce, assume}, or is
+   {enforce} alone, or FNDECL is noexcept and it is a non-empty subset of
+   {enforce, noexcept_enforce, quick_enforce, assume}.  The set every translation unit
+   chooses from is the label's allowed_semantics facet, part of the
+   declaration and so the same everywhere (CONTRACT_ALLOWED_MASK); a
+   translation unit may narrow it further (contract_base_allowed_mask),
+   which keeps it settled.  An assertion with no label, or whose label does
+   not restrict the set, is never settled, nor is an evaluation in a
+   caller-side wrapper, where ignore is always allowed
+   (contract_wrapper_settled_p), nor a dynamically selected one (P3595).
+   The dynamic dispatch keeps within the allowed set, and where that set
+   holds no throwing semantic it brings none in, not even for an invalid
+   selection (contract_semantics_nothrow_p, DECISIONS.md E137, E138), so the
+   evaluation itself could be settled; but the selector is an ordinary
+   external function, declared with no exception specification, that this
+   definition calls and another definition need not: an exception from it
+   leaves FNDECL, and what it reads and writes is visible to a caller, which
+   breaks B whatever the label allows.
+
+   Deliberately not covered (accepted, DECISIONS.md E137): a definition
+   whose evaluation calls a violation handler on the way to termination
+   (enforce, noexcept_enforce) may show it memory that a caller, using facts
+   from a definition whose evaluation calls none (quick_enforce, assume),
+   did not keep up to date -- the program ends either way; and whether the
+   predicate is evaluated, with its side effects, is unspecified under every
+   checking semantic ([basic.contract.eval]).  */
+
+bool
+contract_evaluation_settled_p (tree contract, tree fndecl)
+{
+  if (!fndecl || error_operand_p (contract))
+    return false;
+  if (DECL_IS_WRAPPER_FN_P (fndecl)
+      && !wrapper_for_virtual_dispatch_p (fndecl))
+    return false;
+  tree mask_tree = CONTRACT_ALLOWED_MASK (contract);
+  if (!mask_tree)
+    return false;
+  uint16_t mask = (uint16_t) tree_to_uhwi (mask_tree);
+  uint16_t settled = ((1 << CES_NOEXCEPT_ENFORCE) | (1 << CES_QUICK)
+		      | (1 << CES_ASSUME));
+  if (TREE_CODE (TREE_TYPE (fndecl)) != ERROR_MARK)
+    {
+      tree spec = TYPE_RAISES_EXCEPTIONS (TREE_TYPE (fndecl));
+      if (spec
+	  && !DEFERRED_NOEXCEPT_SPEC_P (spec)
+	  && !UNPARSED_NOEXCEPT_SPEC_P (spec)
+	  && nothrow_spec_p (spec))
+	settled |= 1 << CES_ENFORCE;
+    }
+  if (mask == (1 << CES_ENFORCE))
+    settled |= 1 << CES_ENFORCE;
+  if (mask == 0 || (mask & ~settled))
+    return false;
+  /* The descriptor of a dynamic selection is cached with the semantic.  */
+  ensure_evaluation_semantic (contract, fndecl, false);
+  return !contract_dynamic_name (contract);
+}
+
+/* P3400: true if every precondition and postcondition specifier of FNDECL,
+   evaluated on its behalf with the callee's semantic, is settled
+   (contract_evaluation_settled_p) -- vacuously so for a function with none.
+   finish_function marks a function with specifiers that are not.  */
+
+bool
+contract_specifiers_settled_p (tree fndecl)
+{
+  if (processing_template_decl
+      || !DECL_HAS_CONTRACTS_P (fndecl))
+    return true;
+  tree specs = get_fn_contract_specifiers (DECL_ORIGIN (fndecl));
+  if (!specs)
+    return false;
+  for (tree contract : tree_vec_range (specs))
+    if (!contract_evaluation_settled_p (contract, fndecl))
+      return false;
+  return true;
+}
+
+/* P3097, P3400: true if a call of WRAPPER, a contract wrapper, holds only
+   settled evaluations (contract_evaluation_settled_p), so the refinable-body
+   rule does not mark its caller for it (cp_genericize_r).  A caller-side
+   wrapper never does: ignore is always allowed for a caller-side evaluation,
+   so another translation unit's definition of the caller may leave it out.
+   A wrapper for a virtual call (P3097) evaluates the contract assertions of
+   the function it calls with their callee-side semantics.  */
+
+bool
+contract_wrapper_settled_p (tree wrapper)
+{
+  if (!wrapper_for_virtual_dispatch_p (wrapper))
+    return false;
+  tree fndecl = get_orig_func_for_wrapper (wrapper);
+  if (!fndecl)
+    return false;
+  tree specs = get_fn_contract_specifiers (DECL_ORIGIN (fndecl));
+  if (!specs)
+    return true;
+  for (tree contract : tree_vec_range (specs))
+    if (!contract_evaluation_settled_p (contract, fndecl))
+      return false;
+  return true;
 }
 
 #include "gt-cp-contracts.h"

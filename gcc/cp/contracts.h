@@ -258,6 +258,9 @@ extern tree maybe_contract_wrap_call		(tree, tree,
 						 bool = false);
 extern bool emit_contract_wrapper_func		(bool);
 extern void maybe_emit_violation_handler_wrappers (void);
+extern bool contract_evaluation_settled_p	(tree, tree);
+extern bool contract_specifiers_settled_p	(tree);
+extern bool contract_wrapper_settled_p		(tree);
 
 extern tree build_contract_check		(tree);
 extern void check_handle_contract_violation	(tree);

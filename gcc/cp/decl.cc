@@ -21255,6 +21255,7 @@ finish_function (bool inline_p)
      holds a contract check; this covers precondition and postcondition
      specifiers that are not evaluated in this translation unit.  */
   if (!processing_template_decl
+      && !contract_specifiers_settled_p (fndecl)
       && DECL_HAS_CONTRACTS_P (fndecl))
     mark_refinable_body (fndecl);
 

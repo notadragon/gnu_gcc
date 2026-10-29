@@ -1865,6 +1865,10 @@ mark_contract_wrapper_caller (tree fn)
 {
   if (!fn || !DECL_IS_WRAPPER_FN_P (fn))
     return;
+  /* P3097: a wrapper for a virtual call whose evaluations are all
+     settled.  */
+  if (contract_wrapper_settled_p (fn))
+    return;
   mark_refinable_body (current_function_decl);
 }
 
@@ -2245,6 +2249,11 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 	 function that has already been diagnosed.  */
       if (contract_predicate_unsubstituted_p (stmt))
 	gcc_checking_assert (seen_error ());
+      /* P3400: an evaluation that every translation unit makes alike does
+	 not make the function a refinable body.  */
+      else if (contract_evaluation_settled_p (stmt, current_function_decl)
+	       && (*stmt_p = build_contract_check (stmt)))
+	return cp_genericize_r (stmt_p, walk_subtrees, data);
       else if (tree check = build_contract_check (stmt))
 	{
 	  /* Whatever this translation unit's evaluation semantic, another
