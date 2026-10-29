@@ -8836,15 +8836,6 @@ build_static_cast_1 (location_t loc, tree type, tree expr, bool c_cast_p,
 			  NULL, complain);
       expr = cp_build_addr_expr (expr, complain);
 
-      if (sanitize_flags_p (SANITIZE_VPTR))
-	{
-	  tree ubsan_check
-	    = cp_ubsan_maybe_instrument_downcast (loc, type,
-						  intype, expr);
-	  if (ubsan_check)
-	    expr = ubsan_check;
-	}
-
       /* Convert from "B*" to "D*".  This function will check that "B"
 	 is not a virtual base of "D".  Even if we don't have a guarantee
 	 that expr is NULL, if the static_cast is to a reference type,
@@ -8852,6 +8843,22 @@ build_static_cast_1 (location_t loc, tree type, tree expr, bool c_cast_p,
       expr = build_base_path (MINUS_EXPR, expr, base,
 			      /*nonnull=*/flag_delete_null_pointer_checks,
 			      complain);
+
+      /* Check the dynamic type of the "D*", as for the pointer form below.
+	 INTYPE is the class "B" here, so pass "B*".  If build_base_path
+	 tested for null, check only the adjusted pointer.  */
+      if (sanitize_flags_p (SANITIZE_VPTR) && expr != error_mark_node)
+	{
+	  tree *op = &expr;
+	  if (TREE_CODE (expr) == COND_EXPR)
+	    op = &TREE_OPERAND (expr, 1);
+	  tree ubsan_check
+	    = cp_ubsan_maybe_instrument_downcast (loc, type,
+						  build_pointer_type (intype),
+						  *op);
+	  if (ubsan_check)
+	    *op = ubsan_check;
+	}
 
       /* Convert the pointer to a reference -- but then remember that
 	 there are no expressions with reference type in C++.
