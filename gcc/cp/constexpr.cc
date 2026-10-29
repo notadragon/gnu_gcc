@@ -11931,7 +11931,9 @@ cxx_eval_outermost_constant_expr (tree t, bool allow_non_constant,
 
   if (non_constant_p && !allow_non_constant)
     return error_mark_node;
-  else if (check_for_failed_contracts (&ctx))
+  /* A contract problem recorded during an evaluation that is not constant
+     anyway is not reported: the predicates are evaluated at run time.  */
+  else if (!non_constant_p && check_for_failed_contracts (&ctx))
     {
       if (manifestly_const_eval == mce_true)
 	/* If MCE, we gave a hard error and return error_mark_node.  */
