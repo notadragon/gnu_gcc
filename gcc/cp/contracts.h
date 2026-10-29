@@ -447,6 +447,8 @@ extern tree build_implicit_placement_new_check
   (location_t, contract_evaluation_semantic, tree);
 extern tree build_implicit_placement_new_align_check
   (location_t, contract_evaluation_semantic, tree, unsigned HOST_WIDE_INT);
+extern void apply_implicit_noreturn_check
+  (tree);
 extern tree build_implicit_pure_virtual_direct_check
   (location_t, tree);
 extern tree build_implicit_pure_virtual_terminus (tree);

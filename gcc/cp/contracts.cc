@@ -12613,6 +12613,73 @@ build_implicit_placement_new_align_check (location_t loc,
    returns, the program aborts.  A throwing handler unwinds into the caller
    as an exception from the call.  Builds GENERIC.  */
 
+static tree
+build_implicit_noreturn_reaction (location_t loc,
+				  contract_evaluation_semantic sem)
+{
+  if (sem == CES_ASSUME || sem == CES_IGNORE)
+    return NULL_TREE;
+
+  if (sem == CES_QUICK)
+    return build_quick_enforce_reaction (loc);
+
+  tree call = build_implicit_violation_call (loc, sem,
+					     "a [[noreturn]] function "
+					     "returned");
+  if (sem == CES_ENFORCE || sem == CES_NOEXCEPT_ENFORCE)
+    return call;
+
+  tree list = NULL_TREE;
+  append_to_statement_list (call, &list);
+  tree abort_call
+    = build_call_expr_loc (loc, builtin_decl_explicit (BUILT_IN_ABORT), 0);
+  append_to_statement_list (abort_call, &list);
+  return list;
+}
+
+/* P3100: a function declared [[noreturn]] (or noreturn by any other means)
+   that returns to its caller -- by a return statement or by flowing off its
+   end -- has undefined behavior ({dcl.attr.noreturn.eventually.returns}).
+   Called from cp_genericize: report it at every normal exit of FNDECL's
+   body, after the destructors of its locals have run, by wrapping the body
+   in
+
+     try { BODY } finally { <normal exit only: reaction> }
+
+   An exception leaving the function is not a return, so the reaction is the
+   normal-path half of an EH_ELSE_EXPR, as for postconditions.  The check is
+   made in the function, so it covers calls through a pointer as well as
+   direct calls.  Builds GENERIC.  */
+
+void
+apply_implicit_noreturn_check (tree fndecl)
+{
+  if (!flag_contracts_p3100
+      || !TREE_THIS_VOLATILE (fndecl)
+      || (DECL_LANG_SPECIFIC (fndecl) && DECL_COROUTINE_P (fndecl)))
+    return;
+
+  location_t loc = DECL_SOURCE_LOCATION (fndecl);
+  contract_evaluation_semantic sem
+    = resolve_implicit_contract_semantic
+	(fndecl, loc, "ub:dcl.attr.noreturn.eventually.returns");
+  tree reaction = build_implicit_noreturn_reaction (loc, sem);
+  if (reaction == NULL_TREE)
+    return;
+
+  tree *p = &DECL_SAVED_TREE (fndecl);
+  if (TREE_CODE (*p) == BIND_EXPR)
+    p = &BIND_EXPR_BODY (*p);
+  if (flag_exceptions)
+    reaction = build2 (EH_ELSE_EXPR, void_type_node, reaction,
+		       build_empty_stmt (loc));
+  *p = build2 (TRY_FINALLY_EXPR, void_type_node, *p, reaction);
+}
+
+/* P3100: whether OBJECT, an object expression or a pointer to one, is
+   `*this' (or `this') of the enclosing member function, written directly:
+   not reached through a lambda's capture of `this' or any other pointer.  */
+
 tree
 build_implicit_pure_virtual_direct_check (location_t loc, tree call)
 {
