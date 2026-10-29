@@ -23239,6 +23239,20 @@ tsubst_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 		     late-specified return type of a local lambda, or for a
 		     local static or constant.  Building a new VAR_DECL
 		     should be OK in all those cases.  */
+		  if (flag_contracts
+		      && processing_contract_condition
+		      && is_capture_proxy (t)
+		      && !DECL_PACK_P (t))
+		    /* Or for a capture named in the contract predicate of a
+		       generic lambda's operator().  The specialization's
+		       contracts are substituted (regenerate_decl_from_template)
+		       before its body, and so before the body has declared
+		       the specialization's own capture proxies.  The proxy
+		       only stands for the closure member it names, so name
+		       the member directly, through the specialization's
+		       object parameter: then the predicate needs no proxy in
+		       scope at all.  */
+		    RETURN (RECUR (DECL_VALUE_EXPR (t)));
 		  r = tsubst_decl (t, args, complain);
 		  if (local_specializations)
 		    /* Avoid infinite recursion (79640).  */
