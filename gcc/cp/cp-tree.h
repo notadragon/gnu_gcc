@@ -8629,6 +8629,7 @@ extern tree finish_base_specifier		(tree, tree, bool, tree);
 extern void finish_member_declaration		(tree);
 extern bool outer_automatic_var_p		(tree);
 extern bool parsing_lambda_declarator		();
+extern void set_contract_capture_flag		(tree, bool);
 extern tree process_outer_var_ref		(tree, tsubst_flags_t,
 						 bool = false);
 extern cp_expr finish_id_expression		(tree, tree, tree,
