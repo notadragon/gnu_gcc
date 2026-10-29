@@ -2460,7 +2460,12 @@ public:
   /* opt_pass methods: */
   bool gate (function *) final override
     {
-      return sanitize_flags_p ((SANITIZE_NULL | SANITIZE_SI_OVERFLOW
+      /* P3100 implicit contract assertions reuse the null instrumentation
+	 machinery even without any sanitizer enabled; run the pass so the
+	 per-site null checks can be inserted (a no-op when nothing resolves
+	 to a checked semantic).  */
+      return flag_contracts_p3100
+	     || sanitize_flags_p ((SANITIZE_NULL | SANITIZE_SI_OVERFLOW
 				| SANITIZE_BOOL | SANITIZE_ENUM
 				| SANITIZE_ALIGNMENT
 				| SANITIZE_NONNULL_ATTRIBUTE
@@ -2494,17 +2499,33 @@ pass_ubsan::execute (function *fun)
 	      continue;
 	    }
 
-	  if ((sanitize_flags_p (SANITIZE_SI_OVERFLOW, fun->decl))
+	  if ((sanitize_flags_p (SANITIZE_SI_OVERFLOW, fun->decl)
+	       || flag_contracts_p3100)
 	      && is_gimple_assign (stmt))
-	    instrument_si_overflow (gsi);
-
-	  if (sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT, fun->decl))
 	    {
+	      instrument_si_overflow (&gsi);
+	      /* The P3100 lowering can rewrite STMT (and split the block); keep
+		 STMT and BB in step with the iterator for the checks below.  */
+	      stmt = gsi_stmt (gsi);
+	      bb = gimple_bb (stmt);
+	    }
+
+	  bool null_align_sanitize
+	    = sanitize_flags_p (SANITIZE_NULL | SANITIZE_ALIGNMENT, fun->decl);
+	  if (null_align_sanitize || flag_contracts_p3100)
+	    {
+	      /* Loads and stores through a pointer are genuine dereferences,
+		 checkable both by the sanitizer and by a P3100
+		 ub:expr.unary.dereference.nullptr implicit assertion.  */
 	      if (gimple_store_p (stmt))
 		instrument_null (gsi, gimple_get_lhs (stmt), true);
 	      if (gimple_assign_single_p (stmt))
 		instrument_null (gsi, gimple_assign_rhs1 (stmt), false);
-	      if (is_gimple_call (stmt))
+	      /* A class object passed by value read through a pointer,
+		 f (*p), is a load; the sanitizer also checks the other
+		 arguments in memory.  */
+	      if (is_gimple_call (stmt)
+		  && (null_align_sanitize || !gimple_call_internal_p (stmt)))
 		{
 		  unsigned args_num = gimple_call_num_args (stmt);
 		  for (unsigned i = 0; i < args_num; ++i)
@@ -2517,8 +2538,28 @@ pass_ubsan::execute (function *fun)
 		}
 	    }
 
-	  if (sanitize_flags_p (SANITIZE_BOOL | SANITIZE_ENUM, fun->decl)
-	      && gimple_assign_load_p (stmt))
+	  /* P3100 implicit invalid-value-load assertion; resolve the site once
+	     here (pre-inline).  It takes precedence over the sanitizer: the
+	     sanitizer checks the load only when no contract applies.  */
+	  int bool_enum_reaction = IMPLICIT_UB_NONE;
+	  if (flag_contracts_p3100
+	      && gimple_assign_load_p (stmt)
+	      && (TREE_CODE (TREE_TYPE (gimple_assign_rhs1 (stmt)))
+		    == BOOLEAN_TYPE
+		  || TREE_CODE (TREE_TYPE (gimple_assign_rhs1 (stmt)))
+		    == ENUMERAL_TYPE))
+	    bool_enum_reaction
+	      = resolve_implicit_ub_reaction
+		  (cfun->decl, gimple_location (stmt),
+		   invalid_value_group (TREE_TYPE (gimple_assign_rhs1 (stmt))));
+	  if (bool_enum_reaction != IMPLICIT_UB_NONE)
+	    {
+	      instrument_bool_enum_load_contract (&gsi, bool_enum_reaction);
+	      stmt = gsi_stmt (gsi);
+	      bb = gimple_bb (stmt);
+	    }
+	  else if (sanitize_flags_p (SANITIZE_BOOL | SANITIZE_ENUM, fun->decl)
+		   && gimple_assign_load_p (stmt))
 	    {
 	      instrument_bool_enum_load (&gsi);
 	      bb = gimple_bb (stmt);

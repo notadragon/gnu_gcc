@@ -6244,6 +6244,37 @@ cxx_eval_conditional_expression (const constexpr_ctx *ctx, tree t,
 				 bool *non_constant_p, bool *overflow_p,
 				 tree *jump_target)
 {
+  /* P3100: the check of an [[assume]] (cond ? (void) 0 : <reaction>) is
+     evaluated as the assumption it replaces is (IFN_ASSUME below).  */
+  /* P3100: a guard whose condition is not a constant expression; the
+     evaluator diagnoses the guarded operation itself.  That is manifestly
+     constant evaluation only: a speculative one, whose result may replace
+     the expression at run time (a folded constexpr call), cannot know that
+     the check passes, so the expression is not a constant and the check
+     stays.  */
+  if (TREE_CODE (t) == COND_EXPR && COND_EXPR_IMPLICIT_UB_GUARD_P (t)
+      && COND_EXPR_IMPLICIT_UB_RUNTIME_P (t))
+    {
+      if (ctx->manifestly_const_eval != mce_true)
+	{
+	  *non_constant_p = true;
+	  return t;
+	}
+      return cxx_eval_constant_expression (ctx, TREE_OPERAND (t, 2), lval,
+					   non_constant_p, overflow_p,
+					   jump_target);
+    }
+  if (TREE_CODE (t) == COND_EXPR && COND_EXPR_IMPLICIT_UB_GUARD_P (t)
+      && VOID_TYPE_P (TREE_TYPE (t)))
+    {
+      if (!cxx_eval_assert (ctx, TREE_OPERAND (t, 0),
+			    G_("failed %<assume%> attribute assumption"),
+			    EXPR_LOCATION (t), /*eval*/false,
+			    non_constant_p, overflow_p))
+	return t;
+      return void_node;
+    }
+
   tree val = cxx_eval_constant_expression (ctx, TREE_OPERAND (t, 0),
 					   vc_prvalue,
 					   non_constant_p, overflow_p,
@@ -6269,6 +6300,39 @@ cxx_eval_conditional_expression (const constexpr_ctx *ctx, tree t,
     }
   /* Don't VERIFY_CONSTANT the other operands.  */
   const bool zero_p = integer_zerop (val);
+  if (TREE_CODE (t) == COND_EXPR && COND_EXPR_IMPLICIT_UB_GUARD_P (t))
+    {
+      /* P3100: a guard of an operation checked for undefined behavior
+	 (cond ? <reaction> : op).  Evaluate the operation itself, so that
+	 undefined behavior -- which is never a constant expression -- is
+	 diagnosed as it would be without the check, not as a call to the
+	 violation entry point.  Where the evaluator does not diagnose it, the
+	 check says it is undefined all the same.  An overflow the evaluator
+	 reports (a permerror, so evaluation goes on) is that diagnostic, and
+	 is not reported a second time.  */
+      tree op = TREE_OPERAND (t, 2);
+      if (zero_p)
+	return cxx_eval_constant_expression (ctx, op, lval, non_constant_p,
+					     overflow_p, jump_target);
+      bool op_overflow_p = false;
+      tree r = cxx_eval_constant_expression (ctx, op, lval, non_constant_p,
+					     &op_overflow_p, jump_target);
+      if (op_overflow_p)
+	{
+	  *overflow_p = true;
+	  if (!*non_constant_p)
+	    return r;
+	}
+      if (!*non_constant_p)
+	{
+	  if (!ctx->quiet)
+	    error_at (cp_expr_loc_or_input_loc (t),
+		      "evaluation of an operation with undefined behavior is "
+		      "not a constant expression");
+	  *non_constant_p = true;
+	}
+      return t;
+    }
   if (zero_p)
     val = TREE_OPERAND (t, 2);
   else
@@ -14059,6 +14123,10 @@ potential_constant_expression_1 (tree t, bool want_rval, bool strict, bool now,
      return true;
 
     case COND_EXPR:
+      /* P3100: see cxx_eval_conditional_expression.  */
+      if (COND_EXPR_IMPLICIT_UB_GUARD_P (t)
+	  && COND_EXPR_IMPLICIT_UB_RUNTIME_P (t))
+	return RECUR (TREE_OPERAND (t, 2), want_rval);
       if (COND_EXPR_IS_VEC_DELETE (t) && cxx_dialect < cxx20)
 	{
 	  if (flags & tf_error)

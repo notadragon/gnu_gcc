@@ -464,6 +464,7 @@ extern GTY(()) tree cp_global_trees[CPTI_MAX];
       TI_PENDING_TEMPLATE_FLAG.
       TEMPLATE_PARMS_FOR_INLINE.
       DELETE_EXPR_USE_VEC (in DELETE_EXPR).
+      COND_EXPR_IMPLICIT_UB_GUARD_P (in COND_EXPR)
       ICS_ELLIPSIS_FLAG (in _CONV)
       DECL_INITIALIZED_P (in VAR_DECL)
       TYPENAME_TYPE_TAG_BIT_1 (in TYPENAME_TYPE)
@@ -510,6 +511,7 @@ extern GTY(()) tree cp_global_trees[CPTI_MAX];
       MUST_NOT_THROW_CATCH_P (in MUST_NOT_THROW_EXPR)
       MULTIPLE_NAMES_PARM_P (in PARM_DECL)
       SPLICE_EXPR_ADDRESS_P (in SPLICE_EXPR)
+      COND_EXPR_IMPLICIT_UB_RUNTIME_P (in COND_EXPR)
    3: IMPLICIT_RVALUE_P (in NON_LVALUE_EXPR or STATIC_CAST_EXPR)
       ICS_BAD_FLAG (in _CONV)
       FN_TRY_BLOCK_P (in TRY_BLOCK)
@@ -806,6 +808,22 @@ typedef struct ptrmem_cst * ptrmem_cst_t;
 
 #define COND_EXPR_IS_VEC_DELETE(NODE) \
   TREE_LANG_FLAG_0 (COND_EXPR_CHECK (NODE))
+
+/* Nonzero if this COND_EXPR guards an operation that a P3100 implicit
+   contract assertion checks for undefined behavior; see
+   build_implicit_op_guard and cp_build_assume_check.  Constant evaluation
+   evaluates the operation, not the reaction.  */
+#define COND_EXPR_IMPLICIT_UB_GUARD_P(NODE) \
+  TREE_LANG_FLAG_1 (COND_EXPR_CHECK (NODE))
+
+/* Nonzero if the condition of this COND_EXPR_IMPLICIT_UB_GUARD_P guard is
+   not a constant expression (it compares addresses as integers, or is a
+   constant true that only a run-time check may act on), so that manifestly
+   constant evaluation evaluates the guarded operation alone, and any other
+   constant evaluation (folding) gives up; see
+   build_implicit_pointer_wrap_check and cxx_eval_conditional_expression.  */
+#define COND_EXPR_IMPLICIT_UB_RUNTIME_P(NODE) \
+  TREE_LANG_FLAG_2 (COND_EXPR_CHECK (NODE))
 
 /* Nonzero if this NOP_EXPR is a reinterpret_cast.  Such conversions
    are not constexprs.  Other NOP_EXPRs are.  */

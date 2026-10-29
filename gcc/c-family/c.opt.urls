@@ -1296,6 +1296,9 @@ UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-configuration-fil
 fcontract-group-evaluation-semantic=
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-group-evaluation-semantic)
 
+fcontracts-allow-assume
+UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-allow-assume)
+
 fcontracts-client-check=
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-client-check)
 
@@ -1310,6 +1313,9 @@ UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-p3098)
 
 fcontracts-p3099
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-p3099)
+
+fcontracts-p3100
+UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-p3100)
 
 fcontracts-p3290
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-p3290)

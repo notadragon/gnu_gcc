@@ -46,6 +46,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "contracts-shadow.h"
 #include "opts.h"
 #include "output.h"
+#include "varasm.h"
+#include "ubsan.h"
 #include "predict.h"
 
 /*  Design notes.
@@ -2207,6 +2209,108 @@ resolve_implicit_contract_semantic (tree fndecl, location_t loc,
    e.g. signed overflow coerces to the wrapped result, whereas a null
    dereference has no defined lvalue (ignore = raw operation).  COMMENT is the
    contract_violation comment for the reported violation.  */
+
+struct implicit_ub_info
+{
+  uint16_t allowed;
+  bool defined_eb;
+  const char *comment;
+};
+
+static bool
+implicit_ub_group_info (const char *group, implicit_ub_info *out)
+{
+  static const uint16_t mid_end_allowed
+    = CES_ALL_ALLOWED & ~((1 << CES_ENFORCE) | (1 << CES_OBSERVE));
+  /* The null-dereference check reports one of two leaves of
+     ub:expr.unary.dereference.nullptr: .access at a load or store, and
+     .indirection where the indirection is not followed by an access (a
+     reference binding, a member call, the address of a member).  */
+  if (strcmp (group, "ub:expr.unary.dereference.nullptr.access") == 0
+      || strcmp (group, "ub:expr.unary.dereference.nullptr.indirection") == 0)
+    {
+      *out = { mid_end_allowed, false, "null pointer dereference" };
+      return true;
+    }
+  /* The signed-overflow check reports .add, .sub, .mul or .negate of
+     ub:expr.expr.eval.signed.integer by its operation, and the invalid
+     value check .bool or .enum of ub:conv.lval.valid.representation by the
+     type loaded.  */
+  if (strcmp (group, "ub:expr.expr.eval.signed.integer.add") == 0
+      || strcmp (group, "ub:expr.expr.eval.signed.integer.sub") == 0
+      || strcmp (group, "ub:expr.expr.eval.signed.integer.mul") == 0
+      || strcmp (group, "ub:expr.expr.eval.signed.integer.negate") == 0)
+    {
+      *out = { mid_end_allowed, true, "signed integer overflow" };
+      return true;
+    }
+  if (strcmp (group, "ub:conv.lval.valid.representation.bool") == 0
+      || strcmp (group, "ub:conv.lval.valid.representation.enum") == 0)
+    {
+      *out = { mid_end_allowed, true, "invalid value for its type" };
+      return true;
+    }
+  if (strcmp (group, "ub:basic.align.object.alignment.store") == 0)
+    {
+      /* A misaligned access is an lvalue with no defined substitute, so ignore
+	 is the raw access (like null-deref), not a coerced value.  This is
+	 the .store leaf: the check is at a typed access, which a creation
+	 performing no store (.nostore) never makes.  */
+      *out = { mid_end_allowed, false, "misaligned pointer access" };
+      return true;
+    }
+  return false;
+}
+
+/* LANG_HOOKS_RESOLVE_IMPLICIT_UB_SEMANTIC: called from the language-neutral
+   middle end (the ubsan instrumentation pass) at a core-language UB site to
+   learn how a P3100 implicit contract assertion for GROUP should react there.
+   FNDECL is the function containing the site (cfun->decl at that point) and LOC
+   is the site location; both feed the P3595 configuration query so that
+   per-namespace and per-file/line matching work at the actual site.  Maps the
+   resolved evaluation semantic onto the neutral enum implicit_ub_reaction
+   (see gcc/ubsan.h), consulting the per-UB policy for the group.  */
+
+int
+cp_resolve_implicit_ub_semantic (tree fndecl, location_t loc, const char *group)
+{
+  implicit_ub_info info;
+  if (!flag_contracts_p3100 || fndecl == NULL_TREE
+      || !implicit_ub_group_info (group, &info))
+    return IMPLICIT_UB_NONE;
+
+  contract_evaluation_semantic sem
+    = resolve_implicit_contract_semantic (fndecl, loc, group, info.allowed);
+
+  switch (sem)
+    {
+    case CES_QUICK:
+      return IMPLICIT_UB_TRAP;
+    case CES_NOEXCEPT_ENFORCE:
+      /* Non-throwing handler: the entry point cannot propagate an exception, so
+	 no EH region is needed at the middle-end site.  The enforce/observe
+	 distinction is preserved here so it survives inlining -- this single
+	 mapping point feeds the reaction operand carried on every instrumented
+	 site, and the handler-building langhook uses it directly.  */
+      return IMPLICIT_UB_NOEXCEPT_ENFORCE;
+    case CES_NOEXCEPT_OBSERVE:
+      return IMPLICIT_UB_NOEXCEPT_OBSERVE;
+    case CES_PROVE:
+    case CES_DIAGNOSE:
+      /* Never resolved: prove and diagnose are not among the semantics an
+	 implicit contract assertion allows, so the best fit takes them to
+	 ignore.  Should one get here, it behaves as ignore.  */
+      gcc_checking_assert (false);
+      /* FALLTHRU */
+    case CES_IGNORE:
+      /* Produce the defined erroneous value where one exists (e.g. the wrapped
+	 result for signed overflow); otherwise no instrumentation.  */
+      return info.defined_eb ? IMPLICIT_UB_DEFINED : IMPLICIT_UB_NONE;
+    default:
+      /* assume (and any unreachable throwing enf/obs): no instrumentation.  */
+      return IMPLICIT_UB_NONE;
+    }
+}
 
 static char *read_constant_char_array (tree);
 
@@ -11340,6 +11444,8 @@ emit_check_for_semantic (tree contract, contract_evaluation_semantic semantic,
   switch (semantic)
     {
     case CES_IGNORE:
+    case CES_ASSUME:
+      return void_node;
     case CES_PROVE:
     case CES_DIAGNOSE:
       /* D4405: only the analysis evaluation is ever prove or diagnose
@@ -11523,6 +11629,141 @@ emit_enforced_violation (tree contract, tree shared_data_addr,
    at LOC with comment COMMENT, and return its address.  The assertion is
    synthesized for the purpose; it has no label, so the block is the basic
    one.  Builds GENERIC.  */
+
+static tree
+build_implicit_violation_data (location_t loc, const char *comment)
+{
+  tree contract = make_node (ASSERTION_STMT);
+  TREE_TYPE (contract) = void_type_node;
+  SET_EXPR_LOCATION (contract, loc);
+  CONTRACT_COMMENT (contract) = build_string_literal (comment);
+  return build_contract_data_block_address (contract);
+}
+
+/* P3100: build the call reporting a violation of an implicit contract
+   assertion at LOC with comment COMMENT to the CAK_IMPLICIT entry point for
+   SEM, one of the four semantics that call the handler.  */
+
+static tree
+build_implicit_violation_call (location_t loc,
+			       contract_evaluation_semantic sem,
+			       const char *comment)
+{
+  tree entry = declare_cxa_entry_point (CAK_IMPLICIT, sem,
+					CDM_PREDICATE_FALSE);
+  tree call = build_call_n (entry, 1,
+			    build_implicit_violation_data (loc, comment));
+  SET_EXPR_LOCATION (call, loc);
+  return call;
+}
+
+/* P3100: build the GENERIC code to append at the fall-off point of a
+   value-returning function whose implicit {stmt.return.flow.off} assertion
+   resolved to SEM.  FNDECL is the function and LOC the site.  Returns a
+   statement (or STATEMENT_LIST) to append to the function body, or NULL_TREE
+   when the caller should keep the legacy behaviour (SEM == CES_ASSUME) or when
+   no code is needed.
+
+   Reaching the end of a value-returning function is always a violation, so the
+   emitted code is an unconditional reaction, not a guarded check:
+
+     ignore                   -> return a defined (erroneous) value; no handler
+     quick_enforce            -> call the terminate handler (noreturn)
+     enforce/noexcept_enforce -> call the noreturn violation entry point
+     observe/noexcept_observe -> call the (returning) violation entry point,
+				 then return a defined (erroneous) value
+
+   The "defined value" zeroes the bytes of the result object regardless of the
+   return type: a zero value for a scalar, and a memset of the whole object
+   (including padding) for a class or array, so no indeterminate data is leaked.
+
+   The violation is reported through the CAK_IMPLICIT entry points, so a handler
+   observes assertion_kind::implicit (P3100).  This helper runs after
+   genericization, so it must build GENERIC (not front-end statement) trees.  */
+
+bool
+cp_build_implicit_ub_handler (tree fndecl, location_t loc, const char *group,
+			      int reaction, tree *entry_out,
+			      tree *data_addr_out)
+{
+  implicit_ub_info info;
+  if (!flag_contracts_p3100 || fndecl == NULL_TREE
+      || !implicit_ub_group_info (group, &info))
+    return false;
+
+  /* Use the reaction resolved once, pre-inline, rather than re-resolving here
+     against the (possibly inlined-into) FNDECL.  */
+  contract_evaluation_semantic sem;
+  if (reaction == IMPLICIT_UB_NOEXCEPT_ENFORCE)
+    sem = CES_NOEXCEPT_ENFORCE;
+  else if (reaction == IMPLICIT_UB_NOEXCEPT_OBSERVE)
+    sem = CES_NOEXCEPT_OBSERVE;
+  else
+    return false;
+
+  *data_addr_out = build_implicit_violation_data (loc, info.comment);
+  *entry_out = declare_cxa_entry_point (CAK_IMPLICIT, sem,
+					CDM_PREDICATE_FALSE);
+  return true;
+}
+
+/* P3100: shared helper to guard a scalar operation OP_RESULT that is UB when
+   COND holds, for the resolved semantic SEM (never CES_ASSUME).  Returns
+
+     force, (cond ? <reaction-value> : op_result)
+
+   FORCE is evaluated first so an operand referenced only on the ok-path (e.g. a
+   division's dividend) still has its side effects on the violation path; all
+   operands are SAVE_EXPRs by the time we get here, so each is evaluated once.
+   On the violation path the UB operation is not executed:
+
+     ignore              -> a defined (erroneous) zero;
+     observe/nx_observe  -> call the handler, then a defined zero;
+     quick_enforce       -> terminate;
+     enforce/nx_enforce  -> call the noreturn handler.
+
+   COMMENT is the contract-violation comment recorded for the check.  SUBST,
+   if given, replaces the defined zero: an operation with a defined fallback
+   other than zero (pointer arithmetic leaving the pointer unmoved).  */
+
+static tree
+build_implicit_op_guard (location_t loc, contract_evaluation_semantic sem,
+			 tree force, tree cond, tree op_result,
+			 const char *comment, tree subst = NULL_TREE)
+{
+  tree restype = TREE_TYPE (op_result);
+  tree zero = subst ? subst : build_zero_cst (restype);
+
+  tree viol_value;
+  if (sem == CES_IGNORE)
+    viol_value = zero;
+  else if (sem == CES_QUICK)
+    {
+      tree call = build_quick_enforce_reaction (loc);
+      viol_value = build2 (COMPOUND_EXPR, restype, call, zero);
+    }
+  else
+    {
+      /* enforce / observe / noexcept_enforce / noexcept_observe: build a
+	 violation data block and call the corresponding CAK_IMPLICIT entry
+	 point.  The enforce entry is noreturn; observe returns and we continue
+	 with the defined zero.  In value position both are paired with the
+	 defined zero via COMPOUND_EXPR (dead after a noreturn enforce call, but
+	 needed for the type).  */
+      tree call = build_implicit_violation_call (loc, sem, comment);
+      viol_value = build2 (COMPOUND_EXPR, restype, call, zero);
+    }
+
+  tree guarded = build3_loc (loc, COND_EXPR, restype, cond, viol_value,
+			     op_result);
+  COND_EXPR_IMPLICIT_UB_GUARD_P (guarded) = true;
+  guarded = build2 (COMPOUND_EXPR, restype, force, guarded);
+  return guarded;
+}
+
+/* P3100: guard an integer division/remainder DIV_RESULT (dividend OP0, divisor
+   OP1) whose divisor may be zero -- core-language UB ({expr.mul.div.by.zero}).
+   Returns `op0, (op1 == 0 ? <reaction> : div_result)`.  */
 
 static const char *
 contract_dynamic_name (const_tree contract)
