@@ -678,6 +678,10 @@ cgraph_node::analyze (void)
     }
   else
     {
+      /* Testing aid: treat every inline body as refinable.  */
+      if (param_ipa_refinable_inline && DECL_DECLARED_INLINE_P (decl))
+	mark_refinable_body (decl);
+
       push_cfun (DECL_STRUCT_FUNCTION (decl));
 
       assign_assembler_name_if_needed (decl);

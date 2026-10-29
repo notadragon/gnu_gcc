@@ -1317,6 +1317,16 @@ For switch exceeding this limit, IPA-CP does not construct a cloning cost
 predicate, which is used to estimate cloning benefit, for the default case
 of the switch statement.
 
+@paindex ipa-refinable-inline
+@item ipa-refinable-inline
+For testing: when set to 1, mark the body of every function declared
+inline as refinable.  Facts that interprocedural analysis derives from a
+refinable body (its return value range, side effects, whether it can
+throw or return, and so on) are not used for calls that may bind to
+another definition of the function, such as calls of a COMDAT function
+or of a C99 inline definition, while the body can still be inlined and
+cloned.
+
 @paindex ipa-max-param-expr-ops
 @item ipa-max-param-expr-ops
 IPA-CP analyzes conditional statements that reference some function

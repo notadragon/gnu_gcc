@@ -3377,7 +3377,10 @@ static void
 param_removal_cross_scc_edge (cgraph_edge *cs)
 {
   enum availability availability;
-  cgraph_node *callee = cs->callee->function_symbol (&availability);
+  /* Only candidates are considered, and their callers are redirected to a
+     clone, so a refinable callee is as good as an available one.  */
+  cgraph_node *callee = cs->callee->function_symbol (&availability, NULL,
+						      true);
   isra_func_summary *to_ifs = func_sums->get (callee);
   if (!to_ifs || !to_ifs->m_candidate
       || (availability < AVAIL_AVAILABLE)
@@ -3581,7 +3584,11 @@ propagate_used_across_scc_edge (cgraph_edge *cs, vec<cgraph_node *> *stack)
   gcc_checking_assert (csum);
   unsigned args_count = csum->m_arg_flow.length ();
   enum availability availability;
-  cgraph_node *callee = cs->callee->function_symbol (&availability);
+  /* Only candidates have parameter information, and their callers are
+     redirected to a clone, so a refinable callee is as good as an
+     available one.  */
+  cgraph_node *callee = cs->callee->function_symbol (&availability, NULL,
+						      true);
   isra_func_summary *to_ifs = func_sums->get (callee);
 
   unsigned param_count
@@ -3803,7 +3810,9 @@ param_splitting_across_edge (cgraph_edge *cs)
   bool res = false;
   bool cross_scc = !ipa_edge_within_scc (cs);
   enum availability availability;
-  cgraph_node *callee = cs->callee->function_symbol (&availability);
+  /* As in param_removal_cross_scc_edge.  */
+  cgraph_node *callee = cs->callee->function_symbol (&availability, NULL,
+						      true);
   isra_func_summary *from_ifs = func_sums->get (cs->caller);
   gcc_checking_assert (from_ifs && from_ifs->m_parameters);
   ipcp_transformation *caller_ipcp_ts

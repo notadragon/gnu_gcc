@@ -2526,8 +2526,9 @@ cgraph_node::dump (FILE *f)
   if (clone_of)
     fprintf (f, "  Clone of %s\n", clone_of->dump_asm_name ());
   if (symtab->function_flags_ready)
-    fprintf (f, "  Availability: %s\n",
-	     cgraph_availability_names [get_availability ()]);
+    fprintf (f, "  Availability: %s%s\n",
+	     cgraph_availability_names[get_availability ()],
+	     refinable_body_p (decl) ? " (refinable body)" : "");
 
   if (profile_id)
     fprintf (f, "  Profile id: %i\n",
@@ -2786,10 +2787,73 @@ cgraph_function_possibly_inlined_p (tree decl)
   return DECL_POSSIBLY_INLINED (decl);
 }
 
+/* Return true if FNDECL carries the internal "refinable body" attribute:
+   its body may differ from other definitions of the same function in ways
+   that matter (see cgraph_node::refinable_p).  */
+
+bool
+refinable_body_p (const_tree fndecl)
+{
+  return lookup_attribute ("refinable body", DECL_ATTRIBUTES (fndecl));
+}
+
+/* Add the internal "refinable body" attribute to FNDECL, unless it is
+   already there.  The attribute has a space in its name so that it cannot
+   be spelled in source.  */
+
+void
+mark_refinable_body (tree fndecl)
+{
+  if (!refinable_body_p (fndecl))
+    DECL_ATTRIBUTES (fndecl)
+      = tree_cons (get_identifier ("refinable body"), NULL_TREE,
+		   DECL_ATTRIBUTES (fndecl));
+}
+
+/* Return true if the body of this function is refinable.  The body is
+   refinable when the function whose body it is (the ultimate alias target)
+   carries the internal "refinable body" attribute and this symbol may bind
+   to another definition of the same function at link or load time: it is
+   an external inline body (C99 inline, gnu_inline, extern template), a
+   COMDAT or a weak definition, or is otherwise replaceable.
+
+   A refinable body is a valid definition of the function, but the other
+   definitions the symbol may bind to are allowed to behave differently from
+   it in ways that matter -- for example because each translation unit made
+   its own choice where the language lets the behavior of the same source
+   differ between evaluations.  Copying the body into this unit (inlining,
+   cloning, splitting) is therefore correct, but a call of the symbol must
+   not rely on properties derived from this body, such as its return range,
+   side effects or exceptions.  get_availability reports such a function as
+   AVAIL_INTERPOSABLE unless its COPY_BODY argument is true.
+
+   A body that has a refinable body inlined into it carries the attribute
+   too (see inline_call), so the property follows the code.  */
+
+bool
+cgraph_node::refinable_p ()
+{
+  if (!TREE_PUBLIC (decl))
+    return false;
+  cgraph_node *body = this;
+  if (alias && analyzed)
+    {
+      body = ultimate_alias_target ();
+      if (!body)
+	return false;
+    }
+  if (!refinable_body_p (body->decl))
+    return false;
+  return (DECL_EXTERNAL (decl)
+	  || DECL_COMDAT (decl)
+	  || get_comdat_group ()
+	  || decl_replaceable_p (decl, semantic_interposition));
+}
+
 /* Return function availability.  See cgraph.h for description of individual
    return values.  */
 enum availability
-cgraph_node::get_availability (symtab_node *ref)
+cgraph_node::get_availability (symtab_node *ref, bool copy_body)
 {
   if (ref)
     {
@@ -2805,12 +2869,15 @@ cgraph_node::get_availability (symtab_node *ref)
   else if (inlined_to)
     avail = AVAIL_AVAILABLE;
   else if (transparent_alias)
-    ultimate_alias_target (&avail, ref);
+    ultimate_alias_target (&avail, ref, copy_body);
   else if (ifunc_resolver
 	   || lookup_attribute ("noipa", DECL_ATTRIBUTES (decl)))
     avail = AVAIL_INTERPOSABLE;
+  /* An external inline body is never the definition a call of the symbol
+     binds to, so a refinable one is interposable.  */
   else if (!externally_visible)
-    avail = AVAIL_AVAILABLE;
+    avail = (DECL_EXTERNAL (decl) && !copy_body && refinable_p ()
+	     ? AVAIL_INTERPOSABLE : AVAIL_AVAILABLE);
   /* If this is a reference from symbol itself and there are no aliases, we
      may be sure that the symbol was not interposed by something else because
      the symbol itself would be unreachable otherwise.
@@ -2820,6 +2887,10 @@ cgraph_node::get_availability (symtab_node *ref)
 	   || (ref && get_comdat_group ()
 	       && get_comdat_group () == ref->get_comdat_group ()))
     avail = AVAIL_AVAILABLE;
+  /* A refinable body may differ from the definition the symbol binds to,
+     even for an inline function.  */
+  else if (!copy_body && refinable_p ())
+    avail = AVAIL_INTERPOSABLE;
   /* Inline functions are safe to be analyzed even if their symbol can
      be overwritten at runtime.  It is not meaningful to enforce any sane
      behavior on replacing inline function by different body.  */
@@ -3361,7 +3432,8 @@ cgraph_node::set_pure_flag (bool pure, bool looping)
   call_for_symbol_thunks_and_aliases (set_pure_flag_1, &info, !pure, true);
   for (struct cgraph_node *n = simd_clones; n != NULL;
        n = n->simdclone->next_clone)
-    set_pure_flag_1 (n, &info);
+    if (!pure || n->get_availability () > AVAIL_INTERPOSABLE)
+      set_pure_flag_1 (n, &info);
   return info.changed;
 }
 
@@ -3646,7 +3718,8 @@ collect_callers_of_node_1 (cgraph_node *node, void *data)
   vec<cgraph_edge *> *redirect_callers = (vec<cgraph_edge *> *)data;
   cgraph_edge *cs;
   enum availability avail;
-  node->ultimate_alias_target (&avail);
+  /* The callers are redirected to a copy of the body.  */
+  node->ultimate_alias_target (&avail, NULL, true);
 
   if (avail > AVAIL_INTERPOSABLE)
     for (cs = node->callers; cs != NULL; cs = cs->next_caller)
@@ -3663,8 +3736,11 @@ auto_vec<cgraph_edge *>
 cgraph_node::collect_callers (void)
 {
   auto_vec<cgraph_edge *> redirect_callers;
+  /* collect_callers_of_node_1 skips interposable symbols itself; walking
+     them too lets it see a refinable body, whose callers may be redirected
+     to a copy of it.  */
   call_for_symbol_thunks_and_aliases (collect_callers_of_node_1,
-				    &redirect_callers, false);
+				    &redirect_callers, refinable_p ());
   return redirect_callers;
 }
 
@@ -4532,9 +4608,9 @@ cgraph_node::verify_cgraph_nodes (void)
 
 cgraph_node *
 cgraph_node::function_symbol (enum availability *availability,
-			      struct symtab_node *ref)
+			      struct symtab_node *ref, bool copy_body)
 {
-  cgraph_node *node = ultimate_alias_target (availability, ref);
+  cgraph_node *node = ultimate_alias_target (availability, ref, copy_body);
 
   while (node->thunk)
     {
@@ -4542,7 +4618,8 @@ cgraph_node::function_symbol (enum availability *availability,
 
       ref = node;
       node = node->callees->callee;
-      node = node->ultimate_alias_target (availability ? &a : NULL, ref);
+      node = node->ultimate_alias_target (availability ? &a : NULL, ref,
+					  copy_body);
       if (availability && a < *availability)
 	*availability = a;
     }
@@ -4559,9 +4636,9 @@ cgraph_node::function_symbol (enum availability *availability,
 cgraph_node *
 cgraph_node::function_or_virtual_thunk_symbol
 				(enum availability *availability,
-				 struct symtab_node *ref)
+				 struct symtab_node *ref, bool copy_body)
 {
-  cgraph_node *node = ultimate_alias_target (availability, ref);
+  cgraph_node *node = ultimate_alias_target (availability, ref, copy_body);
 
   while (node->thunk && !thunk_info::get (node)->virtual_offset_p)
     {
@@ -4569,7 +4646,8 @@ cgraph_node::function_or_virtual_thunk_symbol
 
       ref = node;
       node = node->callees->callee;
-      node = node->ultimate_alias_target (availability ? &a : NULL, ref);
+      node = node->ultimate_alias_target (availability ? &a : NULL, ref,
+					  copy_body);
       if (availability && a < *availability)
 	*availability = a;
     }

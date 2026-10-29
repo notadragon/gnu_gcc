@@ -1145,6 +1145,10 @@ cgraph_node::create_version_clone_with_body
       input_location = saved_loc;
       if (!r)
 	return NULL;
+
+      /* The clone still holds a copy of a refinable body.  */
+      if (refinable_body_p (old_decl))
+	mark_refinable_body (new_decl);
     }
 
   /* When the old decl was a con-/destructor make sure the clone isn't.  */

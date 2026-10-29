@@ -3711,7 +3711,8 @@ try_speculative_devirtualization (tree otr_type, HOST_WIDE_INT otr_token,
     = likely_target->function_symbol ();
   if (DECL_ARTIFICIAL (non_thunk_target->decl))
     return NULL;
-  if (likely_target->get_availability () <= AVAIL_INTERPOSABLE
+  /* A refinable body may still be inlined through the speculation.  */
+  if (likely_target->get_availability (NULL, true) <= AVAIL_INTERPOSABLE
       && likely_target->can_be_discarded_p ())
     return NULL;
   return likely_target;
@@ -3762,7 +3763,8 @@ devirt_target_ok_p (cgraph_node *likely_target, struct devirt_stats *stats)
       stats->nartificial++;
       return false;
     }
-  if (likely_target->get_availability () <= AVAIL_INTERPOSABLE
+  /* A refinable body may still be inlined through the speculation.  */
+  if (likely_target->get_availability (NULL, true) <= AVAIL_INTERPOSABLE
       && likely_target->can_be_discarded_p ())
     {
       if (dump_file)

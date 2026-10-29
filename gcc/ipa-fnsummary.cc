@@ -3610,7 +3610,8 @@ estimate_edge_devirt_benefit (struct cgraph_edge *ie,
   callee = cgraph_node::get (target);
   if (!callee || !callee->definition)
     return false;
-  callee = callee->function_symbol (&avail);
+  /* The benefit comes from inlining, which copies the body.  */
+  callee = callee->function_symbol (&avail, NULL, true);
   if (avail < AVAIL_AVAILABLE)
     return false;
   isummary = ipa_fn_summaries->get (callee);

@@ -631,10 +631,16 @@ function_and_variable_visibility (bool whole_program)
     {
       FOR_EACH_DEFINED_FUNCTION (node)
 	{
+	  /* A refinable body is interposable only for the optimizers that
+	     use properties of the body; its recursive calls are no more
+	     interposable than those of other COMDAT or external inline
+	     bodies, and a local alias in a COMDAT group could not be
+	     referenced from the copies of the body inlined elsewhere.  */
 	  if (node->get_availability () != AVAIL_INTERPOSABLE
 	      || DECL_EXTERNAL (node->decl)
 	      || node->has_aliases_p ()
-	      || lookup_attribute ("noipa", DECL_ATTRIBUTES (node->decl)))
+	      || lookup_attribute ("noipa", DECL_ATTRIBUTES (node->decl))
+	      || node->refinable_p ())
 	    continue;
 
 	  cgraph_node *alias = 0;

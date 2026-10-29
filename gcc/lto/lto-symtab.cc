@@ -1032,9 +1032,13 @@ lto_symtab_merge_symbols (void)
 		  node->analyzed = false;
 		  node->cpp_implicit_alias = false;
 		}
+	      /* A refinable body is kept for inlining like an available
+		 one; as an external body it stays interposable for the
+		 rest of the optimizers.  */
 	      else if (!node->alias
 		       && node->definition
-		       && node->get_availability () <= AVAIL_INTERPOSABLE)
+		       && node->get_availability (NULL, true)
+			  <= AVAIL_INTERPOSABLE)
 		{
 		  if ((cnode = dyn_cast <cgraph_node *> (node)) != NULL)
 		    cnode->reset ();

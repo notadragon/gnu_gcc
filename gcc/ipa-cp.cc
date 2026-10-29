@@ -447,7 +447,8 @@ determine_versionability (struct cgraph_node *node,
     reason = "alias or thunk";
   else if (!node->versionable)
     reason = "not a tree_versionable_function";
-  else if (node->get_availability () <= AVAIL_INTERPOSABLE)
+  /* Clones are copies of the body, so a refinable body may be cloned.  */
+  else if (node->get_availability (NULL, true) <= AVAIL_INTERPOSABLE)
     reason = "insufficient body availability";
   else if (!opt_for_fn (node->decl, optimize)
 	   || !opt_for_fn (node->decl, flag_ipa_cp))
@@ -651,7 +652,10 @@ ipcp_cloning_candidate_p (struct cgraph_node *node)
     }
 
   init_caller_stats (&stats);
-  node->call_for_symbol_thunks_and_aliases (gather_caller_stats, &stats, false);
+  /* A refinable NODE is skipped as interposable unless included
+     explicitly.  */
+  node->call_for_symbol_thunks_and_aliases (gather_caller_stats, &stats,
+					    node->refinable_p ());
 
   if (ipa_size_summaries->get (node)->self_size < stats.n_calls)
     {
@@ -722,7 +726,7 @@ ignore_edge_p (cgraph_edge *e)
 {
   enum availability avail;
   cgraph_node *ultimate_target
-    = e->callee->function_or_virtual_thunk_symbol (&avail, e->caller);
+    = e->callee->function_or_virtual_thunk_symbol (&avail, e->caller, true);
 
   return (avail <= AVAIL_INTERPOSABLE
 	  || !opt_for_fn (ultimate_target->decl, optimize)
@@ -3089,7 +3093,8 @@ propagate_constants_across_call (struct cgraph_edge *cs)
   bool ret = false;
   int i, args_count, parms_count;
 
-  callee = cs->callee->function_symbol (&availability);
+  /* The values reach only clones of a refinable callee.  */
+  callee = cs->callee->function_symbol (&availability, NULL, true);
   if (!callee->definition)
     return false;
   gcc_checking_assert (callee->has_gimple_body_p ());
@@ -3375,7 +3380,7 @@ devirtualization_time_bonus (struct cgraph_node *node,
       callee = cgraph_node::get (target);
       if (!callee || !callee->definition)
 	continue;
-      callee = callee->function_symbol (&avail);
+      callee = callee->function_symbol (&avail, NULL, true);
       if (avail < AVAIL_AVAILABLE)
 	continue;
       isummary = ipa_fn_summaries->get (callee);
@@ -4282,7 +4287,8 @@ calls_same_node_or_its_all_contexts_clone_p (cgraph_edge *cs, cgraph_node *dest,
 					     bool allow_recursion_to_clone)
 {
   enum availability availability;
-  cgraph_node *callee = cs->callee->function_symbol (&availability);
+  cgraph_node *callee = cs->callee->function_symbol (&availability, NULL,
+						      true);
 
   if (availability <= AVAIL_INTERPOSABLE)
     return false;
@@ -4858,8 +4864,8 @@ update_profiling_info (struct cgraph_node *orig_node,
 	 majority of calls but which we must divide in between the original and
 	 new node.  */
       init_caller_stats (&stats, orig_node);
-      orig_node->call_for_symbol_thunks_and_aliases (gather_caller_stats,
-						     &stats, false);
+      orig_node->call_for_symbol_thunks_and_aliases
+	(gather_caller_stats, &stats, orig_node->refinable_p ());
       int orig_nonrec_calls = stats.n_nonrec_calls;
       profile_count orig_nonrec_call_count = stats.count_sum;
 
@@ -5306,7 +5312,8 @@ self_recursive_pass_through_p (cgraph_edge *cs, ipa_jump_func *jfunc, int i,
 {
   enum availability availability;
   if (jfunc->type == IPA_JF_PASS_THROUGH
-      && cs->caller == cs->callee->function_symbol (&availability)
+      && cs->caller == cs->callee->function_symbol (&availability, NULL,
+						     true)
       && availability > AVAIL_INTERPOSABLE
       && (!simple || ipa_get_jf_pass_through_operation (jfunc) == NOP_EXPR)
       && ipa_get_jf_pass_through_formal_id (jfunc) == i
@@ -5325,7 +5332,8 @@ self_recursive_ancestor_p (cgraph_edge *cs, ipa_jump_func *jfunc, int i)
 {
   enum availability availability;
   if (jfunc->type == IPA_JF_ANCESTOR
-      && cs->caller == cs->callee->function_symbol (&availability)
+      && cs->caller == cs->callee->function_symbol (&availability, NULL,
+						     true)
       && availability > AVAIL_INTERPOSABLE
       && ipa_get_jf_ancestor_offset (jfunc) == 0
       && ipa_get_jf_ancestor_formal_id (jfunc) == i
@@ -5347,7 +5355,7 @@ self_recursive_agg_pass_through_p (const cgraph_edge *cs,
 				   int i, bool simple = true)
 {
   enum availability availability;
-  if (cs->caller == cs->callee->function_symbol (&availability)
+  if (cs->caller == cs->callee->function_symbol (&availability, NULL, true)
       && availability > AVAIL_INTERPOSABLE
       && jfunc->jftype == IPA_JF_LOAD_AGG
       && jfunc->offset == jfunc->value.load_agg.offset
@@ -6403,7 +6411,7 @@ decide_whether_version_node (struct cgraph_node *node, int cur_sweep)
   struct caller_statistics stats;
   init_caller_stats (&stats);
   node->call_for_symbol_thunks_and_aliases (gather_caller_stats, &stats,
-						false);
+					    node->refinable_p ());
   if (!stats.n_calls)
     {
       if (dump_file && (dump_flags & TDF_DETAILS))

@@ -434,6 +434,13 @@ inline_call (struct cgraph_edge *e, bool update_original,
     DECL_FUNCTION_PERSONALITY (to->decl)
       = DECL_FUNCTION_PERSONALITY (callee->decl);
 
+  /* TO now holds a copy of a refinable body, so other definitions of TO
+     may differ from its body in the same way.  Mark TO whatever its
+     linkage, so that the mark also follows TO when it is inlined itself;
+     cgraph_node::refinable_p decides whether the mark matters.  */
+  if (refinable_body_p (callee->decl))
+    mark_refinable_body (to->decl);
+
   bool reload_optimization_node = false;
   bool remove_strict_aliasing
     = (!opt_for_fn (callee->decl, flag_strict_aliasing)

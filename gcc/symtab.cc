@@ -1654,7 +1654,7 @@ symtab_node::copy_visibility_from (symtab_node *n)
 
 symtab_node *
 symtab_node::ultimate_alias_target_1 (enum availability *availability,
-				      symtab_node *ref)
+				      symtab_node *ref, bool copy_body)
 {
   bool transparent_p = false;
 
@@ -1675,7 +1675,7 @@ symtab_node::ultimate_alias_target_1 (enum availability *availability,
     {
       transparent_p = transparent_alias;
       if (!transparent_p)
-	*availability = get_availability (ref);
+	*availability = get_availability (ref, copy_body);
       else
 	*availability = AVAIL_NOT_AVAILABLE;
     }
@@ -1690,7 +1690,7 @@ symtab_node::ultimate_alias_target_1 (enum availability *availability,
 	  if (!availability || (!transparent_p && node->analyzed))
 	    ;
 	  else if (node->analyzed && !node->transparent_alias)
-	    *availability = node->get_availability (ref);
+	    *availability = node->get_availability (ref, copy_body);
 	  else
 	    *availability = AVAIL_NOT_AVAILABLE;
 	  return node;
@@ -1698,7 +1698,7 @@ symtab_node::ultimate_alias_target_1 (enum availability *availability,
       if (node && availability && transparent_p
 	  && node->transparent_alias)
 	{
-	  *availability = node->get_availability (ref);
+	  *availability = node->get_availability (ref, copy_body);
 	  transparent_p = false;
 	}
     }

@@ -325,6 +325,10 @@ Maximum number of different predicates used to track properties of loops in IPA 
 Common Joined UInteger Var(param_ipa_max_switch_predicate_bounds) Init(5) Param Optimization
 Maximal number of boundary endpoints of case ranges of switch statement used during IPA function summary generation.
 
+-param=ipa-refinable-inline=
+Common Joined UInteger Var(param_ipa_refinable_inline) IntegerRange(0, 1) Param
+Mark the bodies of all functions declared inline as refinable, so that calls not inlined do not rely on properties of the body; for testing.
+
 -param=ipa-sra-deref-prob-threshold=
 Common Joined UInteger Var(param_ipa_sra_deref_prob_threshold) Init(50) IntegerRange(0, 100) Param Optimization
 Minimum probability (as a percentage) of dereferencing of a function pointer parameter for it to be considered for replacement with simple values.

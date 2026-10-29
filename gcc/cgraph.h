@@ -80,7 +80,9 @@ enum availability
      by a different one from other compilation unit and thus needs to
      be dealt with a care.  Like AVAIL_NOT_AVAILABLE it can have
      arbitrary side effects on escaping variables and functions, while
-     like AVAILABLE it might access static variables.  */
+     like AVAILABLE it might access static variables.
+     A function with a refinable body (see cgraph_node::refinable_p) is
+     also AVAIL_INTERPOSABLE, except for users that copy the body.  */
   AVAIL_INTERPOSABLE,
   /* Function body/variable initializer is known and will be used in final
      program.  */
@@ -323,9 +325,11 @@ public:
      If NODE is not an alias, return NODE.
      When AVAILABILITY is non-NULL, get minimal availability in the chain.
      When REF is non-NULL, assume that reference happens in symbol REF
-     when determining the availability.  */
+     when determining the availability.  COPY_BODY is as for
+     get_availability.  */
   symtab_node *ultimate_alias_target (enum availability *avail = NULL,
-				      struct symtab_node *ref = NULL);
+				      struct symtab_node *ref = NULL,
+				      bool copy_body = false);
 
   /* Return next reachable static symbol with initializer after NODE.  */
   inline symtab_node *next_defined_symbol (void);
@@ -379,8 +383,10 @@ public:
   /* Return the initialization priority.  */
   priority_type get_init_priority ();
 
-  /* Return availability of NODE when referenced from REF.  */
-  enum availability get_availability (symtab_node *ref = NULL);
+  /* Return availability of NODE when referenced from REF.  COPY_BODY is
+     as for cgraph_node::get_availability.  */
+  enum availability get_availability (symtab_node *ref = NULL,
+				      bool copy_body = false);
 
   /* During LTO stream-in this predicate can be used to check whether node
      in question prevails in the linking to save some memory usage.  */
@@ -717,7 +723,8 @@ private:
 
   /* Worker for ultimate_alias_target.  */
   symtab_node *ultimate_alias_target_1 (enum availability *avail = NULL,
-					symtab_node *ref = NULL);
+					symtab_node *ref = NULL,
+					bool copy_body = false);
 
   /* Get dump name with normal or assembly name.  */
   const char *get_dump_name (bool asm_name_p) const;
@@ -972,19 +979,23 @@ struct GTY((tag ("SYMTAB_FUNCTION"))) cgraph_node : public symtab_node
      Walk through thunk, too.
      When AVAILABILITY is non-NULL, get minimal availability in the chain.
      When REF is non-NULL, assume that reference happens in symbol REF
-     when determining the availability.  */
+     when determining the availability.  COPY_BODY is as for
+     get_availability.  */
   cgraph_node *function_symbol (enum availability *avail = NULL,
-				struct symtab_node *ref = NULL);
+				struct symtab_node *ref = NULL,
+				bool copy_body = false);
 
   /* Walk the alias chain to return the function cgraph_node is alias of.
      Walk through non virtual thunks, too.  Thus we return either a function
      or a virtual thunk node.
      When AVAILABILITY is non-NULL, get minimal availability in the chain.
      When REF is non-NULL, assume that reference happens in symbol REF
-     when determining the availability.  */
+     when determining the availability.  COPY_BODY is as for
+     get_availability.  */
   cgraph_node *function_or_virtual_thunk_symbol
 				(enum availability *avail = NULL,
-				 struct symtab_node *ref = NULL);
+				 struct symtab_node *ref = NULL,
+				 bool copy_body = false);
 
   /* Create node representing clone of N executed COUNT times.  Decrease
      the execution counts from original node too.
@@ -1111,10 +1122,12 @@ struct GTY((tag ("SYMTAB_FUNCTION"))) cgraph_node : public symtab_node
      is alias of. Do not walk through thunks.
      When AVAILABILITY is non-NULL, get minimal availability in the chain.
      When REF is non-NULL, assume that reference happens in symbol REF
-     when determining the availability.  */
+     when determining the availability.  COPY_BODY is as for
+     get_availability.  */
 
   cgraph_node *ultimate_alias_target (availability *availability = NULL,
-				      symtab_node *ref = NULL);
+				      symtab_node *ref = NULL,
+				      bool copy_body = false);
 
   /*  Call expand_thunk on all callers that are thunks and analyze those
       nodes that were expanded.  */
@@ -1215,8 +1228,16 @@ struct GTY((tag ("SYMTAB_FUNCTION"))) cgraph_node : public symtab_node
   void remove_callees (void);
 
   /* Return function availability.  See cgraph.h for description of individual
-     return values.  */
-  enum availability get_availability (symtab_node *ref = NULL);
+     return values.  When COPY_BODY is true, the caller copies the body into
+     REF (inlines it, clones it or splits it) instead of relying on
+     properties derived from the body for calls to this symbol; a refinable
+     body (see refinable_p) is then not a reason for AVAIL_INTERPOSABLE.  */
+  enum availability get_availability (symtab_node *ref = NULL,
+				      bool copy_body = false);
+
+  /* Return true if this function has a refinable body that callers of the
+     symbol must not rely on.  See the definition for details.  */
+  bool refinable_p ();
 
   /* Set TREE_NOTHROW on cgraph_node's decl and on aliases of the node
      if any to NOTHROW.  */
@@ -2915,6 +2936,8 @@ void release_function_body (tree);
 
 void cgraph_update_edges_for_call_stmt (gimple *, tree, gimple *);
 bool cgraph_function_possibly_inlined_p (tree);
+bool refinable_body_p (const_tree);
+void mark_refinable_body (tree);
 
 const char* cgraph_inline_failed_string (cgraph_inline_failed_t);
 cgraph_inline_failed_type_t cgraph_inline_failed_type (cgraph_inline_failed_t);
@@ -3563,16 +3586,16 @@ varpool_node::get_alias_target (void)
 
 inline symtab_node *
 symtab_node::ultimate_alias_target (enum availability *availability,
-				    symtab_node *ref)
+				    symtab_node *ref, bool copy_body)
 {
   if (!alias)
     {
       if (availability)
-	*availability = get_availability (ref);
+	*availability = get_availability (ref, copy_body);
       return this;
     }
 
-  return ultimate_alias_target_1 (availability, ref);
+  return ultimate_alias_target_1 (availability, ref, copy_body);
 }
 
 /* Given function symbol, walk the alias chain to return the function node
@@ -3583,10 +3606,10 @@ symtab_node::ultimate_alias_target (enum availability *availability,
 
 inline cgraph_node *
 cgraph_node::ultimate_alias_target (enum availability *availability,
-				    symtab_node *ref)
+				    symtab_node *ref, bool copy_body)
 {
   cgraph_node *n = dyn_cast <cgraph_node *>
-    (symtab_node::ultimate_alias_target (availability, ref));
+    (symtab_node::ultimate_alias_target (availability, ref, copy_body));
   if (!n && availability)
     *availability = AVAIL_NOT_AVAILABLE;
   return n;
@@ -3724,10 +3747,10 @@ symtab_node::get_create (tree node)
 /* Return availability of NODE when referenced from REF.  */
 
 inline enum availability
-symtab_node::get_availability (symtab_node *ref)
+symtab_node::get_availability (symtab_node *ref, bool copy_body)
 {
   if (is_a <cgraph_node *> (this))
-    return dyn_cast <cgraph_node *> (this)->get_availability (ref);
+    return dyn_cast <cgraph_node *> (this)->get_availability (ref, copy_body);
   else
     return dyn_cast <varpool_node *> (this)->get_availability (ref);
 }
