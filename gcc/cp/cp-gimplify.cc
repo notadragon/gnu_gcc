@@ -1885,6 +1885,33 @@ predeclare_vla (tree expr)
     }
 }
 
+/* True when CONTRACT's predicate is still a template tree, never substituted
+   against a deduced return type.
+
+   A postcondition with a result name is parsed with processing_template_decl
+   raised, because the result variable's type is `auto' at that point, so the
+   predicate is built as a template tree whose calls carry unresolved callees.
+   rebuild_postconditions makes it concrete once the return type is known, and
+   replaces POSTCONDITION_IDENTIFIER with a copy carrying that type in the same
+   breath -- so a result variable whose type still uses `auto' is exactly one
+   whose predicate was never substituted.
+
+   Deduction failing is the only way to get here, and it is only reachable on
+   an ill-formed function: either the body produced no type, or it produced
+   void and a result name on a void return is separately diagnosed.  The
+   late-parse path used for member functions builds the variable with the real
+   type and never answers true.  */
+
+static bool
+contract_predicate_unsubstituted_p (tree contract)
+{
+  if (TREE_CODE (contract) != POSTCONDITION_STMT)
+    return false;
+
+  tree id = POSTCONDITION_IDENTIFIER (contract);
+  return id && id != error_mark_node && type_uses_auto (TREE_TYPE (id));
+}
+
 /* Perform any pre-gimplification lowering of C++ front end trees to
    GENERIC.  */
 
@@ -2185,7 +2212,15 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
     case ASSERTION_STMT:
     case PRECONDITION_STMT:
     case POSTCONDITION_STMT:
-      if (tree check = build_contract_check (stmt))
+      /* A predicate that was never substituted against a deduced return type
+	 must not be emitted: everything downstream assumes a concrete
+	 condition, and expr_noexcept_p in particular walks it looking for
+	 calls and asserts that each callee has a pointer type (PR c++/127450).
+	 Nothing is lost by declining -- this state is only reachable on a
+	 function that has already been diagnosed.  */
+      if (contract_predicate_unsubstituted_p (stmt))
+	gcc_checking_assert (seen_error ());
+      else if (tree check = build_contract_check (stmt))
 	{
 	  *stmt_p = check;
 	  return cp_genericize_r (stmt_p, walk_subtrees, data);
