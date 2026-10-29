@@ -12686,6 +12686,15 @@ grokfndecl (tree ctype,
       SET_DECL_IMMEDIATE_FUNCTION_P (decl);
     }
 
+  /* A definition of ::handle_contract_violation replaces the default
+     contract-violation handler; check that it is one that can.  */
+  if (flag_contracts
+      && ctype == NULL_TREE
+      && DECL_NAMESPACE_SCOPE_P (decl)
+      && CP_DECL_CONTEXT (decl) == global_namespace
+      && id_equal (DECL_NAME (decl), "handle_contract_violation"))
+    check_handle_contract_violation (decl);
+
   DECL_EXTERNAL (decl) = 1;
   if (TREE_CODE (type) == FUNCTION_TYPE)
     {

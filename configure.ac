@@ -154,6 +154,7 @@ target_libraries="target-libgcc \
 		target-newlib \
 		target-libgomp \
 		target-libatomic \
+		target-libcontracts \
 		target-libitm \
 		target-libstdc++-v3 \
 		target-libsanitizer \
@@ -574,6 +575,22 @@ if test -d ${srcdir}/libatomic; then
 	then
 	    AC_MSG_RESULT([no])
 	    noconfigdirs="$noconfigdirs target-libatomic"
+	else
+	    AC_MSG_RESULT([yes])
+	fi
+    fi
+fi
+
+# Disable libcontracts on unsupported systems.
+if test -d ${srcdir}/libcontracts; then
+    if test x$enable_libcontracts = x; then
+	AC_MSG_CHECKING([for libcontracts support])
+	if (srcdir=${srcdir}/libcontracts; \
+		. ${srcdir}/configure.tgt; \
+		test -n "$UNSUPPORTED")
+	then
+	    AC_MSG_RESULT([no])
+	    noconfigdirs="$noconfigdirs target-libcontracts"
 	else
 	    AC_MSG_RESULT([yes])
 	fi
