@@ -3093,6 +3093,14 @@ dump_expr (cxx_pretty_printer *pp, tree t, int flags)
       pp_cxx_right_paren (pp);
       break;
 
+    case CONTRACT_CONTROL_EXPR:
+      pp_cxx_ws_string (pp, "contract_control");
+      pp_cxx_whitespace (pp);
+      pp_cxx_left_paren (pp);
+      dump_expr (pp, TREE_OPERAND (t, 0), flags);
+      pp_cxx_right_paren (pp);
+      break;
+
     case NOEXCEPT_EXPR:
       pp_cxx_ws_string (pp, "noexcept");
       pp_cxx_whitespace (pp);

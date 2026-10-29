@@ -540,6 +540,92 @@ get_contract_assertion_kind (tree contract)
   gcc_unreachable ();
 }
 
+/* LABEL as the facets see it: a const lvalue of its type, as the library
+   concepts ask about (`const T&'), so a non-const member is not a facet even
+   for a prvalue label such as pre<L{}>.  */
+
+static tree
+label_facet_object (tree label)
+{
+  tree type = TREE_TYPE (label);
+  if (lvalue_p (label) && CP_TYPE_CONST_P (type))
+    return label;
+  tree cref = cp_build_reference_type (cp_build_qualified_type
+				       (type, TYPE_QUAL_CONST), false);
+  tree obj = build_static_cast (input_location, cref, label, tf_none);
+  return obj == error_mark_node ? label : convert_from_reference (obj);
+}
+
+/* True when MEMBER, looked up in LABEL_TYPE, is public in it.
+
+   Facet detection uses lookup_member with protect=0, which finds a member
+   regardless of access.  An inaccessible member must not make the type
+   participate in the facet: the library concept is a requires-expression, and
+   that is false for a member the caller cannot name.  Detection therefore has
+   to answer "absent" -- and specifically must not diagnose, which is what
+   happened before, when the deferred access check from the viability probe
+   escaped as an error.  P3400 is explicit that an inaccessible member is not
+   ill-formed, precisely because a label may carry private helpers sharing a
+   facet's name -- tag-dispatch overloads, say -- that were never meant to be
+   the facet at all.
+
+   Access is judged as the concept judges it, from namespace
+   std::contracts::labels, not from the contract: a contract written in a
+   member or friend of the label must not see a private facet.  */
+
+static bool
+label_facet_accessible_p (tree label_type, tree member)
+{
+  if (!member || member == error_mark_node
+      || !label_type || !CLASS_TYPE_P (label_type) || !TYPE_BINFO (label_type))
+    return false;
+
+  tree decl = member;
+  if (BASELINK_P (decl))
+    decl = BASELINK_FUNCTIONS (decl);
+  if (TREE_CODE (decl) == OVERLOAD)
+    decl = OVL_FIRST (decl);
+  if (TREE_CODE (decl) == TEMPLATE_DECL)
+    decl = DECL_TEMPLATE_RESULT (decl);
+
+  return accessible_p (TYPE_BINFO (label_type), decl,
+		       /*consider_local_p=*/false);
+}
+
+/* Constant-evaluate CALL, an invocation of the facet named FACET_NAME on an
+   assertion-control object of LABEL_TYPE, and diagnose at LOC if it is not
+   a constant expression.
+
+   By the time this is reached the facet is present: the member exists, is
+   accessible, and the call is viable.  No concept can ask whether a member
+   is usable in a constant expression, so per P3400 such a type still
+   participates in the facet and the error arrives when the result is
+   consumed during translation.  Say what is actually wrong -- naming the
+   facet and the control object -- rather than letting the evaluator's
+   generic "call to non-'constexpr' function" escape, which never mentions
+   contracts and leaves the reader to work out why 'constexpr' is required
+   here.  The facet and the type between them identify the member, so this
+   is one diagnostic rather than ours followed by the evaluator's; Clang's
+   err_contract_facet_not_constant says the same thing.  */
+
+static tree
+constant_facet_value (tree call, tree label_type, const char *facet_name,
+		      location_t loc)
+{
+  tree result = cxx_constant_value (call, NULL_TREE, tf_none);
+  if (result && result != error_mark_node)
+    return result;
+
+  /* Name the type without its cv-qualification: a label is always a
+     constexpr, therefore const, object, so "const foo_t" here is noise that
+     every one of these messages would carry.  */
+  error_at (loc,
+	    "the %qs facet of assertion-control object %qT must be usable "
+	    "in a constant expression", facet_name,
+	    TYPE_MAIN_VARIANT (label_type));
+  return error_mark_node;
+}
+
 static tree find_std_contracts_type (tree);
 
 /* The argument a compute_semantic facet is called with: a non-const lvalue of
@@ -550,11 +636,85 @@ static tree find_std_contracts_type (tree);
    enumeration is only looked for, never injected as lookup_std_contracts_type
    would inject a class (GCC-676).  */
 
-/* Get contract_evaluation_semantic of the specified contract.  */
-
-contract_evaluation_semantic
-get_evaluation_semantic (const_tree contract)
+static tree
+build_semantic_facet_arg (uint16_t sem)
 {
+  tree sem_type
+    = find_std_contracts_type (get_identifier ("evaluation_semantic"));
+  if (!sem_type || TREE_CODE (sem_type) != ENUMERAL_TYPE)
+    return NULL_TREE;
+  tree tmp = force_target_expr (sem_type, build_int_cst (sem_type, sem),
+				tf_none);
+  return cp_build_fold_indirect_ref (build_address (tmp));
+}
+
+/* Build LABEL.compute_semantic(SEM_VAL), implicitly converted to
+   std::contracts::evaluation_semantic.  Returns NULL_TREE if LABEL's type is
+   not a computed-semantics control type ([basic.contract.control]): the
+   member does not exist, cannot be called, is inaccessible, or its result is
+   not implicitly convertible to evaluation_semantic, so that an int, another
+   enumeration or a class with only an explicit conversion function does not
+   participate, while a class with an implicit one does.  */
+
+static tree
+build_compute_semantic_call (tree label, uint16_t sem_val)
+{
+  if (!label || label == error_mark_node
+      || !TREE_TYPE (label) || !CLASS_TYPE_P (TREE_TYPE (label))
+      || type_dependent_expression_p (label))
+    return NULL_TREE;
+  tree label_type = TREE_TYPE (label);
+  tree fn = lookup_member (label_type, get_identifier ("compute_semantic"),
+			   /*protect=*/0, /*want_type=*/false, tf_none);
+  if (!fn || fn == error_mark_node)
+    return NULL_TREE;
+
+  tree sem_arg = build_semantic_facet_arg (sem_val);
+  if (!sem_arg)
+    return NULL_TREE;
+  tree sem_type = TREE_TYPE (sem_arg);
+  vec<tree, va_gc> *args = NULL;
+  vec_safe_push (args, sem_arg);
+  /* Access is judged below, on the member chosen, as the concept's
+     requires-expression would: a private overload sharing the facet's name
+     must neither be the facet nor stop a public one from being it.  */
+  push_deferring_access_checks (dk_no_check);
+  tree call = build_new_method_call (label_facet_object (label), fn, &args,
+				     NULL_TREE, LOOKUP_NORMAL, NULL, tf_none);
+  pop_deferring_access_checks ();
+  if (!call || call == error_mark_node)
+    return NULL_TREE;
+  tree callee = cp_get_callee_fndecl_nofold (extract_call_expr (call));
+  if (!callee || !label_facet_accessible_p (label_type, callee))
+    return NULL_TREE;
+  /* The concept's { t.compute_semantic(s) } -> convertible_to<...>.  */
+  if (!is_convertible (TREE_TYPE (call), sem_type))
+    return NULL_TREE;
+  tree conv = perform_implicit_conversion (sem_type, call, tf_none);
+  if (!conv || conv == error_mark_node)
+    return NULL_TREE;
+  return conv;
+}
+
+/* Call LABEL.compute_semantic(SEM_VAL), convert the result implicitly to
+   evaluation_semantic, and constant-evaluate it.  Returns NULL_TREE if the
+   label has no compute_semantic facet (build_compute_semantic_call), and
+   error_mark_node if the converted call does not evaluate to a constant.
+   Used by compute_semantic_core.  */
+
+static tree
+call_label_method (tree label, uint16_t sem_val, location_t loc)
+{
+  tree conv = build_compute_semantic_call (label, sem_val);
+  if (!conv)
+    return NULL_TREE;
+  return constant_facet_value (conv, TREE_TYPE (label), "compute_semantic",
+			       loc);
+}
+
+/* Read the cached constexpr callee-side semantic.  Valid only after
+   ensure_evaluation_semantic(contract, fndecl, true) has been called.  */
+
 contract_evaluation_semantic
 get_constexpr_evaluation_semantic (const_tree contract)
 {
@@ -655,24 +815,27 @@ resolve_implicit_contract_semantic (tree fndecl, location_t loc,
      an ill-formed configuration -- diagnose it rather than silently picking
      one.  */
   if (r.semantic == CES_INVALID)
-  if (CONTRACT_EVALUATION_SEMANTIC (contract))
     {
-      tree s = CONTRACT_EVALUATION_SEMANTIC (contract);
-      tree i = (TREE_CODE (s) == INTEGER_CST) ? s
-					      : DECL_INITIAL (STRIP_NOPS (s));
-      gcc_checking_assert (!type_dependent_expression_p (s) && i);
-      switch (contract_evaluation_semantic ev =
-	      (contract_evaluation_semantic) tree_to_uhwi (i))
-	{
-	/* This needs to be kept in step with any added semantics.  */
-	case CES_IGNORE:
-	case CES_OBSERVE:
-	case CES_ENFORCE:
-	case CES_QUICK:
-	  return ev;
-	default:
-	  break;
-	}
+      error_at (loc, "no valid evaluation semantic for the implicit contract "
+		     "assertion for %qs", ub_id);
+      return CES_ASSUME;
+    }
+  return r.semantic;
+}
+
+/* Per-UB policy for the middle-end implicit checks (those instrumented by the
+   ubsan pass), keyed by config group.  ALLOWED is the base set of C++26
+   semantics the check can emit; all middle-end checks exclude the
+   potentially-throwing "enforce"/"observe" (their site runs after EH lowering,
+   so a throwing handler could not unwind) -- a configured throwing enf/obs is
+   clamped by the best-fit fallback to the noexcept variant (under
+   -fcontracts-p4298) or quick_enforce.  DEFINED_EB is true when the UB has a
+   defined erroneous-behavior substitute, so that "ignore" instruments to
+   produce that defined value (IMPLICIT_UB_DEFINED) rather than being a no-op:
+   e.g. signed overflow coerces to the wrapped result, whereas a null
+   dereference has no defined lvalue (ignore = raw operation).  COMMENT is the
+   contract_violation comment for the reported violation.  */
+
     }
 
 /* Populate the groups vec from the contract's cached group names.  */
@@ -5921,6 +6084,628 @@ finish_contract_message (tree contract, tree message, tree condition,
    compute_comment and compute_message never ran for a templated contract
    at all.  */
 
+static vec<tree, va_gc> *
+build_facet_probe_args (const char *facet_name)
+{
+  vec<tree, va_gc> *args = NULL;
+
+  if (!strcmp (facet_name, "handle_contract_violation"))
+    {
+      tree cv
+	= lookup_std_contracts_type (get_identifier ("contract_violation"));
+      if (!cv || cv == error_mark_node)
+	return NULL;
+      tree ref = cp_build_indirect_ref
+	(input_location,
+	 build_zero_cst (build_pointer_type
+			 (cp_build_qualified_type (cv, TYPE_QUAL_CONST))),
+	 RO_UNARY_STAR, tf_none);
+      if (!ref || ref == error_mark_node)
+	return NULL;
+      vec_safe_push (args, ref);
+      return args;
+    }
+
+  if (!strcmp (facet_name, "query"))
+    {
+      tree cvp = build_pointer_type
+	(cp_build_qualified_type (void_type_node, TYPE_QUAL_CONST));
+      vec_safe_push (args, build_zero_cst (cvp));
+      vec_safe_push (args, build_zero_cst (size_type_node));
+      return args;
+    }
+
+  if (!strcmp (facet_name, "compute_comment")
+      || !strcmp (facet_name, "compute_message"))
+    {
+      vec_safe_push (args, build_zero_cst (const_string_type_node));
+      return args;
+    }
+
+  if (!strcmp (facet_name, "compute_semantic"))
+    {
+      tree arg = build_semantic_facet_arg (2);
+      if (!arg)
+	return NULL;
+      vec_safe_push (args, arg);
+      return args;
+    }
+
+  return NULL;
+}
+
+/* True when calling FACET_NAME on OBJ with ARGS is viable.  ACCESS says
+   whether access control applies.  */
+
+static bool
+facet_call_viable_p (tree obj, tree fn, vec<tree, va_gc> *args,
+		     deferring_kind access)
+{
+  deferring_access_check_sentinel sentry (access);
+  vec<tree, va_gc> *a = make_tree_vector_copy (args);
+  tree call = build_new_method_call (obj, fn, &a, NULL_TREE, LOOKUP_NORMAL,
+				     NULL, tf_none);
+  return call && call != error_mark_node;
+}
+
+/* Warn when LABEL_TYPE has a member named FACET_NAME that almost provides a
+   facet but does not.
+
+   Only two near misses are reported, alone or together, and each is
+   recognized by relaxing it and seeing whether that makes the call viable:
+   an inaccessible member, one that is not const, and one that is both.
+   Anything else stays silent.  That matters: P3400 points out that users
+   legitimately give a label private helpers sharing a facet's name --
+   tag-dispatch overloads, say -- and warning on a name match alone would fire
+   on every one of them.  Relaxing access and constness will not make such a
+   helper's signature fit, so it never reaches a warning.  */
+
+static void
+warn_near_miss_facet (location_t loc, tree label, tree label_type,
+		      const char *facet_name)
+{
+  if (!warn_contract_invalid_label_facet)
+    return;
+
+  tree fn = lookup_member (label_type, get_identifier (facet_name),
+			   /*protect=*/0, /*want_type=*/false, tf_none);
+  if (!fn || fn == error_mark_node)
+    return;
+
+  vec<tree, va_gc> *args = build_facet_probe_args (facet_name);
+  if (!args)
+    return;
+
+  /* The question detection asked: a const object, access enforced.  If that
+     is viable the facet is present and there is nothing to report.  */
+  if (facet_call_viable_p (label, fn, args, dk_no_deferred))
+    return;
+
+  tree decl = BASELINK_P (fn) ? BASELINK_FUNCTIONS (fn) : fn;
+  if (TREE_CODE (decl) == OVERLOAD)
+    decl = OVL_FIRST (decl);
+
+  /* Relax access only.  */
+  if (!label_facet_accessible_p (label_type, fn)
+      && facet_call_viable_p (label, fn, args, dk_no_check))
+    {
+      if (warning_at (loc, OPT_Wcontract_invalid_label_facet,
+		      "%qT does not provide the %qs facet because that member "
+		      "is inaccessible", label_type, facet_name)
+	  && DECL_P (decl))
+	inform (DECL_SOURCE_LOCATION (decl), "declared here");
+      return;
+    }
+
+  /* Relax const only.  A facet is always invoked on a constexpr, therefore
+     const, control object, so a non-const member is not a facet.  */
+  tree nonconst_obj = cp_build_indirect_ref
+    (loc, build_zero_cst (build_pointer_type (label_type)), RO_UNARY_STAR,
+     tf_none);
+  if (!nonconst_obj || nonconst_obj == error_mark_node)
+    return;
+  if (facet_call_viable_p (nonconst_obj, fn, args, dk_no_deferred))
+    {
+      if (warning_at (loc, OPT_Wcontract_invalid_label_facet,
+		      "%qT does not provide the %qs facet because that member "
+		      "is not %<const%>; a facet member must be %<const%> or "
+		      "%<static%>", label_type, facet_name)
+	  && DECL_P (decl))
+	inform (DECL_SOURCE_LOCATION (decl), "declared here");
+      return;
+    }
+
+  /* Relax both.  */
+  if (!label_facet_accessible_p (label_type, fn)
+      && facet_call_viable_p (nonconst_obj, fn, args, dk_no_check))
+    {
+      if (warning_at (loc, OPT_Wcontract_invalid_label_facet,
+		      "%qT does not provide the %qs facet because that member "
+		      "is inaccessible and not %<const%>; a facet member must "
+		      "be %<const%> or %<static%>", label_type, facet_name)
+	  && DECL_P (decl))
+	inform (DECL_SOURCE_LOCATION (decl), "declared here");
+    }
+}
+
+/* Whether a member of type TYPE has the shape of the data-member facet
+   FACET_NAME, its access and constness aside: for allowed_semantics,
+   `evaluation_semantic_set ({m})' is valid; for group_names, `m[0]' is and
+   converts to `const char *' ([support.contract.control.allowed],
+   [support.contract.control.ident]).  */
+
+static bool
+data_facet_shape_p (location_t loc, tree type, const char *facet_name)
+{
+  tree obj = cp_build_indirect_ref
+    (loc, build_zero_cst (build_pointer_type (cv_unqualified (type))),
+     RO_UNARY_STAR, tf_none);
+  if (!obj || obj == error_mark_node)
+    return false;
+
+  if (!strcmp (facet_name, "allowed_semantics"))
+    {
+      tree set_type
+	= lookup_std_contracts_type (get_identifier ("evaluation_semantic_set"));
+      if (!set_type || set_type == error_mark_node)
+	return false;
+      tree init = build_constructor_single (init_list_type_node, NULL_TREE,
+					    obj);
+      tree set = build_functional_cast (loc, set_type,
+					build_tree_list (NULL_TREE, init),
+					tf_none);
+      return set && set != error_mark_node;
+    }
+
+  tree elt = grok_array_decl (loc, obj, size_zero_node, NULL, tf_none);
+  if (!elt || elt == error_mark_node)
+    return false;
+  tree conv = perform_implicit_conversion (const_string_type_node, elt,
+					   tf_none);
+  return conv && conv != error_mark_node;
+}
+
+/* Warn when LABEL_TYPE has a data member named FACET_NAME, one of the
+   data-member facets, that has the facet's shape but is not one because it
+   is inaccessible, not const, or both.  A same-named member of another shape
+   stays silent, as in warn_near_miss_facet.  */
+
+static void
+warn_near_miss_data_facet (location_t loc, tree label_type,
+			   const char *facet_name)
+{
+  if (!warn_contract_invalid_label_facet)
+    return;
+
+  tree member = lookup_member (label_type, get_identifier (facet_name),
+			       /*protect=*/0, /*want_type=*/false, tf_none);
+  if (!member || member == error_mark_node || BASELINK_P (member))
+    return;
+  if (!VAR_P (member) && TREE_CODE (member) != FIELD_DECL)
+    return;
+
+  bool inaccessible = !label_facet_accessible_p (label_type, member);
+  bool nonconst = !CP_TYPE_CONST_P (TREE_TYPE (member));
+  if (!inaccessible && !nonconst)
+    return;
+  if (!data_facet_shape_p (loc, TREE_TYPE (member), facet_name))
+    return;
+
+  const char *why = (inaccessible && nonconst
+		     ? G_("%qT does not provide the %qs facet because that "
+			  "member is inaccessible and not %<const%>")
+		     : inaccessible
+		     ? G_("%qT does not provide the %qs facet because that "
+			  "member is inaccessible")
+		     : G_("%qT does not provide the %qs facet because that "
+			  "member is not %<const%>"));
+  if (warning_at (loc, OPT_Wcontract_invalid_label_facet, why, label_type,
+		  facet_name))
+    inform (DECL_SOURCE_LOCATION (member), "declared here");
+}
+
+/* Map from label type -> local violation handler trampoline FUNCTION_DECL.
+   Generated at parse time, looked up during gimplification.  */
+static GTY(()) hash_map<tree, tree, pch_traits> *local_violation_trampoline_map;
+
+/* Label types already checked for near-miss facets, so that a label used on a
+   hundred contracts does not warn a hundred times.  */
+static GTY(()) hash_set<tree> *near_miss_checked_types;
+
+/* Map from label type -> the user's handle_contract_violation FUNCTION_DECL
+   that the corresponding trampoline calls.  Recorded so that the rethrow
+   analysis (contract_local_handler_always_rethrows_p) examines exactly the
+   function the trampoline will call, rather than repeating the member lookup
+   and risking a different overload resolution.  */
+static GTY(()) hash_map<tree, tree, pch_traits> *local_violation_handler_fn_map;
+
+/* Map from label type -> query trampoline FUNCTION_DECL.
+   Generated at parse time, looked up during gimplification.  */
+static GTY(()) hash_map<tree, tree, pch_traits> *query_trampoline_map;
+
+/* Validate LABEL (P3400 assertion-control label) for CONTRACT and compute
+   its derived facets: assertion_control_object structural validity, the
+   local-violation/queryable-label trampolines, and the allowed-semantics
+   restriction mask.  A no-op if LABEL is absent, invalid, or still
+   type-dependent.
+
+   Called from grok_contract for a label available at parse time -- which
+   includes an in-class-defined ("deferred") member function's label: only
+   its predicate is deferred, never the label -- and again from
+   tsubst_contract once a template-dependent label has been substituted to a
+   concrete value at instantiation.
+
+   Takes no tsubst_flags_t and reports unconditionally.  That is safe only
+   because the instantiation-time path cannot be reached from a SFINAE
+   context: tsubst_contract_specifiers has a single caller,
+   regenerate_decl_from_template, which passes tf_warning_or_error.  Give
+   this a complain parameter if that ever stops being true.  */
+
+void
+resolve_contract_label (tree contract, tree label, location_t loc)
+{
+  if (!label || label == error_mark_node
+      || type_dependent_expression_p (label))
+    return;
+
+  /* Check access immediately rather than deferring it, for the duration of
+     facet detection.  Every probe below is a SFINAE-style question -- "does
+     this type participate in this facet?" -- asked with tf_none, and with
+     immediate checking an inaccessible member makes the probe fail quietly,
+     which is the answer the concepts give.  Deferred checking instead queued
+     the failure and reported it later as an error against the contract's
+     predicate, turning "this label has no local handler" into a diagnostic.  */
+  deferring_access_check_sentinel access_sentinel (dk_no_deferred);
+
+  /* Use the main variant as the trampoline-map key: substituting a
+     dependent label can yield a distinct cv-variant tree per instantiation
+     for one and the same type, and keying on that would build a fresh
+     trampoline for each.  Guard the lookup -- an ill-formed label reaches
+     here with TREE_TYPE == error_mark_node, which is not a type node.  */
+  tree label_type = TREE_TYPE (label);
+  if (label_type && TYPE_P (label_type))
+    label_type = TYPE_MAIN_VARIANT (label_type);
+  if (!label_type || !CLASS_TYPE_P (label_type))
+    {
+      error_at (loc, "assertion-control expression must be a class type "
+		"with a nested %<assertion_control_object%> type");
+      CONTRACT_LABEL (contract) = NULL_TREE;
+      return;
+    }
+  else
+    {
+      tree aco = lookup_member (label_type,
+			       get_identifier ("assertion_control_object"),
+			       /*protect=*/0, /*want_type=*/true,
+			       tf_none);
+      /* An inaccessible nested type is not one the concept can name, so such
+	 a type is not an assertion-control object at all -- which, unlike an
+	 inaccessible facet member, *is* ill-formed: the paper requires the
+	 control object to satisfy this concept.  */
+      if (!aco || aco == error_mark_node
+	  || !label_facet_accessible_p (label_type, aco))
+	{
+	  error_at (loc, "type %qT does not satisfy "
+		    "%<assertion_control_object%> "
+		    "(missing or inaccessible nested type "
+		    "%<assertion_control_object%>)",
+		    label_type);
+	  CONTRACT_LABEL (contract) = NULL_TREE;
+	  return;
+	}
+    }
+
+  /* Report members that look like they were meant to be facets but are not.
+     Once per label type: the answer depends only on the type, and a label is
+     typically named by many contracts.  */
+  if (warn_contract_invalid_label_facet)
+    {
+      if (!near_miss_checked_types)
+	near_miss_checked_types = hash_set<tree>::create_ggc (13);
+      if (!near_miss_checked_types->add (label_type))
+	{
+	  static const char *const facets[] = {
+	    "compute_semantic", "compute_comment", "compute_message",
+	    "handle_contract_violation", "query"
+	  };
+	  for (unsigned i = 0; i < ARRAY_SIZE (facets); ++i)
+	    warn_near_miss_facet (loc, label_facet_object (label), label_type,
+				  facets[i]);
+	  warn_near_miss_data_facet (loc, label_type, "allowed_semantics");
+	  warn_near_miss_data_facet (loc, label_type, "group_names");
+	}
+    }
+
+  /* Check for local_violation_label facet and generate trampoline
+     if needed (P3400).  Keyed by label type so the same trampoline
+     is reused across all contracts with the same label type.  */
+  hash_map_maybe_create<hm_ggc> (local_violation_trampoline_map);
+
+  if (!local_violation_trampoline_map->get (label_type))
+    {
+      tree hcv_id = get_identifier ("handle_contract_violation");
+      tree hcv_fn = lookup_member (label_type, hcv_id,
+				   /*protect=*/0, /*want_type=*/false,
+				   tf_none);
+      /* Clear hcv_fn rather than merely skipping the probe: the trampoline
+	 is built by a separate `if' below that re-tests only hcv_fn, so
+	 leaving it set would build a trampoline for a handler the probe
+	 never vetted.  */
+      if (hcv_fn && hcv_fn != error_mark_node
+	  && !label_facet_accessible_p (label_type, hcv_fn))
+	hcv_fn = NULL_TREE;
+      if (hcv_fn && hcv_fn != error_mark_node)
+	{
+	  /* Test viability with the arguments the facet is probed with.  */
+	  vec<tree, va_gc> *test_args
+	    = build_facet_probe_args ("handle_contract_violation");
+	  tree test_call = NULL_TREE;
+	  if (test_args)
+	    test_call = build_new_method_call (label_facet_object (label),
+					       hcv_fn, &test_args, NULL_TREE,
+					       LOOKUP_NORMAL, NULL, tf_none);
+	  if (!test_call || test_call == error_mark_node)
+	    hcv_fn = NULL_TREE;
+	  /* The concept also requires the result to be void or convertible
+	     to violation_handled; a handler returning anything else is not
+	     the facet.  */
+	  else if (!VOID_TYPE_P (TREE_TYPE (test_call)))
+	    {
+	      tree vh_type
+		= find_std_contracts_type (get_identifier ("violation_handled"));
+	      if (!vh_type || vh_type == error_mark_node
+		  || !is_convertible (TREE_TYPE (test_call), vh_type))
+		hcv_fn = NULL_TREE;
+	    }
+	}
+      if (hcv_fn && hcv_fn != error_mark_node)
+	{
+	  tree resolved_fn = NULL_TREE;
+	  tree trampoline
+	    = build_local_violation_trampoline (label_type,
+					       hcv_fn, &resolved_fn);
+	  if (trampoline)
+	    {
+	      local_violation_trampoline_map->put (label_type,
+						  trampoline);
+	      if (resolved_fn)
+		{
+		  hash_map_maybe_create<hm_ggc> (local_violation_handler_fn_map);
+		  local_violation_handler_fn_map->put (label_type,
+						      resolved_fn);
+		}
+	    }
+	}
+    }
+
+
+  /* Check for queryable_label facet and generate query trampoline
+     if needed (P3400).  Keyed by label type so the same trampoline
+     is reused across all contracts with the same label type.  */
+  hash_map_maybe_create<hm_ggc> (query_trampoline_map);
+
+  if (!query_trampoline_map->get (label_type))
+    {
+      tree query_id = get_identifier ("query");
+      tree query_fn = lookup_member (label_type, query_id,
+				    /*protect=*/0, /*want_type=*/false,
+				    tf_none);
+      if (query_fn && query_fn != error_mark_node
+	  && label_facet_accessible_p (label_type, query_fn))
+	{
+	  /* Test viability: query(const void*, size_t) -> void*.  */
+	  vec<tree, va_gc> *test_args = build_facet_probe_args ("query");
+	  tree test_call = build_new_method_call (label_facet_object (label),
+						  query_fn, &test_args,
+						  NULL_TREE, LOOKUP_NORMAL,
+						  NULL, tf_none);
+	  /* labels::queryable_label requires exactly void*.  */
+	  if (test_call && test_call != error_mark_node
+	      && same_type_p (TREE_TYPE (test_call), ptr_type_node))
+	    {
+	      tree trampoline = build_query_trampoline (label_type);
+	      if (trampoline)
+		query_trampoline_map->put (label_type, trampoline);
+	    }
+	}
+    }
+
+  /* If the label needs its address taken (local handler or query
+     trampoline) but is not already a VAR_DECL, materialize it as
+     a static variable.  */
+  bool needs_label_ptr
+    = (local_violation_trampoline_map
+       && local_violation_trampoline_map->get (label_type))
+      || (query_trampoline_map
+	  && query_trampoline_map->get (label_type));
+  if (needs_label_ptr && !VAR_P (label))
+    {
+      /* The label is a prvalue -- pre<L{}> -- but the runtime
+	 descriptor needs its address, so give it one.
+
+	 Hand the unfolded expression to cp_finish_decl and let that do
+	 the constant evaluation.  Pre-folding it here with
+	 cxx_constant_value and passing the result in is wrong twice
+	 over: on failure it returns error_mark_node and the whole
+	 materialization is skipped in silence, leaving the label a
+	 prvalue so the facet is never wired up at all; and on success
+	 it produces a syntactic COMPOUND_LITERAL_P CONSTRUCTOR, which
+	 store_init_value asserts against once pushdecl_top_level_and_finish
+	 clears processing_template_decl underneath it.
+
+	 Use the decl pushdecl_namespace_level hands back rather than the
+	 one passed in; they need not be the same node.  */
+      tree init = label;
+      if (processing_template_decl)
+	{
+	  /* Parsing a template: the label expression is still in
+	     template form, and pushdecl_top_level_and_finish clears
+	     processing_template_decl underneath us, so cp_finish_decl
+	     sees template trees with nothing left to say they are.  A
+	     prvalue label then ICEs in store_init_value as the
+	     undigested COMPOUND_LITERAL_P CONSTRUCTOR described above,
+	     and a label with a dependent subtree ICEs in
+	     dependent_type_p, reached from constant-evaluating that
+	     initializer.
+
+	     A dependent label cannot be materialized here in any case:
+	     one TU-local constant cannot hold a distinct value per
+	     instantiation.  Leave it a prvalue -- without a VAR_DECL
+	     build_contract_data_block_ctor wires up no facet, so nothing
+	     is mis-emitted meanwhile -- and let tsubst_contract
+	     re-resolve it once it is concrete, materializing one constant
+	     per instantiation.
+
+	     Otherwise rebuild the expression outside the template, which
+	     is what tsubst_contract does for the same reason.  */
+	  if (instantiation_dependent_expression_p (init))
+	    init = NULL_TREE;
+	  else
+	    init = instantiate_non_dependent_expr (init,
+						   tf_warning_or_error);
+	}
+      if (init && init != error_mark_node)
+	{
+	  /* Make it a genuine constexpr constant, not merely a static one.
+	     Facets consumed after this point read the label through
+	     CONTRACT_LABEL, which is the variable built here, and a facet
+	     whose result depends on the label's own state -- a
+	     compute_semantic returning a data member, or an
+	     allowed_semantics that is a non-static member -- then has to
+	     read that variable during constant evaluation.  Left as a
+	     plain static it is not readable there, cxx_constant_value
+	     hands back error_mark_node, and the facet is silently dropped:
+	     compute_semantic_core returns the semantic unchanged and the
+	     allowed mask stays permissive, with no diagnostic either way.
+
+	     The string facets do not need this only because grok_contract
+	     applies them eagerly, before we get here.
+
+	     Set on the label materialization alone rather than in
+	     contracts_tu_local_named_var, whose other callers build
+	     runtime data blocks that are not constant expressions.  */
+	  tree const_type
+	    = cp_build_qualified_type (label_type, TYPE_QUAL_CONST);
+	  tree label_var = contracts_tu_local_named_var (
+	    loc, "Lcontract_label", const_type);
+	  DECL_CONTEXT (label_var) = NULL_TREE;
+	  TREE_READONLY (label_var) = true;
+	  DECL_DECLARED_CONSTEXPR_P (label_var) = true;
+	  label_var = pushdecl_top_level_and_finish (label_var, init);
+	  if (label_var && label_var != error_mark_node)
+	    {
+	      CONTRACT_LABEL (contract) = label_var;
+	      label = label_var;
+	    }
+	}
+    }
+
+  /* Compute the flag-independent label restriction: start from the full
+     semantic set (including the P4298 noexcept variants) and, when the label
+     has an allowed_semantics facet, intersect it by probing each member.  The
+     -fcontracts-allow-assume and -fcontracts-p4298 gates are applied later, at
+     query construction (make_contract_query), so they are not baked in here.
+     The base must include the noexcept variants so a label that explicitly
+     allows them is not silently stripped of that capability (a facet-less
+     contract gets them via the same WITH_EXTENSIONS default).  */
+  uint16_t allowed_mask = CES_ALL_ALLOWED_WITH_EXTENSIONS;
+
+  tree as_member = lookup_member (label_type,
+				 get_identifier ("allowed_semantics"),
+				 /*protect=*/0, /*want_type=*/false,
+				 tf_none);
+  /* The concept requires `__is_const (decltype (T::allowed_semantics))'.
+     A `static constexpr' member is const-qualified already, and so is a
+     plain `const' one; a non-const member is not a facet, and honouring
+     it anyway made the front end narrow the semantic set for a label the
+     library says has no allowed_semantics facet at all -- so a bare label
+     and its combined form disagreed.  */
+  tree as_decl = (as_member && as_member != error_mark_node
+		  && BASELINK_P (as_member)
+		  ? BASELINK_FUNCTIONS (as_member) : as_member);
+  if (as_member && as_member != error_mark_node
+      && label_facet_accessible_p (label_type, as_member)
+      && as_decl && DECL_P (as_decl)
+      && CP_TYPE_CONST_P (TREE_TYPE (as_decl)))
+    {
+      /* The facet is `evaluation_semantic_set ({label.allowed_semantics})'
+	 ([support.contract.control.allowed]): build that set, as the
+	 library concept does, and ask it -- a single semantic, or any type
+	 convertible to the set, works that way, and only that way.  A
+	 conversion or contains () that is not a constant expression is
+	 diagnosed, once.  */
+      tree set_type = lookup_std_contracts_type
+	(get_identifier ("evaluation_semantic_set"));
+      bool failed = !set_type || set_type == error_mark_node;
+      /* In a template the label is not dependent (it would not be resolved
+	 until its substitution otherwise), but an expression built there is
+	 a template tree, which the constant evaluator does not take as it
+	 is: build the facet's expressions, and evaluate them, outside it, on
+	 the label's own value (GCC-916).  */
+      tree clabel = (processing_template_decl
+		     ? instantiate_non_dependent_expr (label, tf_none) : label);
+      processing_template_decl_sentinel ptds;
+      if (clabel == error_mark_node)
+	failed = true;
+      auto is_allowed = [&](uint16_t sem_val) -> bool
+      {
+	if (failed)
+	  return true;
+	tree as_val = finish_class_member_access_expr
+	  (clabel, get_identifier ("allowed_semantics"), false,
+	   tf_none);
+	if (!as_val || as_val == error_mark_node)
+	  return true;
+	tree init = build_constructor_single (init_list_type_node,
+					      NULL_TREE, as_val);
+	tree set = build_functional_cast (loc, set_type,
+					  build_tree_list (NULL_TREE, init),
+					  tf_none);
+	if (set == error_mark_node)
+	  return true;
+	tree contains = finish_class_member_access_expr
+	  (set, get_identifier ("contains"), false, tf_none);
+	tree arg = build_semantic_facet_arg (sem_val);
+	if (!contains || contains == error_mark_node || !arg)
+	  return true;
+	releasing_vec args (make_tree_vector_single (arg));
+	tree call = finish_call_expr (contains, &args, false, false,
+				      tf_none);
+	if (!call || call == error_mark_node)
+	  return true;
+	tree r = constant_facet_value (call, label_type,
+				       "allowed_semantics", loc);
+	if (r == error_mark_node)
+	  {
+	    failed = true;
+	    return true;
+	  }
+	if (TREE_CODE (r) == INTEGER_CST)
+	  return !integer_zerop (r);
+	return true;
+      };
+
+      uint16_t restricted = 0;
+      for (uint16_t sem = CES_IGNORE; sem <= CES_LAST; sem++)
+	if ((allowed_mask & (1 << sem)) && is_allowed (sem))
+	  restricted |= (1 << sem);
+      allowed_mask = restricted;
+      if (allowed_mask == 0)
+	{
+	  error_at (loc, "assertion-control label allows no "
+		   "evaluation semantics");
+	  CONTRACT_LABEL (contract) = NULL_TREE;
+	  allowed_mask = CES_ALL_ALLOWED_WITH_EXTENSIONS;
+	}
+    }
+
+  /* Store the label restriction; NULL_TREE means no restriction (the full
+     set), so only store when the label narrowed it.  */
+  if (allowed_mask != CES_ALL_ALLOWED_WITH_EXTENSIONS)
+    CONTRACT_ALLOWED_MASK (contract)
+      = build_int_cst (uint16_type_node, allowed_mask);
+}
+
 {
   if (condition == error_mark_node)
     {
@@ -8483,5 +9268,33 @@ build_runtime_contract_check (tree contract,
    object is, so one object stands for each type and value.  In a template
    the expression is kept as a CONTRACT_CONTROL_EXPR and finished at
    instantiation.  */
+
+tree
+finish_contract_control_expr (location_t loc, tree expr)
+{
+  if (error_operand_p (expr))
+    return error_mark_node;
+  if (processing_template_decl)
+    return build_min_nt_loc (loc, CONTRACT_CONTROL_EXPR, expr);
+
+  /* The type is deduced as for `constexpr auto v = EXPR;'.  */
+  expr = decay_conversion (expr, tf_warning_or_error);
+  if (error_operand_p (expr))
+    return error_mark_node;
+  tree type = cv_unqualified (TREE_TYPE (expr));
+  expr = cp_convert (type, expr, tf_warning_or_error);
+  tree val = cxx_constant_value (expr);
+  if (error_operand_p (val))
+    return error_mark_node;
+  if (TREE_CODE (val) == TARGET_EXPR)
+    val = TARGET_EXPR_INITIAL (val);
+  if (!reduced_constant_expression_p (val))
+    {
+      error_at (loc, "operand of %<contract_control%> is not a constant "
+		"expression");
+      return error_mark_node;
+    }
+  return get_template_parm_object (val, mangle_template_parm_object (val));
+}
 
 #include "gt-cp-contracts.h"

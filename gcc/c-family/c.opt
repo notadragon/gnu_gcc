@@ -607,6 +607,10 @@ Wcontract-configuration
 C ObjC C++ ObjC++ Var(warn_contract_configuration) Init(1) Warning
 Warn about problems in the contract configuration (P3595).
 
+Wcontract-invalid-label-facet
+C ObjC C++ ObjC++ Var(warn_contract_invalid_label_facet) Init(1) Warning
+Warn when an assertion-control object has a member that almost provides a facet but does not, because it is inaccessible or not const (P3400).
+
 Wconversion
 C ObjC C++ ObjC++ Var(warn_conversion) Warning
 Warn for implicit type conversions that may change a value.
@@ -2009,6 +2013,10 @@ Enable P3099 user-defined diagnostic messages for contract assertions.
 fcontracts-p3290
 C++ ObjC++ Var(flag_contracts_p3290) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
 Enable P3290 contract violation trigger API and assert integration.
+
+fcontracts-p3400
+C++ ObjC++ Var(flag_contracts_p3400) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850)
+Enable P3400 assertion-control labels on contract assertions.
 
 fcontracts-p3850
 C++ ObjC++ Var(flag_contracts_p3850) Init(0)

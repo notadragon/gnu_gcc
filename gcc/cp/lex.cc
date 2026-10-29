@@ -251,6 +251,8 @@ init_reswords (void)
     mask |= D_CXX_COROUTINES;
   if (!flag_modules)
     mask |= D_CXX_MODULES;
+  if (!flag_contracts_p3400)
+    mask |= D_CXX_CONTRACTS_P3400;
   if (!flag_tm)
     mask |= D_TRANSMEM;
   if (!flag_char8_t)

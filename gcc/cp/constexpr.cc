@@ -13069,6 +13069,7 @@ potential_constant_expression_1 (tree t, bool want_rval, bool strict, bool now,
     case ALIGNOF_EXPR:
     case OFFSETOF_EXPR:
     case NOEXCEPT_EXPR:
+    case CONTRACT_CONTROL_EXPR:
     case TEMPLATE_PARM_INDEX:
     case TRAIT_EXPR:
     case IDENTIFIER_NODE:

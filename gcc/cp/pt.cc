@@ -22369,6 +22369,14 @@ tsubst_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 	RETURN (objc_build_encode_expr (op1));
       }
 
+    case CONTRACT_CONTROL_EXPR:
+      {
+	auto aco = make_temp_override (in_assertion_control_expression_p,
+				       true);
+	op1 = tsubst_expr (TREE_OPERAND (t, 0), args, complain, in_decl);
+	RETURN (finish_contract_control_expr (EXPR_LOCATION (t), op1));
+      }
+
     case NOEXCEPT_EXPR:
       op1 = TREE_OPERAND (t, 0);
       ++cp_unevaluated_operand;
@@ -30366,6 +30374,11 @@ value_dependent_expression_p (tree expression)
     case NOEXCEPT_EXPR:
       expression = TREE_OPERAND (expression, 0);
       return instantiation_dependent_uneval_expression_p (expression);
+
+    case CONTRACT_CONTROL_EXPR:
+      /* Only built for an operand in a template; its object is made at
+	 instantiation.  */
+      return true;
 
     case SCOPE_REF:
       /* All instantiation-dependent expressions should also be considered

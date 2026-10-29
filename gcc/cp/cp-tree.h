@@ -2157,6 +2157,11 @@ struct GTY(()) saved_scope {
   bool consteval_if_p : 1;
   /* Nonzero if we are parsing the substatement of expansion-statement.  */
   bool expansion_stmt : 1;
+  /* True while parsing or substituting an assertion-control expression or
+     contract_control(expr); name lookup then also consults
+     contract_control_usings.  Not a bit-field, so that make_temp_override
+     can set it.  */
+  bool x_in_assertion_control_expression_p;
 
   int unevaluated_operand;
   int unevaluated_typeid_cutoff;
@@ -2236,6 +2241,8 @@ extern GTY(()) struct saved_scope *scope_chain;
 
 #define in_discarded_stmt scope_chain->discarded_stmt
 #define in_consteval_if_p scope_chain->consteval_if_p
+#define in_assertion_control_expression_p \
+  scope_chain->x_in_assertion_control_expression_p
 #define in_expansion_stmt scope_chain->expansion_stmt
 
 #define current_ref_temp_count scope_chain->ref_temp_count
