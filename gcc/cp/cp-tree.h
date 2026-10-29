@@ -8809,6 +8809,7 @@ extern tree build_vec_init_expr			(tree, tree, tsubst_flags_t);
 extern tree expand_vec_init_expr		(tree, tree, tsubst_flags_t,
 						 vec<tree,va_gc>** = nullptr);
 extern void diagnose_non_constexpr_vec_init	(tree);
+extern tree vec_init_expr_elt_init		(tree, tsubst_flags_t);
 extern tree hash_tree_cons			(tree, tree, tree);
 extern tree hash_tree_chain			(tree, tree);
 extern tree build_qualified_name		(tree, tree, tree, bool);

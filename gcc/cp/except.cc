@@ -1086,6 +1086,17 @@ check_noexcept_r (tree *tp, int *walk_subtrees, void *)
       if (!TYPE_NOTHROW_P (type))
 	return fn;
     }
+  else if (code == VEC_INIT_EXPR)
+    {
+      /* The element initialization, which may call a potentially-throwing
+	 constructor, is not in the tree until the VEC_INIT_EXPR is
+	 expanded; an initializer list's array filler is one
+	 ([except.spec]/6).  */
+      tree elt = vec_init_expr_elt_init (t, tf_none);
+      if (tree fn = cp_walk_tree_without_duplicates (&elt, check_noexcept_r,
+						     NULL))
+	return fn;
+    }
 
   return NULL_TREE;
 }
