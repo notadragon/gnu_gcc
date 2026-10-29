@@ -1,0 +1,73 @@
+| bug | resolved by |
+|-----|-------------|
+| gcc-01 | 1100-postcondition-const-across-redeclarations |
+| gcc-10 | 1180-lambda-this-capture-remap |
+| gcc-11 | 1160-lambda-in-postcondition-result-name |
+| gcc-12 | 1130-result-binding-one-object |
+| gcc-13 | 4640-contract-substitution-plumbing |
+| gcc-14 | 1360-contract-only-capture-after-pruning |
+| gcc-15 | 1120-outlined-checks-by-reference, 4000-p3098 |
+| gcc-16 | 1230-lambda-capture-bind-through-statement-list, 4000-p3098, 4640-contract-substitution-plumbing |
+| gcc-18 | 1050-predicate-lambda-constify |
+| gcc-19 | 1060-postcondition-odr-use |
+| gcc-21 | 2200-libcontracts, 6900-cross-paper-options |
+| gcc-22 | 1040-pack-reference-constify |
+| gcc-23 | 1090-contract-on-deleted-or-defaulted |
+| gcc-24 | 1220-noexcept-body-wrapper-detected |
+| gcc-25 | 1170-result-name-introducer |
+| gcc-26 | 1100-postcondition-const-across-redeclarations |
+| gcc-28 | 1200-xobj-member-in-predicate |
+| gcc-30 | 1080-coroutine-postcondition-param |
+| gcc-31 | 1190-lambda-capture-in-predicate |
+| gcc-33 | 1130-result-binding-one-object |
+| gcc-36 | 1060-postcondition-odr-use |
+| gcc-37 | 2200-libcontracts, 2600-source-location-machinery |
+| gcc-38 | 2200-libcontracts, 2600-source-location-machinery |
+| gcc-42 | 1020-constexpr-side-effect |
+| gcc-43 | 1025-contract-discardable-evaluation |
+| gcc-44 | 1140-retval-destroyed-on-unwind |
+| gcc-45 | 1240-contract-specifier-at-declarator-position, 1250-contract-on-non-function-declarator |
+| gcc-47 | 1250-contract-on-non-function-declarator |
+| gcc-49 | 0170-postcondition-undeduced-result-ice |
+| gcc-495 | 1270-contract-only-capture-detection |
+| gcc-50 | 0180-libstdcxx-contracts-cxxmin |
+| gcc-503 | 1270-contract-only-capture-detection |
+| gcc-510 | 0210-pch-contract-semantic |
+| gcc-543 | 1290-lambda-in-declaration-contract |
+| gcc-544 | 1290-lambda-in-declaration-contract |
+| gcc-551 | 0200-block-scope-first-decl-contract |
+| gcc-552 | 1300-explicit-specialization-contracts |
+| gcc-553 | 0230-module-template-contracts |
+| gcc-56 | 1010-constexpr-named-result |
+| gcc-569 | 0190-ubsan-null-ptrmem-object |
+| gcc-574 | 0220-ctor-pre-qualified-member |
+| gcc-606 | 0240-contract-explicit-copy-capture |
+| gcc-610 | 1260-outlined-lambda-capture-proxy |
+| gcc-618 | 0250-constexpr-unreported-incomplete-contract |
+| gcc-630 | 0260-friend-contract-class-scope |
+| gcc-632 | 0270-stmt-expr-local-lambda-contract |
+| gcc-633 | 0280-generic-lambda-pre-capture |
+| gcc-634 | 4640-contract-substitution-plumbing |
+| gcc-641 | 1350-contract-this-pointer-to-const |
+| gcc-646 | 0340-pch-contract-tables |
+| gcc-647 | 0340-pch-contract-tables |
+| gcc-648 | 1360-contract-only-capture-after-pruning |
+| gcc-649 | 1360-contract-only-capture-after-pruning |
+| gcc-650 | 1060-postcondition-odr-use |
+| gcc-651 | 0330-contract-predicate-unexpanded-pack |
+| gcc-652 | 4640-contract-substitution-plumbing |
+| gcc-656 | 4640-contract-substitution-plumbing |
+| gcc-663 | 1060-postcondition-odr-use |
+| gcc-670 | 1270-contract-only-capture-detection |
+| gcc-682 | 0370-noexcept-array-filler |
+| gcc-689 | 0430-refinable-body-contracts |
+| gcc-69 | 0160-constexpr-heap-object-lifetime |
+| gcc-70 | 0160-constexpr-heap-object-lifetime |
+| gcc-706 | 0390-source-text-blank-line |
+| gcc-707 | 1400-contract-comment-macro |
+| gcc-710 | 0160-constexpr-heap-object-lifetime |
+| gcc-734 | 0400-ubsan-vptr-reference-downcast |
+| gcc-896 | 0430-refinable-body-contracts, 5000-p4299 |
+| gcc-897 | 0415-ipa-pta-interposable-callee |
+| gcc-910 | 1270-contract-only-capture-detection |
+| gcc-911 | 2400-p3595 |

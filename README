@@ -1,3 +1,54 @@
+# C++ Contracts Implementation (P3850)
+
+This fork implements the C++ Contracts extensions proposed in P3850,
+building on GCC master.
+
+The majority of the work going into the actual P2900 implementation was done
+by Nina Ranns, Iain Sandoe, and Ville Voutilainen.  The additions in this
+fork are all prototype-quality implementations to gain implementation
+experience and explore design alternatives, though we have strived to
+fix all known bugs in the upstream implementation, extend test suites
+whenever possible, and are continuously working toward upstreaming
+those fixes.
+
+This branch is part of a larger project to implement Contracts features in
+all open-source C++ compilers, and details on the current status and scope of
+these changes can be found at https://github.com/notadragon/contracts-p3850.
+
+## Compiler Explorer
+
+A build of this branch is available on compiler explorer.  You can use it by
+selecting the "x86-64 gcc (P3850 contracts)" entry in the compiler dropdown
+when editing C++ code at https://godbolt.org/.
+
+## Usage
+
+All of the features can be activated with `-fcontracts-p3850`, or
+`-fcontracts-p####` to enable support for a specific paper.  (Not all
+variations have been thoroughly tested.)
+
+## Known Bugs and Open Issues
+
+Open issues with this branch are tracked in the branch itself so that
+consumers have one place to go to see the current state.  Details can be
+found in two distinct lists:
+
+- open-issues/README.md -- **everything contracts-related that is known
+  to be broken on this branch**, whatever its origin.  If you encounter
+  issues, double-check here to see if they are known.  Some of these are
+  underlying issues that we have deferred, others are in progress.
+- bug-reports/README.md -- bugs that exist in the upstream trunk build
+  of GCC, many of which have been fixed in this branch.
+
+Some items that exist upstream which we have not yet fixed are in both
+lists.
+
+## Contact
+
+Joshua Berne -- jberne4@bloomberg.net
+
+---
+
 This directory contains the GNU Compiler Collection (GCC).
 
 The GNU Compiler Collection is free software.  See the files whose
