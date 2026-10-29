@@ -317,6 +317,79 @@ extern contract_evaluation_semantic ensure_evaluation_semantic
    byte and the semantic of the analysis evaluation in the byte above;
    ensure_evaluation_semantic gives the first, and ensure_analysis_semantic
    both.  */
+extern contract_evaluation_semantic ensure_analysis_semantic
+  (tree, tree, contract_evaluation_semantic * = NULL);
+/* D4405: diagnose taking the address of a function whose preconditions are
+   analyzed at each call (cp_build_addr_expr_1).  */
+extern void contract_diagnose_address_taken (tree, location_t,
+					     tsubst_flags_t,
+					     tree = NULL_TREE,
+					     tree = NULL_TREE);
+/* D4405: the definition of an object of static or thread storage duration
+   takes the address of its destructor (expand_static_init), as does the
+   creation of a temporary lifetime-extended to static or thread storage
+   duration (set_up_extended_ref_temp).  */
+extern void contract_diagnose_static_destructor (tree, tree = NULL_TREE,
+						 location_t
+						   = UNKNOWN_LOCATION);
+/* True while build_addr_func forms the address a direct call calls.  */
+extern bool contract_forming_direct_call;
+/* The scope_chain while check_default_argument converts a default
+   argument, which is diagnosed there, and while convert_default_arg
+   converts it for a call, which is not; otherwise null.  */
+extern struct saved_scope *contract_checking_default_argument;
+extern struct saved_scope *contract_using_default_argument;
+/* D4405: the same for converting a closure to a pointer to function
+   (build_over_call).  */
+extern void contract_diagnose_lambda_conversion (tree, location_t,
+						 tsubst_flags_t);
+/* D4405: while one is in scope (and ACTIVE), the calls built for the
+   current function, or at namespace scope, are manifestly
+   constant-evaluated, and have no analysis evaluation.  */
+struct contract_constant_evaluation_sentinel
+{
+  explicit contract_constant_evaluation_sentinel (bool active = true);
+  ~contract_constant_evaluation_sentinel ();
+  bool saved_active;
+  tree saved_fn;
+  struct saved_scope *saved_chain;
+};
+/* D4405 (GCC-944): while one is in scope, the destructor calls built for
+   the current function, or at namespace scope, are a temporary's cleanup
+   (build_target_expr), analyzed only if the temporary is not elided:
+   contract_drop_pending_analyses drops the analyses of an elided
+   TARGET_EXPR's cleanup, and contract_resolve_pending_analysis analyzes
+   a call that is made (cp_genericize_r, cp_gimplify_expr).  */
+struct contract_temporary_cleanup_sentinel
+{
+  contract_temporary_cleanup_sentinel ();
+  ~contract_temporary_cleanup_sentinel ();
+  bool saved_active;
+  tree saved_fn;
+  struct saved_scope *saved_chain;
+};
+extern void contract_drop_pending_analyses (tree);
+extern void contract_resolve_pending_analysis (tree);
+/* D4405 (GCC-949): while one built with ACTIVE true is in scope, the
+   analysis evaluations of the calls built for the current function are
+   decided at once, not deferred to a proving strategy.  */
+struct contract_no_proof_deferral_sentinel
+{
+  contract_no_proof_deferral_sentinel (bool active);
+  ~contract_no_proof_deferral_sentinel ();
+  bool saved_active;
+  tree saved_fn;
+  struct saved_scope *saved_chain;
+};
+/* D4405 (GCC-949): the proof markers of a partial-initialization
+   cleanup's destructor call, for where the cleanup becomes active.  */
+extern tree contract_potential_cleanup_markers (tree);
+/* P3100: whether an implicit contract assertion guarding core-language UB may
+   be built here.  Not in a template, whose instantiation builds it, and not
+   in an unevaluated operand (noexcept/sizeof/decltype/requires), which
+   generates no code -- and whose noexcept result an implicit assertion must
+   never change, whatever its evaluation semantic.  */
+
 extern void maybe_instantiate_contracts (tree, bool = false);
 
 /* Contract data-block ABI constants.

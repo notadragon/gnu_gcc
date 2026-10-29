@@ -3992,6 +3992,12 @@ cxx_eval_internal_function (const constexpr_ctx *ctx, tree t,
     case IFN_DEFERRED_INIT:
       return build_clobber (TREE_TYPE (t), CLOBBER_OBJECT_BEGIN);
 
+    /* D4405: the analysis evaluations a temporary's destructor call waits
+       to have (contract_resolve_pending_analysis); constant evaluation has
+       none.  */
+    case IFN_CONTRACT_PENDING_ANALYSIS:
+      return void_node;
+
     case IFN_BSWAP:
     case IFN_BITREVERSE:
       {
@@ -13158,6 +13164,8 @@ potential_constant_expression_1 (tree t, bool want_rval, bool strict, bool now,
 		{
 		/* These should be ignored, they are optimized away from
 		   constexpr functions.  */
+		/* D4405 (cxx_eval_internal_function).  */
+		case IFN_CONTRACT_PENDING_ANALYSIS:
 		case IFN_UBSAN_NULL:
 		case IFN_UBSAN_BOUNDS:
 		case IFN_UBSAN_VPTR:

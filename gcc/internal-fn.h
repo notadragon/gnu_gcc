@@ -274,6 +274,7 @@ extern void expand_SHUFFLEVECTOR (internal_fn, gcall *);
 extern void expand_SPACESHIP (internal_fn, gcall *);
 extern void expand_TRAP (internal_fn, gcall *);
 extern void expand_ASSUME (internal_fn, gcall *);
+extern void expand_CONTRACT_PENDING_ANALYSIS (internal_fn, gcall *);
 extern void expand_MASK_CALL (internal_fn, gcall *);
 extern void expand_CONTRACT_SHADOW_GUARD (internal_fn, gcall *);
 extern void expand_CONTRACT_UNPROVEN (internal_fn, gcall *);

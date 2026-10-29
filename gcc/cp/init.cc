@@ -4840,6 +4840,8 @@ build_vec_init (tree base, tree maxindex, tree init,
 					 array_type_nelts_total (type)),
 				complain);
 
+      /* D4405 (GCC-949): its analysis evaluations are decided at once.  */
+      contract_no_proof_deferral_sentinel nd (true);
       e = build_vec_delete_1 (input_location, rval, m,
 			      inner_elt_type, sfk_complete_destructor,
 			      /*use_global_delete=*/0, complain,

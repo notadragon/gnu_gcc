@@ -9964,7 +9964,13 @@ cp_finish_decl (tree decl, tree init, bool init_const_expr_p,
 	     initialization wasn't constant after all.  */
 	  tree init_code;
 	  cleanups = make_tree_vector ();
-	  init_code = check_initializer (decl, init, flags, &cleanups);
+	  {
+	    /* D4405: as below.  */
+	    contract_constant_evaluation_sentinel cce
+	      (DECL_DECLARED_CONSTEXPR_P (decl)
+	       || DECL_DECLARED_CONSTINIT_P (decl));
+	    init_code = check_initializer (decl, init, flags, &cleanups);
+	  }
 	  if (init_code == NULL_TREE)
 	    init = NULL_TREE;
 	  release_tree_vector (cleanups);
@@ -10129,7 +10135,18 @@ cp_finish_decl (tree decl, tree init, bool init_const_expr_p,
 	       && (!DECL_EXTERNAL (decl) || init))
 	{
 	  cleanups = make_tree_vector ();
-	  init = check_initializer (decl, init, flags, &cleanups);
+	  {
+	    /* D4405: a constexpr or constinit variable's initialization is
+	       manifestly constant-evaluated, so the calls built for it here
+	       -- a default or value initialization's, and the cleanups of
+	       its temporaries -- have no analysis evaluation, as those the
+	       parser built for its initializer (cp_parser_init_declarator).  */
+	    contract_constant_evaluation_sentinel cce
+	      (VAR_P (decl)
+	       && (DECL_DECLARED_CONSTEXPR_P (decl)
+		   || DECL_DECLARED_CONSTINIT_P (decl)));
+	    init = check_initializer (decl, init, flags, &cleanups);
+	  }
 
 	  /* Handle:
 
@@ -11910,6 +11927,10 @@ expand_static_init (tree decl, tree init)
 	}
       return;
     }
+
+  /* D4405: DECL is destroyed by a call through its destructor's address.  */
+  if (!decl_maybe_constant_destruction (decl, TREE_TYPE (decl)))
+    contract_diagnose_static_destructor (decl);
 
   if (DECL_FUNCTION_SCOPE_P (decl))
     {
@@ -17629,6 +17650,10 @@ check_default_argument (tree decl, tree arg, tsubst_flags_t complain)
      A default argument expression is implicitly converted to the
      parameter type.  */
   ++cp_unevaluated_operand;
+  /* D4405: taking a function's address by the conversion is diagnosed here
+     (contract_diagnose_address_taken).  */
+  auto cda = make_temp_override (contract_checking_default_argument,
+				 scope_chain);
   /* Avoid digest_init clobbering the initializer.  */
   tree carg = BRACE_ENCLOSED_INITIALIZER_P (arg) ? unshare_expr (arg): arg;
   perform_implicit_conversion_flags (decl_type, carg, complain,
@@ -21549,14 +21574,22 @@ cxx_maybe_build_cleanup (tree decl, tsubst_flags_t complain)
       else
 	addr = build_address (decl);
 
-      call = build_delete (input_location, TREE_TYPE (addr), addr,
-			   sfk_complete_destructor, flags, 0, complain);
+      /* D4405: the destructor call of a constant destruction is only
+	 constant-evaluated, and has no analysis evaluation.  */
+      bool constant_destruction
+	= (!TYPE_HAS_TRIVIAL_DESTRUCTOR (type)
+	   && decl_maybe_constant_destruction (decl, type)
+	   && DECL_INITIALIZED_BY_CONSTANT_EXPRESSION_P (decl));
+      {
+	contract_constant_evaluation_sentinel cce (constant_destruction);
+	call = build_delete (input_location, TREE_TYPE (addr), addr,
+			     sfk_complete_destructor, flags, 0, complain);
+      }
       if (call == error_mark_node)
 	cleanup = error_mark_node;
       else if (TYPE_HAS_TRIVIAL_DESTRUCTOR (type))
 	/* Discard the call.  */;
-      else if (decl_maybe_constant_destruction (decl, type)
-	       && DECL_INITIALIZED_BY_CONSTANT_EXPRESSION_P (decl))
+      else if (constant_destruction)
 	cxx_constant_dtor (call, decl);
       else if (cleanup)
 	cleanup = cp_build_compound_expr (cleanup, call, complain);

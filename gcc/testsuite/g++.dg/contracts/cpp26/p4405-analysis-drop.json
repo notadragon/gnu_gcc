@@ -1,0 +1,6 @@
+[
+  {"match": {"location": "p4405-analysis-drop.C:41"}, "output": {"semantic": "assume"}},
+  {"match": {"analysis": true, "location": "p4405-analysis-drop.C:49"}, "output": {"semantic": "prove"}},
+  {"match": {"analysis": true, "namespace": "kk"}, "output": {"semantic": "prove"}},
+  {"output": {"semantic": "enforce"}}
+]

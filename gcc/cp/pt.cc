@@ -6718,6 +6718,11 @@ redeclare_class_template (tree type, tree parms, tree cons)
 tree
 instantiate_non_dependent_expr_internal (tree expr, tsubst_flags_t complain)
 {
+  /* D4405: in a template, what this builds is only evaluated as a constant
+     (a static_assert condition, a template argument) or discarded -- the
+     code is the instantiation's -- so its calls have no analysis
+     evaluation.  */
+  contract_constant_evaluation_sentinel cce;
   return tsubst_expr (expr, /*args=*/NULL_TREE, complain, /*in_decl=*/NULL_TREE);
 }
 
@@ -13855,6 +13860,7 @@ tsubst_template_arg (tree t, tree args, tsubst_flags_t complain, tree in_decl)
     {
       if (!(complain & tf_warning))
 	++c_inhibit_evaluation_warnings;
+      contract_constant_evaluation_sentinel cce;	/* D4405.  */
       r = tsubst_expr (t, args, complain, in_decl);
       if (!(complain & tf_warning))
 	--c_inhibit_evaluation_warnings;
@@ -19102,6 +19108,12 @@ tsubst_init (tree init, tree decl, tree args,
   if (!init)
     return NULL_TREE;
 
+  /* D4405: a constexpr or constinit variable's initializer is manifestly
+     constant-evaluated (cp_parser_init_declarator).  */
+  contract_constant_evaluation_sentinel cce
+    (VAR_P (decl)
+     && (DECL_DECLARED_CONSTEXPR_P (decl)
+	 || DECL_DECLARED_CONSTINIT_P (decl)));
   init = tsubst_expr (init, args, complain, in_decl);
 
   tree type = TREE_TYPE (decl);
@@ -20690,7 +20702,11 @@ tsubst_stmt (tree t, tree args, tsubst_flags_t complain, tree in_decl)
       {
 	tree cond = IF_COND (t);
 	bool was_dep = dependent_operand_p (cond);
-	cond = RECUR (cond);
+	{
+	  /* D4405.  */
+	  contract_constant_evaluation_sentinel cce (IF_STMT_CONSTEXPR_P (t));
+	  cond = RECUR (cond);
+	}
 	warning_sentinel s1(warn_address, was_dep);
 	tmp = finish_if_stmt_cond (cond, stmt);
       }
@@ -20932,6 +20948,7 @@ tsubst_stmt (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 	tree condition, message;
 
 	++c_inhibit_evaluation_warnings;
+	contract_constant_evaluation_sentinel cce;	/* D4405.  */
 	condition = tsubst_expr (STATIC_ASSERT_CONDITION (t), args,
 				 complain, in_decl);
 	message = tsubst_expr (STATIC_ASSERT_MESSAGE (t), args,

@@ -223,6 +223,7 @@ in the following sections.
 -fconstexpr-depth=@var{n}  -fconstexpr-cache-depth=@var{n}
 -fconstexpr-loop-limit=@var{n}  -fconstexpr-ops-limit=@var{n}
 -fcontracts
+-fcontract-analysis-semantic=@r{[}ignore@r{|}diagnose@r{|}prove@r{]}
 -fcontract-checks-outlined
 -fcontract-evaluation-semantic=@r{[}ignore@r{|}observe@r{|}enforce@r{|}quick_enforce@r{]}
 -fcontract-disable-optimized-checks
@@ -3427,6 +3428,113 @@ expanded in-line into function bodies.  This option causes a small function to
 be created instead (containing the checks) that is called in the relevant
 position.  This permits different criteria to be applied to the compilation of
 the checking and the remainder of the function body.
+
+@opindex fcontract-analysis-semantic
+@item -fcontract-analysis-semantic=@var{semantic}
+Set the semantic of the analysis evaluation of every contract assertion
+(see @option{-fcontract-evaluation-semantic}) to @var{semantic}, one of
+@code{ignore}, @code{diagnose} and @code{prove}.  This is the same as a
+contract configuration entry @code{@{"match": @{"analysis": true@},
+"output": @{"semantic": "@var{semantic}"@}@}} after those of the
+configuration options.  Requires @option{-fcontracts-p4405}; without it,
+@code{ignore} is used instead and a warning is issued.  It applies to C
+contract assertions too.
+
+Under @option{-fcontracts-p4405}, @code{prove} and @code{diagnose}
+apply only to the @dfn{analysis evaluation} of a contract assertion, a
+separate evaluation with no run-time effect whose semantic is one of
+@code{ignore} (the default), @code{diagnose} and @code{prove}, and which
+this option selects.  A @code{prove} or @code{diagnose} selected for any
+other evaluation of the assertion, by
+@option{-fcontract-evaluation-semantic} or by a contract configuration, is
+given to the analysis evaluation instead, which takes the stronger of it
+and its own (@code{diagnose} is stronger than @code{ignore}, and
+@code{prove} than both), and that evaluation is then @code{ignore}.  The
+best fit described for @option{-fcontract-evaluation-semantic} applies to
+the analysis evaluation within the @code{prove} and @code{diagnose} the
+label allows, plus
+@code{ignore} when the label allows any other semantic, a disallowed
+@code{diagnose} becoming @code{ignore}, then @code{prove}.  The other
+evaluations never reach @code{prove} or @code{diagnose}: they are limited
+to the other semantics the label allows, or to @code{ignore} when it allows
+none of them, and a caller-side check may always be @code{ignore}.  A
+label's @code{analysis_semantic} member function, if it has one,
+strengthens the analysis evaluation in the same way, and a @code{prove} or
+@code{diagnose} returned by its @code{compute_semantic} is given to the
+analysis evaluation.
+
+The analysis evaluation is the first evaluation of a contract assertion,
+so a proof never relies on the assertion's own check.  For a precondition
+it takes place at each call, in the caller, with the call's arguments for
+the parameters; for a postcondition or a @code{contract_assert}, in the
+function body, ahead of the assertion's check there.  A @code{prove} or
+@code{diagnose} analysis evaluation is diagnosed there unless it is proven,
+whatever the semantic of the assertion's other evaluations, which are
+emitted as usual.  A callee-side check is @code{ignore} because of the
+analysis evaluation only when the label allows no semantic other than
+@code{prove} and @code{diagnose}.  In C, whose preconditions are not known
+at a call, a precondition's analysis evaluation takes place in the function
+body, ahead of its check.  There is no analysis evaluation during constant
+evaluation, so a call that is manifestly constant-evaluated -- in the
+initializer of a @code{constexpr} or @code{constinit} variable, a
+@code{static_assert} condition, a template argument, an
+@code{if constexpr} condition or another constant expression, in an
+immediate function, or of one -- has none.
+
+A call through a pointer to a function, a pointer to member function or a
+reference to a function has no analysis evaluation: it cannot identify the
+function, so a precondition can be proven for it only if it is
+tautological.  Taking the address of
+a function, by the @code{&} operator, the function-to-pointer conversion,
+forming a pointer to member function or binding a reference to it, or
+converting a lambda to a pointer to function (which takes the address of
+its function call operator), is therefore diagnosed when a precondition of
+the function allows no semantic other than @code{prove} and
+@code{diagnose}, so that every call through the address needs a proof,
+unless folding proves the precondition true with nothing known of the
+arguments: as a precondition that ``cannot be proven'' (or ``is always
+false'') ``for a call through the address of'' the function, an error when
+its analysis evaluation is @code{prove} and the warning
+@option{-Wcontract-unproven} when it is @code{diagnose}.  Taking the
+address is not itself ill-formed.  A precondition that the configuration
+alone gives a @code{prove} or @code{diagnose} analysis evaluation is not
+diagnosed there, and calls through the address are not analyzed: the
+configuration of the translation unit taking the address does not
+determine what such calls are.  The
+definition of an object of static or thread storage duration is treated
+as taking the address of its destructor, which the implementation calls at
+exit or when the thread ends, and is diagnosed the same way, unless the
+object is @code{constexpr} and has constant destruction (an object that is
+not @code{constexpr} is destroyed through the address whatever its
+destructor); a template's is diagnosed where it is instantiated.  So is
+the creation of a temporary whose lifetime a reference of static or thread
+storage duration extends, including the array of a
+@code{std::initializer_list}.  The destructor calls the implementation
+makes for each element of such an array are ordinary calls, and their
+analysis evaluations are diagnosed as well.  A virtual
+call analyzes the preconditions of the function it names.  A default
+argument that takes the address of a function is diagnosed where it is
+written, once (a template's, where it is instantiated), not at the calls
+that use it.
+The destructor call of a temporary that an initialization elides (a
+prvalue that initializes an object directly) is never made, and has no
+analysis evaluation.
+
+In a contract configuration (@option{-fcontract-configuration}), an entry
+whose @code{match} has @code{"analysis": true} selects the semantic of the
+analysis evaluation.  Only such entries are considered for the analysis
+evaluation, and they are not considered for any other evaluation;
+@code{"analysis": false} is the same as leaving the key out.  An entry with
+both @code{"analysis": true} and @code{"constexpr": true} never matches.
+An entry with @code{"analysis": true} and a @code{caller} key, or whose
+@code{output} has a @code{dynamic} selector or a @code{semantic} other than
+@code{ignore}, @code{diagnose} and @code{prove}, is an error.  Constant
+evaluation is never analyzed: an entry with @code{"constexpr": true} (and
+not @code{"analysis": true}) whose @code{semantic} is @code{prove} or
+@code{diagnose} is an error.  A @code{prove} or @code{diagnose} that
+constant evaluation reaches otherwise -- from an entry without the key, a
+label's allowed set or its @code{compute_semantic} -- is evaluated as
+@code{enforce} or @code{observe}.
 
 @opindex fcontract-disable-optimized-checks
 @opindex fno-contract-disable-optimized-checks

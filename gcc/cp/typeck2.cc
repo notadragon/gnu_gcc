@@ -638,14 +638,21 @@ maybe_push_temp_cleanup (tree sub, vec<tree,va_gc> **flags)
 {
   if (!flag_exceptions)
     return;
+  /* D4405: the destructor is potentially invoked from here on.  An array's
+     element destructor calls are in a loop: decided at once.  */
+  contract_no_proof_deferral_sentinel
+    nd (TREE_CODE (TREE_TYPE (sub)) == ARRAY_TYPE);
   if (tree cleanup
       = cxx_maybe_build_cleanup (sub, tf_warning_or_error))
     {
+      tree markers = contract_potential_cleanup_markers (cleanup);
       tree tx = get_internal_target_expr (boolean_true_node);
       tree flag = TARGET_EXPR_SLOT (tx);
       TARGET_EXPR_CLEANUP (tx) = build3 (COND_EXPR, void_type_node,
 					 flag, cleanup, void_node);
       add_stmt (tx);
+      if (markers)
+	add_stmt (build_stmt (input_location, EXPR_STMT, markers));
       vec_safe_push (*flags, flag);
     }
 }

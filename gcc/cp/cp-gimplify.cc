@@ -869,6 +869,9 @@ cp_gimplify_expr (tree *expr_p, gimple_seq *pre_p, gimple_seq *post_p)
 
     case CALL_EXPR:
       ret = GS_OK;
+      /* D4405: a temporary's destructor call that genericization did not
+	 reach (contract_resolve_pending_analysis).  */
+      contract_resolve_pending_analysis (*expr_p);
       if (flag_strong_eval_order == 2
 	  && CALL_EXPR_FN (*expr_p)
 	  && !CALL_EXPR_OPERATOR_SYNTAX (*expr_p)
@@ -2519,6 +2522,8 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
       break;
 
     case CALL_EXPR:
+      /* D4405: a temporary's destructor call that is made.  */
+      contract_resolve_pending_analysis (stmt);
       if (!wtd->no_sanitize_p
 	  && sanitize_flags_p ((SANITIZE_NULL
 				| SANITIZE_ALIGNMENT | SANITIZE_VPTR)))
@@ -2578,6 +2583,8 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
 	  && TREE_CODE (TARGET_EXPR_INITIAL (stmt)) == CONSTRUCTOR
 	  && CONSTRUCTOR_PLACEHOLDER_BOUNDARY (TARGET_EXPR_INITIAL (stmt)))
 	TARGET_EXPR_NO_ELIDE (stmt) = 1;
+      /* D4405: an elided temporary's cleanup is never made.  */
+      contract_drop_pending_analyses (stmt);
       break;
 
     case TEMPLATE_ID_EXPR:

@@ -298,7 +298,14 @@ build_addr_func (tree function, tsubst_flags_t complain)
 	   && DECL_IMMEDIATE_FUNCTION_P (function))
     function = build_address (function);
   else
-    function = decay_conversion (function, complain, /*reject_builtin=*/false);
+    {
+      /* D4405: a direct call has an analysis evaluation; forming the
+	 address it calls is not taking the function's address
+	 (contract_diagnose_address_taken).  */
+      auto direct = make_temp_override (contract_forming_direct_call, true);
+      function = decay_conversion (function, complain,
+				   /*reject_builtin=*/false);
+    }
 
   return function;
 }
@@ -9834,6 +9841,9 @@ convert_default_arg (tree type, tree arg, tree fn, int parmnum,
      alters any part of it.  */
   arg = break_out_target_exprs (arg, /*clear location*/true);
 
+  /* D4405: not diagnosed again here (contract_diagnose_address_taken).  */
+  auto uda = make_temp_override (contract_using_default_argument,
+				 scope_chain);
   arg = convert_for_initialization (0, type, arg, LOOKUP_IMPLICIT,
 				    ICR_DEFAULT_ARGUMENT, fn, parmnum,
 				    complain);
@@ -10495,6 +10505,11 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
 	}
       return error_mark_node;
     }
+
+  /* D4405: converting a closure to a pointer to function takes the address
+     of its function call operator.  */
+  if (DECL_CONV_FN_P (fn) && LAMBDA_TYPE_P (DECL_CONTEXT (fn)))
+    contract_diagnose_lambda_conversion (fn, input_location, complain);
 
   if (DECL_FUNCTION_MEMBER_P (fn))
     {
@@ -14475,6 +14490,17 @@ set_up_extended_ref_temp (tree decl, tree expr, vec<tree, va_gc> **cleanups,
     /* Create the INIT_EXPR that will initialize the temporary
        variable.  */
     init = split_nonconstant_init (var, expr);
+  /* D4405: a temporary of static or thread storage duration that needs
+     destruction is destroyed by a call through its destructor's address
+     (register_dtor_fn: not one marked constexpr above, whose destruction
+     is constant).  */
+  if (flag_contracts_p4405
+      && TREE_STATIC (var)
+      && TYPE_HAS_NONTRIVIAL_DESTRUCTOR (type)
+      && !(DECL_DECLARED_CONSTEXPR_P (var)
+	   && type_has_constexpr_destructor (strip_array_types (type))))
+    contract_diagnose_static_destructor (var, decl,
+					 cp_expr_loc_or_input_loc (expr));
   if (at_function_scope_p ())
     {
       add_decl_expr (var);

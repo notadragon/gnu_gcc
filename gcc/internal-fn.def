@@ -636,6 +636,13 @@ DEF_INTERNAL_FN (SPACESHIP, ECF_CONST | ECF_LEAF | ECF_NOTHROW, NULL)
 DEF_INTERNAL_FN (ASSUME, ECF_PURE | ECF_LEAF | ECF_NOTHROW
 			 | ECF_LOOPING_CONST_OR_PURE, NULL)
 
+/* D4405: the C++ front end puts .CONTRACT_PENDING_ANALYSIS (ID) in the object
+   argument of a temporary's destructor call, whose analysis evaluations
+   wait until it is known whether the temporary is elided; it replaces
+   them all when it genericizes or gimplifies the function.  */
+DEF_INTERNAL_FN (CONTRACT_PENDING_ANALYSIS, ECF_LEAF | ECF_NOTHROW
+					    | ECF_NOVOPS, NULL)
+
 /* For if-conversion of inbranch SIMD clones.  */
 DEF_INTERNAL_FN (MASK_CALL, ECF_NOVOPS, NULL)
 

@@ -428,6 +428,17 @@ namespace labels
       requires __is_same(decltype(__t.query(__key, __index)), void*);
     };
 
+  // D4405: an assertion-control object can strengthen the semantic of the
+  // analysis evaluation of its contract assertion -- ignore, diagnose or
+  // prove, which a constant analysis_semantic() must return.
+  template<typename _Tp>
+  concept analysis_semantic_label =
+    assertion_control_object<_Tp> &&
+    requires(const _Tp __t) {
+      requires __is_convertible(decltype(__t.analysis_semantic()),
+				contracts::evaluation_semantic);
+    };
+
   // P3400 [support.contract.control.general]: a variable template for each
   // concept, applied to the type of a control object.
   template<auto __control_object>
@@ -817,6 +828,31 @@ namespace labels
       if constexpr (semantic_computation_label<_Rhs>)
 	__s = _M_rhs.compute_semantic(__s);
       return __s;
+    }
+
+    // D4405: the stronger of the constituents' analysis semantics (ignore,
+    // then diagnose, then prove).  A value that is none of the three is
+    // returned as it is, for the compiler to reject.
+    constexpr contracts::evaluation_semantic
+    analysis_semantic() const
+      requires (analysis_semantic_label<_Lhs>
+		|| analysis_semantic_label<_Rhs>)
+    {
+      if constexpr (!analysis_semantic_label<_Rhs>)
+	return _M_lhs.analysis_semantic();
+      else if constexpr (!analysis_semantic_label<_Lhs>)
+	return _M_rhs.analysis_semantic();
+      else
+	{
+	  auto __rank = [](contracts::evaluation_semantic __s) {
+	    using _Es = contracts::evaluation_semantic;
+	    return __s == _Es::ignore ? 0 : __s == _Es::diagnose ? 1
+		 : __s == _Es::prove ? 2 : 3;
+	  };
+	  contracts::evaluation_semantic __l = _M_lhs.analysis_semantic();
+	  contracts::evaluation_semantic __r = _M_rhs.analysis_semantic();
+	  return __rank(__r) > __rank(__l) ? __r : __l;
+	}
     }
 
     constexpr const char*

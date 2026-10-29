@@ -726,6 +726,357 @@ inherited_ctor_for_proving (tree fn)
   return inh;
 }
 
+static contract_query make_contract_query (tree, tree);
+
+/* D4405: make the contracts of CALLEE ready for resolving the semantics of
+   their analysis evaluations at a call of it (call_analysis_semantic).  A
+   specialization's contracts are the pattern's until its definition is
+   instantiated (contract_for_caller_side_proof); with a label that is not
+   dependent, the analysis semantic resolved for the pattern's contract is
+   every specialization's, but a dependent label has to be substituted
+   first, as a contract wrapper does (maybe_instantiate_contracts).  */
+
+static void
+prepare_call_analysis (tree callee)
+{
+  if (!flag_contracts_p4405)
+    return;
+  tree origin = DECL_ORIGIN (callee);
+  tree specs = get_fn_contract_specifiers (origin);
+  if (!specs)
+    return;
+  for (tree contract : tree_vec_range (specs))
+    if (PRECONDITION_P (contract)
+	&& CONTRACT_LABEL (contract)
+	&& type_dependent_expression_p (CONTRACT_LABEL (contract)))
+      {
+	maybe_instantiate_contracts (origin, /*for_wrapper=*/true);
+	return;
+      }
+}
+
+/* D4405: the semantic of the analysis evaluation of CONTRACT, a contract of
+   CALLEE, at a call of CALLEE whose caller-side resolution gave it
+   CALLER_ANALYSIS (caller_resolution::analysis, DECISIONS.md E142).  A
+   precondition's analysis evaluation is at each call, so it is the
+   stronger of that and the precondition's own analysis semantic, resolved
+   as for CALLEE's definition: no match key makes it depend on the caller.
+   That of a postcondition is in CALLEE's body; at the call there is only
+   what a caller-side prove or diagnose gives it.  */
+
+static contract_evaluation_semantic
+call_analysis_semantic (tree contract, tree callee,
+			contract_evaluation_semantic caller_analysis)
+{
+  if (!PRECONDITION_P (contract)
+      || !flag_contracts_p4405
+      || CONTRACT_CONDITION (contract) == error_mark_node
+      || (CONTRACT_LABEL (contract)
+	  && type_dependent_expression_p (CONTRACT_LABEL (contract))))
+    return caller_analysis;
+  tree origin = DECL_ORIGIN (callee);
+  /* Nothing to resolve when neither prove nor diagnose is allowed.  */
+  if (!(make_contract_query (contract, origin).allowed_mask
+	& CES_PROVING_MASK))
+    return caller_analysis;
+  return contract_analysis_stronger (caller_analysis,
+				     ensure_analysis_semantic (contract,
+							       origin));
+}
+
+/* D4405 ("Taking the Address of a Function"): FN's address is being taken
+   at LOC -- by the unary & operator, the function-to-pointer conversion,
+   forming a pointer to member function, or binding a reference to FN.  A
+   call through the result cannot identify FN, so it has no analysis
+   evaluation, and a precondition of FN can be proven for it only if it is
+   tautological.  How hard to try, and when to report a precondition that
+   is not, is the implementation's: this one diagnoses only where it is
+   known that calls through the address need a proof -- when the labels of
+   a precondition allow no runtime semantic (always_prove, always_diagnose),
+   so that its analysis evaluation is prove or diagnose in every
+   translation unit and nothing checks it at run time.  Unless the proving
+   strategies prove it with nothing known of the arguments (only folding
+   can: contract_prove, with no call and no marker), that is an error for
+   prove and a -Wcontract-unproven warning for diagnose, saying that the
+   precondition cannot be proven, or is always false, for a call through
+   the address -- taking the address is not itself ill-formed.  When only
+   the configuration selects prove or diagnose, nothing is diagnosed: this
+   translation unit's configuration does not determine what calls through
+   the address are, and calls through it simply go unanalyzed.  The
+   analysis semantic of a precondition is the same at every call
+   (call_analysis_semantic), so it is known here.  Nothing is diagnosed in
+   a template, whose instantiation takes the address, nor in an unevaluated
+   operand, nor without tf_error (overload resolution trying the
+   conversion), nor for the address a direct call calls
+   (contract_forming_direct_call, set by build_addr_func).
+
+   A default argument takes the address at each call that uses it, but its
+   semantic constraints are checked where it is written ([dcl.fct.default]),
+   so that is where it is diagnosed, once, whether or not a call uses it:
+   when check_default_argument converts it to the parameter's type
+   (contract_checking_default_argument, an unevaluated operand there), and
+   not when a call converts it again (contract_using_default_argument, set
+   by convert_default_arg) -- each for that scope only, not for what an
+   instantiation it causes builds (push_to_top_level).  A template's is checked as it is instantiated
+   (tsubst_default_argument).
+
+   STATIC_VAR, if not null, is the object of static or thread storage
+   duration whose definition takes the address of its destructor FN
+   (contract_diagnose_static_destructor), named in a note -- or, when
+   EXTENDING_VAR is not null, the temporary whose lifetime the reference
+   EXTENDING_VAR extends, which the note names by it.  */
+
+bool contract_forming_direct_call;
+saved_scope *contract_checking_default_argument;
+saved_scope *contract_using_default_argument;
+
+/* The note naming STATIC_VAR, if not null, at LOC: its definition takes the
+   address of its destructor (contract_diagnose_static_destructor).  If
+   EXTENDING_VAR is not null, STATIC_VAR is a temporary whose lifetime it
+   extends.  */
+
+static void
+inform_static_destructor_address (location_t loc, tree static_var,
+				  tree extending_var)
+{
+  if (!static_var)
+    return;
+  if (extending_var)
+    {
+      /* The temporary has the storage duration of the variable.  */
+      if (CP_DECL_THREAD_LOCAL_P (extending_var))
+	inform (loc, "a temporary lifetime-extended by %qD, of thread storage "
+		"duration, is destroyed by a call through the address of its "
+		"destructor", extending_var);
+      else
+	inform (loc, "a temporary lifetime-extended by %qD, of static storage "
+		"duration, is destroyed by a call through the address of its "
+		"destructor", extending_var);
+    }
+  else if (CP_DECL_THREAD_LOCAL_P (static_var))
+    inform (loc, "%qD, of thread storage duration, is destroyed by a call "
+	    "through the address of its destructor", static_var);
+  else
+    inform (loc, "%qD, of static storage duration, is destroyed by a call "
+	    "through the address of its destructor", static_var);
+}
+
+void
+contract_diagnose_address_taken (tree fn, location_t loc,
+				 tsubst_flags_t complain, tree static_var,
+				 tree extending_var)
+{
+  if (!flag_contracts_p4405
+      || contract_forming_direct_call
+      || contract_using_default_argument == scope_chain
+      || processing_template_decl
+      || (cp_unevaluated_operand
+	  && contract_checking_default_argument != scope_chain)
+      || !(complain & tf_error)
+      || TREE_CODE (fn) != FUNCTION_DECL
+      || CONTRACT_HELPER (fn) != ldf_contract_none)
+    return;
+  /* A lambda's conversion function is defined with the lambda, whether or
+     not anything converts it.  */
+  if (current_function_decl
+      && DECL_CONV_FN_P (current_function_decl)
+      && LAMBDA_TYPE_P (DECL_CONTEXT (current_function_decl)))
+    return;
+  tree origin = DECL_ORIGIN (fn);
+  if (!DECL_HAS_CONTRACTS_P (origin))
+    return;
+  prepare_call_analysis (fn);
+  tree specs = get_fn_contract_specifiers (origin);
+  if (!specs)
+    return;
+  /* The first precondition not proven with prove, else the first with
+     diagnose, is the one reported.  */
+  tree unproven = NULL_TREE;
+  bool unproven_prove = false, unproven_false = false;
+  for (tree contract : tree_vec_range (specs))
+    {
+      if (!PRECONDITION_P (contract)
+	  || CONTRACT_CONDITION (contract) == error_mark_node)
+	continue;
+      contract_evaluation_semantic analysis
+	= call_analysis_semantic (contract, fn, CES_IGNORE);
+      if (!contract_semantic_proving_p (analysis))
+	continue;
+      /* Only a precondition whose labels allow no runtime semantic.  */
+      uint16_t mask = make_contract_query (contract, origin).allowed_mask;
+      if (mask & ~CES_PROVING_MASK)
+	continue;
+      if (unproven && (unproven_prove || analysis != CES_PROVE))
+	continue;
+      tree proof = contract_for_caller_side_proof (origin, contract);
+      if (!proof)
+	continue;
+      contract_proof_query query = {};
+      query.opaque = proof == error_mark_node;
+      query.predicate = (query.opaque ? CONTRACT_CONDITION (contract)
+			 : CONTRACT_CONDITION (proof));
+      query.semantic = analysis;
+      query.kind = CAK_PRE;
+      query.loc = loc;
+      contract_proof_result r = contract_prove (query);
+      if (contract_proof_proven_p (r))
+	continue;
+      unproven = contract;
+      unproven_prove = analysis == CES_PROVE;
+      unproven_false = r == CPR_ALWAYS_FALSE;
+    }
+  if (!unproven)
+    return;
+  auto_diagnostic_group d;
+  bool emitted = true;
+  if (unproven_prove)
+    {
+      if (unproven_false)
+	error_at (loc, "contract predicate is always false for a call "
+		  "through the address of %qD", fn);
+      else
+	error_at (loc, "contract assertion cannot be proven for a call "
+		  "through the address of %qD", fn);
+    }
+  else if (unproven_false)
+    emitted = warning_at (loc, OPT_Wcontract_unproven,
+			  "contract predicate is always false for a call "
+			  "through the address of %qD", fn);
+  else
+    emitted = warning_at (loc, OPT_Wcontract_unproven,
+			  "contract assertion cannot be proven for a call "
+			  "through the address of %qD", fn);
+  if (emitted)
+    {
+      inform_static_destructor_address (loc, static_var, extending_var);
+      inform (EXPR_LOCATION (unproven), "precondition here");
+    }
+}
+
+/* D4405R0 section 2.1: an object of static or thread storage duration is
+   destroyed at exit, or when its thread ends, by a call through the
+   address of its destructor (registered with __cxa_atexit or
+   __cxa_thread_atexit), which no caller in the program makes to analyze.
+   So the definition of DECL, such an object needing destruction
+   (expand_static_init: not one with constant destruction), is treated as
+   taking the address of its destructor (contract_diagnose_address_taken).
+   A template's static is checked as it is instantiated, once.
+
+   A temporary whose lifetime is extended to static or thread storage
+   duration is destroyed the same way (DECISIONS.md E147 (a)): DECL is then
+   the temporary's variable, EXTENDING_VAR the reference (or the object with
+   a reference member, or the std::initializer_list) extending it, and LOC
+   the temporary's location (set_up_extended_ref_temp).  */
+
+void
+contract_diagnose_static_destructor (tree decl, tree extending_var,
+				     location_t loc)
+{
+  if (!flag_contracts_p4405 || processing_template_decl)
+    return;
+  tree type = strip_array_types (TREE_TYPE (decl));
+  /* An implicitly-declared destructor has no contract assertions.  */
+  if (!CLASS_TYPE_P (type)
+      || TYPE_HAS_TRIVIAL_DESTRUCTOR (type)
+      || CLASSTYPE_LAZY_DESTRUCTOR (type))
+    return;
+  tree dtor = CLASSTYPE_DESTRUCTOR (type);
+  if (dtor && TREE_CODE (dtor) == FUNCTION_DECL)
+    {
+      if (loc == UNKNOWN_LOCATION)
+	loc = DECL_SOURCE_LOCATION (decl);
+      contract_diagnose_address_taken (dtor, loc, tf_warning_or_error, decl,
+				       extending_var);
+    }
+}
+
+/* D4405: converting a closure to a pointer to function, by calling its
+   conversion function CONV, takes the address of its function call
+   operator -- for a generic lambda, the specialization CONV converts to:
+   a call through the pointer, or through the static `_FUN' it may point
+   to, has no analysis evaluation.  Diagnosed at LOC.  */
+
+void
+contract_diagnose_lambda_conversion (tree conv, location_t loc,
+				     tsubst_flags_t complain)
+{
+  if (!flag_contracts_p4405 || processing_template_decl)
+    return;
+  tree callop = lambda_function (DECL_CONTEXT (conv));
+  if (!callop)
+    return;
+  if (generic_lambda_fn_p (callop))
+    {
+      if (!DECL_TEMPLATE_INFO (conv))
+	return;
+      callop = instantiate_template (DECL_TI_TEMPLATE (callop),
+				     INNERMOST_TEMPLATE_ARGS
+				       (DECL_TI_ARGS (conv)),
+				     tf_none);
+      if (callop == error_mark_node)
+	return;
+    }
+  contract_diagnose_address_taken (callop, loc, complain);
+}
+
+/* D4405 ("The Analysis Evaluation"): there is no analysis evaluation
+   during constant evaluation, so a call in a manifestly constant-evaluated
+   expression has none (the constant evaluation itself evaluates a
+   precondition resolved to prove or diagnose as enforce or observe,
+   contract_constant_evaluation_semantic).  The parser and pt.cc mark such
+   an expression of the current function, or of namespace scope, while
+   they build its calls (contract_constant_evaluation_sentinel): the
+   initializer of a constexpr or constinit variable, a constant-expression
+   (a static_assert condition, a case label, an enumerator, a bit-field
+   width ...), a template argument and an `if constexpr' condition.  Not a
+   function body defined in one (a lambda's), which is another function,
+   nor what an instantiation builds meanwhile (push_to_top_level).  So is
+   every call in an immediate function, or in the consteval branch of `if
+   consteval', and every call of an immediate function: each is evaluated
+   only by constant evaluation.  A constant initialization of a variable
+   that is not constexpr is found only when it is made, and drops the proof
+   markers of the calls it replaces (contract_object_proof_markers).  */
+
+static bool contract_constant_evaluation_active;
+static tree contract_constant_evaluation_fn;
+static saved_scope *contract_constant_evaluation_scope;
+
+contract_constant_evaluation_sentinel::contract_constant_evaluation_sentinel
+  (bool active)
+  : saved_active (contract_constant_evaluation_active),
+    saved_fn (contract_constant_evaluation_fn),
+    saved_chain (contract_constant_evaluation_scope)
+{
+  if (active)
+    {
+      contract_constant_evaluation_active = true;
+      contract_constant_evaluation_fn = current_function_decl;
+      contract_constant_evaluation_scope = scope_chain;
+    }
+}
+
+contract_constant_evaluation_sentinel::~contract_constant_evaluation_sentinel ()
+{
+  contract_constant_evaluation_active = saved_active;
+  contract_constant_evaluation_fn = saved_fn;
+  contract_constant_evaluation_scope = saved_chain;
+}
+
+/* True if a call of CALLEE built now is manifestly constant-evaluated, as
+   above.  */
+
+static bool
+contract_constant_evaluation_p (tree callee)
+{
+  return ((contract_constant_evaluation_active
+	   && contract_constant_evaluation_fn == current_function_decl
+	   && contract_constant_evaluation_scope == scope_chain)
+	  || (current_function_decl
+	      && DECL_IMMEDIATE_FUNCTION_P (current_function_decl))
+	  || in_consteval_if_p
+	  || DECL_IMMEDIATE_FUNCTION_P (callee));
+}
+
 /* P4405: diagnose the analysis evaluations of a call of CALLEE with the
    prove or diagnose semantic (call_analysis_semantic), which happen now,
    unless proven: resolved for the call site (TUPLE_LOC, the current
@@ -925,6 +1276,142 @@ contract_object_proof_markers (tree call)
    with the original -- a temporary, a saved expression or a
    declaration.  */
 
+static tree
+find_unsafe_copy_r (tree *tp, int *walk_subtrees, void *)
+{
+  if (TYPE_P (*tp))
+    *walk_subtrees = 0;
+  else if (TREE_CODE (*tp) == TARGET_EXPR || TREE_CODE (*tp) == SAVE_EXPR
+	   || TREE_CODE (*tp) == BIND_EXPR || TREE_CODE (*tp) == DECL_EXPR)
+    return *tp;
+  return NULL_TREE;
+}
+
+/* walk_tree callback for contract_potential_cleanup_markers: DATA, a tree
+   *, accumulates the proof-marker regions of each destructor call in the
+   cleanup, not inside anything that binds a variable of its own (an array's
+   loop, a temporary) -- those regions could name it.  An `.ASSUME' is left
+   out: it belongs to the call.  */
+
+static tree
+contract_potential_cleanup_markers_r (tree *tp, int *walk_subtrees,
+				      void *data)
+{
+  tree t = *tp;
+  if (TYPE_P (t))
+    {
+      *walk_subtrees = 0;
+      return NULL_TREE;
+    }
+  switch (TREE_CODE (t))
+    {
+    case BIND_EXPR:
+    case LOOP_EXPR:
+    case TARGET_EXPR:
+    case DECL_EXPR:
+    case STATEMENT_LIST:
+      *walk_subtrees = 0;
+      return NULL_TREE;
+    default:
+      break;
+    }
+  tree markers = contract_object_proof_markers (t);
+  if (!markers)
+    return NULL_TREE;
+  /* Not into the call's object argument, which holds the markers.  */
+  *walk_subtrees = 0;
+  tree *acc = (tree *) data;
+  auto_vec<tree, 4> todo;
+  todo.safe_push (markers);
+  while (!todo.is_empty ())
+    {
+      tree m = todo.pop ();
+      if (TREE_CODE (m) == COMPOUND_EXPR)
+	{
+	  todo.safe_push (TREE_OPERAND (m, 1));
+	  todo.safe_push (TREE_OPERAND (m, 0));
+	}
+      else if (TREE_CODE (m) == COND_EXPR
+	       && !cp_walk_tree_without_duplicates (&m, find_unsafe_copy_r,
+						     NULL))
+	*acc = (*acc ? build2 (COMPOUND_EXPR, void_type_node, *acc,
+			       unshare_expr (m))
+		: unshare_expr (m));
+    }
+  return NULL_TREE;
+}
+
+/* D4405 (GCC-949): a contract_no_proof_deferral_sentinel is active while
+   building the EH-only cleanup of an array's elements built so far
+   (build_vec_init), or of an array subobject an aggregate initialization
+   has built (maybe_push_temp_cleanup).  Its destructor calls sit in a loop,
+   where contract_potential_cleanup_markers could not copy their markers
+   out, so their analysis evaluations are decided at once, as at -O0.  Not
+   those of a function defined meanwhile (an implicit destructor), as for
+   contract_temporary_cleanup_sentinel.  */
+
+static bool contract_no_proof_deferral_active;
+static tree contract_no_proof_deferral_fn;
+static saved_scope *contract_no_proof_deferral_scope;
+
+contract_no_proof_deferral_sentinel::contract_no_proof_deferral_sentinel
+  (bool active)
+  : saved_active (contract_no_proof_deferral_active),
+    saved_fn (contract_no_proof_deferral_fn),
+    saved_chain (contract_no_proof_deferral_scope)
+{
+  if (active)
+    {
+      contract_no_proof_deferral_active = true;
+      contract_no_proof_deferral_fn = current_function_decl;
+      contract_no_proof_deferral_scope = scope_chain;
+    }
+}
+
+contract_no_proof_deferral_sentinel::~contract_no_proof_deferral_sentinel ()
+{
+  contract_no_proof_deferral_active = saved_active;
+  contract_no_proof_deferral_fn = saved_fn;
+  contract_no_proof_deferral_scope = saved_chain;
+}
+
+/* True if a contract_no_proof_deferral_sentinel covers the calls built
+   now.  */
+
+static bool
+contract_no_proof_deferral_p ()
+{
+  return (contract_no_proof_deferral_active
+	  && contract_no_proof_deferral_fn == current_function_decl
+	  && contract_no_proof_deferral_scope == scope_chain);
+}
+
+/* D4405 ("The Analysis Evaluation"; DECISIONS.md E160 (a), GCC-949):
+   CLEANUP is the EH-only cleanup of a subobject an aggregate initialization
+   has just built (maybe_push_temp_cleanup), whose destructor is
+   potentially invoked until the initialization completes, whether or not
+   anything after it can throw.  A proving strategy decides the analysis
+   evaluations of its destructor call where their markers are, in the
+   cleanup, which a shadow removes as unreachable when nothing can throw --
+   proving them, though they are diagnosed at -O0, where folding decides
+   them as the cleanup is built.  So a copy of those markers is placed in
+   the initialization itself, where the subobject is complete: the same
+   obligations (an obligation is unproven if any reachable copy of its
+   marker is), never evaluated by the real code.  Return that copy, or
+   NULL_TREE.  */
+
+tree
+contract_potential_cleanup_markers (tree cleanup)
+{
+  if (!flag_contracts_p4405 || !cleanup)
+    return NULL_TREE;
+  tree markers = NULL_TREE;
+  cp_walk_tree_without_duplicates (&cleanup,
+				   contract_potential_cleanup_markers_r,
+				   &markers);
+  return markers;
+}
+
 /* walk_tree callback: find the PARM_DECL DATA.  */
 
 static tree
@@ -943,6 +1430,312 @@ find_parm_r (tree *tp, int *walk_subtrees, void *data)
    from ANALYSES, the caller-side resolution's).  None when SKIP.  When
    MARKER_CALL_P, a precondition's may be deferred to a proving strategy;
    return the markers of those that are, or NULL_TREE.  PLACEHOLDER_CTOR,
+   *TEMP and *THIS_CALL are maybe_contract_wrap_call's.  */
+
+static tree
+contract_analyze_call (tree fndecl, tree call, location_t loc,
+		       const vec<contract_evaluation_semantic> &analyses,
+		       bool skip, bool marker_call_p, bool placeholder_ctor,
+		       tree *temp, tree *this_call)
+{
+  tree proof_markers = NULL_TREE;
+  tree specs = get_fn_contract_specifiers (DECL_ORIGIN (fndecl));
+  unsigned nspecs = specs ? TREE_VEC_LENGTH (specs) : 0;
+  for (unsigned i = 0; i < nspecs; i++)
+    {
+      tree contract = TREE_VEC_ELT (specs, i);
+      contract_evaluation_semantic sem
+	= call_analysis_semantic (contract, fndecl,
+				  (i < analyses.length ()
+				   ? analyses[i] : CES_IGNORE));
+      if (skip
+	  || !contract_semantic_proving_p (sem)
+	  || CONTRACT_CONDITION (contract) == error_mark_node)
+	continue;
+      tree proof = contract_for_caller_side_proof (DECL_ORIGIN (fndecl),
+						   contract);
+      if (!proof)
+	continue;
+      bool opaque = proof == error_mark_node;
+      if (!opaque)
+	contract = proof;
+      tree marker = NULL_TREE;
+      tree pred = NULL_TREE;
+      bool deferrable = (marker_call_p && PRECONDITION_P (contract)
+			 && !opaque && !contract_no_proof_deferral_p ());
+      if (deferrable)
+	{
+	  /* A predicate parsed on a declaration names a placeholder `this';
+	     the marker needs the callee's own, for which the call's object
+	     is substituted.  */
+	  pred = unshare_expr (CONTRACT_CONDITION (contract));
+	  remap_dummy_this (DECL_ORIGIN (fndecl), &pred);
+	  if (placeholder_ctor
+	      && cp_walk_tree_without_duplicates
+		   (&pred, find_parm_r,
+		    DECL_ARGUMENTS (DECL_ORIGIN (fndecl))))
+	    {
+	      /* The temporary the call initializes is its object.  */
+	      if (!*temp)
+		*temp = build_cplus_new (TREE_TYPE (TREE_TYPE
+						    (CALL_EXPR_ARG (call, 0))),
+					 call, tf_none);
+	      if (TREE_CODE (*temp) != TARGET_EXPR)
+		deferrable = false;
+	      else if (!*this_call)
+		{
+		  *this_call = copy_node (call);
+		  CALL_EXPR_ARG (*this_call, 0)
+		    = build_address (TARGET_EXPR_SLOT (*temp));
+		}
+	    }
+	}
+      diagnose_unproven_contract (contract, sem, loc, fndecl,
+				  deferrable && *this_call ? *this_call : call,
+				  deferrable ? &marker : NULL, pred, opaque);
+      if (marker)
+	proof_markers = (proof_markers
+			 ? build2 (COMPOUND_EXPR, void_type_node,
+				   proof_markers, marker)
+			 : marker);
+    }
+  return proof_markers;
+}
+
+/* D4405 (GCC-944): the destructor call in a temporary's cleanup is made
+   only if the temporary is materialized, and an initialization elides it
+   (TARGET_EXPR_ELIDING_P), which is known only when the function holding
+   it is complete.  So the cleanup's call has its analysis evaluations
+   (contract_analyze_call) then, not as it is built: build_target_expr
+   builds the cleanup under a contract_temporary_cleanup_sentinel, and
+   maybe_contract_wrap_call puts in the call's object argument, ahead of
+   the object, `.CONTRACT_PENDING_ANALYSIS (ID)', ID indexing a record of
+   what it resolved at the call.  When the function is genericized
+   (cp_genericize_r) the record of an elided temporary's cleanup is
+   dropped (contract_drop_pending_analyses) and every other is analyzed
+   (contract_resolve_pending_analysis) -- in a function that is never
+   compiled, too, as any other analysis evaluation -- in the function that
+   built the call, which may defer them to a proving strategy, and
+   otherwise in the context it was built in (for a namespace-scope
+   variable, at namespace scope, though the static initialization
+   function makes the call), where they are decided at once.  A copy of
+   the cleanup (break_out_target_exprs) shares the record and its
+   markers.  One that genericization does not reach is analyzed when it
+   is gimplified, which keeps it.  */
+
+struct GTY(()) contract_pending_analysis
+{
+  /* The destructor, and the function the call was built in (null at
+     namespace scope).  */
+  tree callee;
+  tree fn;
+  /* The caller-side resolution's analysis semantics, a TREE_VEC of
+     INTEGER_CSTs, and the markers of those deferred.  */
+  tree analyses;
+  tree markers;
+  location_t loc;
+  /* c_contract_diagnostic_context's handle, or 0.  */
+  unsigned context;
+  bool resolved;
+};
+
+static GTY(()) vec<contract_pending_analysis, va_gc>
+  *contract_pending_analyses;
+
+static bool contract_temporary_cleanup_active;
+static tree contract_temporary_cleanup_fn;
+static saved_scope *contract_temporary_cleanup_scope;
+
+contract_temporary_cleanup_sentinel::contract_temporary_cleanup_sentinel ()
+  : saved_active (contract_temporary_cleanup_active),
+    saved_fn (contract_temporary_cleanup_fn),
+    saved_chain (contract_temporary_cleanup_scope)
+{
+  contract_temporary_cleanup_active = true;
+  contract_temporary_cleanup_fn = current_function_decl;
+  contract_temporary_cleanup_scope = scope_chain;
+}
+
+contract_temporary_cleanup_sentinel::~contract_temporary_cleanup_sentinel ()
+{
+  contract_temporary_cleanup_active = saved_active;
+  contract_temporary_cleanup_fn = saved_fn;
+  contract_temporary_cleanup_scope = saved_chain;
+}
+
+/* True if a destructor call built now is a temporary's cleanup: not one a
+   function the cleanup needs builds meanwhile (an implicit destructor's
+   definition), nor an instantiation (push_to_top_level).  Not while
+   writing a precompiled header, which would keep the records but not the
+   contexts.  */
+
+static bool
+contract_temporary_cleanup_p ()
+{
+  return (contract_temporary_cleanup_active
+	  && contract_temporary_cleanup_fn == current_function_decl
+	  && contract_temporary_cleanup_scope == scope_chain
+	  && !pch_file);
+}
+
+/* True if a call of FNDECL has an analysis evaluation to diagnose, given
+   ANALYSES (contract_analyze_call).  */
+
+static bool
+contract_call_analyzed_p (tree fndecl,
+			  const vec<contract_evaluation_semantic> &analyses)
+{
+  tree specs = get_fn_contract_specifiers (DECL_ORIGIN (fndecl));
+  unsigned nspecs = specs ? TREE_VEC_LENGTH (specs) : 0;
+  for (unsigned i = 0; i < nspecs; i++)
+    {
+      tree contract = TREE_VEC_ELT (specs, i);
+      if (CONTRACT_CONDITION (contract) != error_mark_node
+	  && contract_semantic_proving_p
+	       (call_analysis_semantic (contract, fndecl,
+					(i < analyses.length ()
+					 ? analyses[i] : CES_IGNORE))))
+	return true;
+    }
+  return false;
+}
+
+/* The `.CONTRACT_PENDING_ANALYSIS (ID)' of a destructor call of FNDECL in
+   a temporary's cleanup, located at LOC, whose caller-side resolution gave
+   ANALYSES.  */
+
+static tree
+contract_defer_call_analysis
+  (tree fndecl, location_t loc,
+   const vec<contract_evaluation_semantic> &analyses)
+{
+  tree sems = make_tree_vec (analyses.length ());
+  for (unsigned i = 0; i < analyses.length (); i++)
+    TREE_VEC_ELT (sems, i) = build_int_cst (unsigned_type_node, analyses[i]);
+  contract_pending_analysis p = {};
+  p.callee = fndecl;
+  p.fn = current_function_decl;
+  p.analyses = sems;
+  p.loc = loc;
+  p.context = c_contract_diagnostic_context ();
+  unsigned id = vec_safe_length (contract_pending_analyses);
+  vec_safe_push (contract_pending_analyses, p);
+  return build_call_expr_internal_loc (loc, IFN_CONTRACT_PENDING_ANALYSIS,
+				       void_type_node, 1,
+				       build_int_cst (unsigned_type_node, id));
+}
+
+/* If CALL's object argument holds a `.CONTRACT_PENDING_ANALYSIS (ID)',
+   return ID's record and remove it from there; otherwise null.  */
+
+static contract_pending_analysis *
+contract_take_pending_analysis (tree call)
+{
+  if (TREE_CODE (call) != CALL_EXPR || call_expr_nargs (call) == 0)
+    return NULL;
+  tree arg = CALL_EXPR_ARG (call, 0);
+  if (TREE_CODE (arg) != COMPOUND_EXPR)
+    return NULL;
+  tree p = TREE_OPERAND (arg, 0);
+  if (TREE_CODE (p) != CALL_EXPR
+      || CALL_EXPR_FN (p) != NULL_TREE
+      || CALL_EXPR_IFN (p) != IFN_CONTRACT_PENDING_ANALYSIS)
+    return NULL;
+  unsigned id = tree_to_uhwi (CALL_EXPR_ARG (p, 0));
+  CALL_EXPR_ARG (call, 0) = TREE_OPERAND (arg, 1);
+  if (id >= vec_safe_length (contract_pending_analyses))
+    return NULL;
+  return &(*contract_pending_analyses)[id];
+}
+
+/* walk_tree callback: drop the pending analyses (a cleanup that is never
+   made).  */
+
+static tree
+contract_drop_pending_analyses_r (tree *tp, int *walk_subtrees, void *)
+{
+  if (TYPE_P (*tp))
+    *walk_subtrees = 0;
+  else
+    contract_take_pending_analysis (*tp);
+  return NULL_TREE;
+}
+
+/* D4405 (GCC-944): T is a TARGET_EXPR being genericized.  If an
+   initialization elides it, drop the pending analyses of its cleanup,
+   whose calls are never made.  */
+
+void
+contract_drop_pending_analyses (tree t)
+{
+  if (vec_safe_is_empty (contract_pending_analyses)
+      || !TARGET_EXPR_CLEANUP (t)
+      || !TARGET_EXPR_ELIDING_P (t)
+      /* Only a temporary of a type passed by invisible reference -- every
+	 class with a non-trivial destructor -- is always elided so (the
+	 assertions in cp_gimplify_init_expr and cp_gimplify_expr).  */
+      || !TREE_ADDRESSABLE (TREE_TYPE (t)))
+    return;
+  cp_walk_tree_without_duplicates (&TARGET_EXPR_CLEANUP (t),
+				   contract_drop_pending_analyses_r, NULL);
+}
+
+/* D4405 (GCC-944): CALL, being genericized or gimplified in the current
+   function, is a call that is made.  If its object argument holds a
+   pending analysis, analyze it now and put the markers of those deferred
+   in its place.  */
+
+void
+contract_resolve_pending_analysis (tree call)
+{
+  if (vec_safe_is_empty (contract_pending_analyses))
+    return;
+  contract_pending_analysis *p = contract_take_pending_analysis (call);
+  if (!p)
+    return;
+  bool here = p->fn == current_function_decl;
+  tree markers = NULL_TREE;
+  if (p->resolved)
+    markers = here ? p->markers : NULL_TREE;
+  else
+    {
+      p->resolved = true;
+      auto_vec<contract_evaluation_semantic> analyses;
+      for (tree s : tree_vec_range (p->analyses))
+	analyses.safe_push ((contract_evaluation_semantic) tree_to_uhwi (s));
+      iloc_sentinel ils (p->loc);
+      if (p->context)
+	c_contract_switch_diagnostic_context (p->context, true);
+      /* Elsewhere, in the context the call was built in, with no function
+	 to defer to.  */
+      if (!here)
+	{
+	  push_cfun (NULL);
+	  current_function_decl = p->fn;
+	}
+      bool marker_call_p = here && contract_proof_deferral_ok_p (p->fn);
+      tree temp = NULL_TREE, this_call = NULL_TREE;
+      markers = contract_analyze_call (p->callee, call, p->loc, analyses,
+				       /*skip=*/false, marker_call_p,
+				       /*placeholder_ctor=*/false,
+				       &temp, &this_call);
+      if (!here)
+	pop_cfun ();
+      if (p->context)
+	c_contract_switch_diagnostic_context (p->context, false);
+      p->markers = markers;
+    }
+  if (markers)
+    {
+      tree arg = CALL_EXPR_ARG (call, 0);
+      CALL_EXPR_ARG (call, 0)
+	= build2 (COMPOUND_EXPR, TREE_TYPE (arg), unshare_expr (markers),
+		  arg);
+    }
+}
+
+/* Return true if any contract of FNDECL is checked or assumed under the
+   current build configuration.  */
 
 static bool
 contract_any_active_p (tree fndecl)
@@ -1668,6 +2461,84 @@ apply_compute_semantic_value (tree label, uint16_t sem, uint16_t allowed_mask,
    without arguments, is inaccessible, or its result is not implicitly
    convertible to evaluation_semantic.  */
 
+static tree
+build_analysis_semantic_call (tree label)
+{
+  if (!label || label == error_mark_node
+      || !TREE_TYPE (label) || !CLASS_TYPE_P (TREE_TYPE (label))
+      || type_dependent_expression_p (label))
+    return NULL_TREE;
+  tree label_type = TREE_TYPE (label);
+  tree fn = lookup_member (label_type, get_identifier ("analysis_semantic"),
+			   /*protect=*/0, /*want_type=*/false, tf_none);
+  if (!fn || fn == error_mark_node)
+    return NULL_TREE;
+  tree sem_type
+    = find_std_contracts_type (get_identifier ("evaluation_semantic"));
+  if (!sem_type || TREE_CODE (sem_type) != ENUMERAL_TYPE)
+    return NULL_TREE;
+  vec<tree, va_gc> *args = make_tree_vector ();
+  /* Access is judged on the member chosen, as for compute_semantic.  */
+  push_deferring_access_checks (dk_no_check);
+  tree call = build_new_method_call (label_facet_object (label), fn, &args,
+				     NULL_TREE, LOOKUP_NORMAL, NULL, tf_none);
+  pop_deferring_access_checks ();
+  release_tree_vector (args);
+  if (!call || call == error_mark_node)
+    return NULL_TREE;
+  tree callee = cp_get_callee_fndecl_nofold (extract_call_expr (call));
+  if (!callee || !label_facet_accessible_p (label_type, callee))
+    return NULL_TREE;
+  /* The concept's { t.analysis_semantic() } -> convertible_to<...>.  */
+  if (!is_convertible (TREE_TYPE (call), sem_type))
+    return NULL_TREE;
+  tree conv = perform_implicit_conversion (sem_type, call, tf_none);
+  if (!conv || conv == error_mark_node)
+    return NULL_TREE;
+  return conv;
+}
+
+/* D4405: the semantic CONTRACT's assertion-control object gives the analysis
+   evaluation through its analysis_semantic facet ("P3400R5 Analysis
+   Evaluation Configuration"), or ignore when it has none.  The facet must be
+   a constant expression whose value is ignore, diagnose or prove; otherwise
+   the program is ill-formed, diagnosed at LOC, and ignore is returned.  */
+
+static contract_evaluation_semantic
+label_analysis_semantic (tree contract, location_t loc)
+{
+  tree label = CONTRACT_LABEL (contract);
+  tree conv = build_analysis_semantic_call (label);
+  if (!conv)
+    return CES_IGNORE;
+  tree val = constant_facet_value (conv, TREE_TYPE (label),
+				   "analysis_semantic", loc);
+  if (val == error_mark_node)
+    return CES_IGNORE;
+  if (TREE_CODE (val) == INTEGER_CST && tree_fits_uhwi_p (val))
+    {
+      unsigned HOST_WIDE_INT v = tree_to_uhwi (val);
+      if (v == CES_IGNORE || v == CES_PROVE || v == CES_DIAGNOSE)
+	return (contract_evaluation_semantic) v;
+    }
+  error_at (loc, "%<analysis_semantic%> result is not %<ignore%>, "
+	    "%<diagnose%> or %<prove%>");
+  return CES_IGNORE;
+}
+
+/* D4405, step 6 of "Adjusting to the Allowed Semantics": apply CONTRACT's
+   compute_semantic facet, if any, to *RUNTIME, the adjusted runtime
+   semantic of the evaluation, whose allowed set is RUNTIME_MASK; *ANALYSIS
+   is the adjusted semantic of the analysis evaluation, whose allowed set is
+   ANALYSIS_MASK.  A result of prove or diagnose moves to the analysis
+   evaluation, which takes the stronger and must allow it; the runtime
+   evaluation then becomes ignore, which, like any other result, must be in
+   RUNTIME_MASK.  A constant evaluation (IN_CE) has no analysis evaluation:
+   RUNTIME_MASK then adds the whole allowed set to the runtime one, and a
+   prove or diagnose in it is used as enforce or observe
+   (contract_constant_evaluation_semantic, DECISIONS.md E142).  Otherwise the program is ill-formed (diagnosed once
+   per contract), and both are left as they were.  */
+
 static void
 apply_compute_semantic_split (tree contract,
 			      contract_evaluation_semantic *runtime,
@@ -1841,6 +2712,27 @@ ensure_evaluation_semantic (tree contract, tree fndecl, bool in_ce)
    prove) and, in *RUNTIME if non-null, that of its callee-side runtime
    evaluation, both resolved for FNDECL if not yet
    (ensure_evaluation_semantic).  */
+
+contract_evaluation_semantic
+ensure_analysis_semantic (tree contract, tree fndecl,
+			  contract_evaluation_semantic *runtime)
+{
+  ensure_evaluation_semantic (contract, fndecl, /*in_ce=*/false);
+  contract_evaluation_semantic r, a;
+  read_contract_semantic_slot (CONTRACT_EVALUATION_SEMANTIC (contract), &r,
+			       &a);
+  if (runtime)
+    *runtime = r;
+  return a;
+}
+
+/* The result of resolving a contract's caller-side semantic for a specific
+   call site: the clamped, compute_semantic-applied SEMANTIC of the
+   caller-side runtime evaluation, plus the P3595 dynamic-selector
+   descriptor (DYN_NAME == NULL when the resolution is not dynamic), whose
+   DYN_CONFIGURED is the entry's own semantic.  D4405: ANALYSIS is what
+   this resolution gives the analysis evaluation at the call (a configured
+   caller-side prove or diagnose, DECISIONS.md E142), ignore otherwise.  */
 
 struct caller_resolution
 {
@@ -6337,9 +7229,65 @@ maybe_contract_wrap_call (tree fndecl, tree call, bool is_virtual_dispatch)
 			&& TREE_CODE (call) == CALL_EXPR
 			&& (carrier != MARK_OBJECT
 			    || call_expr_nargs (call) > 0));
+  /* D4405: the analysis evaluations at this call -- each precondition's,
+     and what a caller-side prove or diagnose gives any contract
+     (call_analysis_semantic) -- are diagnosed here, at the call, unless
+     proven -- with the call's arguments available to the proof, and for a
+     specialization whose contracts are not yet substituted, a substituted
+     copy of its predicate (contract_for_caller_side_proof).  They have no
+     run-time effect: a caller-side prove or diagnose leaves the caller-side
+     runtime evaluation ignore, so it neither causes a wrapper to be built
+     nor is diagnosed again inside one built for another contract.  A
+     virtual call (P3097) is a call of the function it names, whose
+     preconditions it analyzes.  A call in an unevaluated operand evaluates
+     nothing, and one manifestly constant-evaluated has no analysis
+     evaluation (contract_constant_evaluation_p).  A call in a contract
+     predicate is evaluated only if a check of the predicate is, which is
+     not known here: it is diagnosed where such a check is emitted
+     (diagnose_checked_predicate_calls).  The
+     inheriting constructor's call of the constructor it inherits was
+     diagnosed at each call of the inheriting one
+     (diagnose_inheriting_ctor_call).  */
+  prepare_call_analysis (fndecl);
+  auto_vec<contract_evaluation_semantic> analyses;
   if (!is_virtual)
     tuple = compute_caller_semantic_tuple (fndecl, input_location,
 					   current_function_decl, &analyses);
+  tree specs = get_fn_contract_specifiers (DECL_ORIGIN (fndecl));
+  tree inh_self
+    = (current_function_decl
+       ? inherited_ctor_for_proving (current_function_decl) : NULL_TREE);
+  bool skip = (cp_unevaluated_operand
+	       || processing_contract_condition
+	       || contract_constant_evaluation_p (fndecl)
+	       || (inh_self && inh_self == DECL_ORIGIN (fndecl)));
+  /* A temporary's destructor call is analyzed only if the temporary is
+     not elided, which is known later (contract_resolve_pending_analysis):
+     its object argument carries what that needs.  */
+  if (!skip
+      && carrier == MARK_OBJECT
+      && DECL_DESTRUCTOR_P (fndecl)
+      && TREE_CODE (call) == CALL_EXPR
+      && call_expr_nargs (call) > 0
+      && !processing_template_decl
+      && contract_temporary_cleanup_p ()
+      && contract_call_analyzed_p (fndecl, analyses))
+    {
+      tree arg = CALL_EXPR_ARG (call, 0);
+      tree pending
+	= contract_defer_call_analysis (fndecl,
+					cp_expr_loc_or_input_loc (call),
+					analyses);
+      CALL_EXPR_ARG (call, 0)
+	= build2 (COMPOUND_EXPR, TREE_TYPE (arg), pending, arg);
+    }
+  else
+    proof_markers = contract_analyze_call (fndecl, call,
+					   cp_expr_loc_or_input_loc (call),
+					   analyses, skip, marker_call_p,
+					   placeholder_ctor, &temp,
+					   &this_call);
+
   if (!is_virtual)
     {
       for (tree t = tuple; t; t = TREE_CHAIN (t))
@@ -10303,6 +11251,47 @@ contract_local_handler_always_rethrows_p (tree contract,
   return analysis.walk_stmt (body) == RO_RETHROWN;
 }
 
+/* D4405: true if ANALYSIS, the semantic of CONTRACT's analysis
+   evaluation, is prove or diagnose and the current function makes that
+   evaluation (build_analysis_evaluation).  */
+
+static bool
+contract_analyzed_here_p (tree contract,
+			  contract_evaluation_semantic analysis)
+{
+  return (contract_semantic_proving_p (analysis)
+	  && !PRECONDITION_P (contract)
+	  && !DECL_IS_WRAPPER_FN_P (current_function_decl));
+}
+
+/* D4405: the analysis evaluation of CONTRACT, a postcondition or contract
+   assertion, with the semantic ANALYSIS, in the function body ahead of the
+   assertion's runtime evaluation there, so that the proof never takes that
+   check as a premise: if ANALYSIS is prove or diagnose, the evaluation is
+   diagnosed unless proven -- or a strategy's marker, which this returns,
+   takes its place.  NULL_TREE if there is nothing to emit.  The predicate
+   is never evaluated.  A precondition's analysis evaluation is at each
+   call, in the caller (maybe_contract_wrap_call), and a contract wrapper
+   evaluates only the runtime evaluations it is for.  */
+
+static tree
+build_analysis_evaluation (tree contract,
+			   contract_evaluation_semantic analysis)
+{
+  if (!contract_analyzed_here_p (contract, analysis)
+      || CONTRACT_CONDITION (contract) == error_mark_node)
+    return NULL_TREE;
+  /* P4405 proving hook: a strategy's marker takes the evaluation's place if
+     it defers the evaluation.  */
+  tree marker = NULL_TREE;
+  tree pred = (contract_proof_deferrable_p (contract)
+	       ? contract_check_condition (contract) : NULL_TREE);
+  diagnose_unproven_contract (contract, analysis, EXPR_LOCATION (contract),
+			      NULL_TREE, NULL_TREE, pred ? &marker : NULL,
+			      pred);
+  return marker;
+}
+
 /* Emit the check body for CONTRACT under a single, statically known
    evaluation SEMANTIC.  Returns a BIND_EXPR statement expression, or
    void_node when the semantic emits no check (ignore), what assume emits
@@ -10326,6 +11315,11 @@ emit_check_for_semantic (tree contract, contract_evaluation_semantic semantic,
   switch (semantic)
     {
     case CES_IGNORE:
+    case CES_PROVE:
+    case CES_DIAGNOSE:
+      /* D4405: only the analysis evaluation is ever prove or diagnose
+	 (build_analysis_evaluation); a runtime evaluation never is.  */
+      gcc_checking_assert (false);
       return void_node;
     case CES_ENFORCE:
     case CES_OBSERVE:
@@ -11271,6 +12265,39 @@ note_contract_premise (tree contract, contract_evaluation_semantic semantic)
    the caller is responsible for that.
    This is called during genericization.  */
 
+static tree build_runtime_contract_check (tree,
+					  contract_evaluation_semantic, bool);
+
+tree
+build_contract_check (tree contract)
+{
+  contract_evaluation_semantic semantic;
+  contract_evaluation_semantic analysis
+    = ensure_analysis_semantic (contract, current_function_decl, &semantic);
+
+  /* D4405: the analysis evaluation comes first, then the runtime
+     evaluation (or, when the runtime semantic is ignore, nothing more).  */
+  tree analysis_eval = build_analysis_evaluation (contract, analysis);
+  tree check
+    = build_runtime_contract_check (contract, semantic,
+				    contract_analyzed_here_p (contract,
+							      analysis));
+  if (!analysis_eval)
+    return check;
+  if (!check || check == void_node)
+    return analysis_eval;
+  if (check == error_mark_node)
+    return check;
+  tree list = alloc_stmt_list ();
+  append_to_statement_list_force (analysis_eval, &list);
+  append_to_statement_list_force (check, &list);
+  return list;
+}
+
+/* The runtime evaluation of CONTRACT, with the semantic SEMANTIC in the
+   current function (build_contract_check).  ANALYZED is true if a prove or
+   diagnose analysis evaluation precedes it.  */
+
 static tree
 build_runtime_contract_check (tree contract,
 			      contract_evaluation_semantic semantic,
@@ -11284,6 +12311,11 @@ build_runtime_contract_check (tree contract,
   /* P4405 proving hook: what a plain check lets the optimizers take to
      hold.  */
   note_contract_premise (contract, semantic);
+  /* D4405: an ignore evaluation after a prove or diagnose analysis
+     evaluation adds nothing, not even an assumption: the strategies take
+     the analysis evaluation's predicate to hold where it continues.  */
+  if (!dyn_name && analyzed && semantic == CES_IGNORE)
+    return void_node;
   /* P4405 proving hook: a plain check, followed by what lets a strategy
      that defers evaluations assume the predicate.  */
   if (!dyn_name && contract_proof_deferrable_p (contract))

@@ -5685,6 +5685,14 @@ expand_SPACESHIP (internal_fn, gcall *stmt)
   assign_call_lhs (lhs, target, &ops[0]);
 }
 
+/* D4405: the C++ front end replaces every .CONTRACT_PENDING_ANALYSIS before
+   gimplification is complete; nothing remains to do should one survive.  */
+
+void
+expand_CONTRACT_PENDING_ANALYSIS (internal_fn, gcall *)
+{
+}
+
 void
 expand_ASSUME (internal_fn, gcall *)
 {

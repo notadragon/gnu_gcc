@@ -1960,6 +1960,24 @@ fcontract-checks-outlined
 C++ ObjC++ Var(flag_contract_checks_outlined) Init(0)
 -fcontract-checks-outlined	Build contract checks using outlined functions.
 
+; D4405: the semantics the analysis evaluation can have.
+
+Enum
+Name(contract_analysis_semantic) Type(int) UnknownError(the analysis evaluation semantic must be %<ignore%>, %<diagnose%> or %<prove%>, not %qs)
+
+EnumValue
+Enum(contract_analysis_semantic) String(ignore) Value(1)
+
+EnumValue
+Enum(contract_analysis_semantic) String(prove) Value(8)
+
+EnumValue
+Enum(contract_analysis_semantic) String(diagnose) Value(9)
+
+fcontract-analysis-semantic=
+C C++ ObjC ObjC++ Joined RejectNegative Enum(contract_analysis_semantic) Var(flag_contract_analysis_semantic) Init(0)
+-fcontract-analysis-semantic=[ignore|diagnose|prove]	Select the semantic of the analysis evaluation of every contract assertion.
+
 fcontract-disable-optimized-checks
 C++ ObjC++ Var(flag_contract_disable_optimized_checks) Init(0)
 -fcontract-disable-optimized-checks	Disable optimisation of contract checks.

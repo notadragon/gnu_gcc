@@ -12562,6 +12562,11 @@ cp_parser_constant_expression (cp_parser* parser,
   /* A manifestly constant-evaluated expression is evaluated even in an
      unevaluated operand.  */
   cp_evaluated ev (/*reset if*/allow_non_constant_p <= 1);
+  /* D4405: and has no analysis evaluation -- unless a non-constant one is
+     accepted (an array bound, an initializer).  */
+  contract_constant_evaluation_sentinel cce (!allow_non_constant_p
+					     || (allow_non_constant_p == 1
+						 && !non_constant_p));
 
   /* Although the grammar says "conditional-expression", when not STRICT_P,
      we parse an "assignment-expression", which also permits
@@ -15585,7 +15590,12 @@ cp_parser_selection_statement (cp_parser* parser, bool *if_p,
 	  }
 
 	/* Parse the condition.  */
-	condition = cp_parser_condition (parser, keyword);
+	{
+	  /* D4405: an `if constexpr' condition is manifestly
+	     constant-evaluated.  */
+	  contract_constant_evaluation_sentinel cce (cx);
+	  condition = cp_parser_condition (parser, keyword);
+	}
 	/* Look for the `)'.  */
 	if (!parens.require_close (parser))
 	  cp_parser_skip_to_closing_parenthesis (parser, true, false,
@@ -22370,6 +22380,7 @@ cp_parser_template_argument (cp_parser* parser)
 
       /* With C++17 generalized non-type template arguments we need to handle
 	 lvalue constant expressions, too.  */
+      contract_constant_evaluation_sentinel cce;	/* D4405.  */
       argument = cp_parser_assignment_expression (parser);
       if (UNLIKELY (cp_lexer_peek_token (parser->lexer) == next)
 	  && argument != error_mark_node)
@@ -26764,6 +26775,12 @@ cp_parser_init_declarator (cp_parser* parser,
 
 	  if (has_lambda_scope)
 	    start_lambda_scope (decl);
+	  /* D4405: a constexpr or constinit variable's initializer is
+	     manifestly constant-evaluated.  */
+	  contract_constant_evaluation_sentinel cce
+	    (decl && VAR_P (decl)
+	     && (DECL_DECLARED_CONSTEXPR_P (decl)
+		 || DECL_DECLARED_CONSTINIT_P (decl)));
 	  initializer = cp_parser_initializer (parser,
 					       &is_direct_init,
 					       &is_non_constant_init);
@@ -31998,6 +32015,11 @@ cp_parser_member_declaration (cp_parser* parser)
 							      &decl_specifiers,
 							      attributes);
 		      start_lambda_scope (decl);
+		      /* D4405, as in cp_parser_init_declarator.  */
+		      contract_constant_evaluation_sentinel cce
+			(decl && VAR_P (decl)
+			 && (DECL_DECLARED_CONSTEXPR_P (decl)
+			     || DECL_DECLARED_CONSTINIT_P (decl)));
 
 		      if (cxx_dialect >= cxx11)
 			{
@@ -32031,6 +32053,11 @@ cp_parser_member_declaration (cp_parser* parser)
 							      &decl_specifiers,
 							      attributes);
 		      start_lambda_scope (decl);
+		      /* D4405, as in cp_parser_init_declarator.  */
+		      contract_constant_evaluation_sentinel cce
+			(decl && VAR_P (decl)
+			 && (DECL_DECLARED_CONSTEXPR_P (decl)
+			     || DECL_DECLARED_CONSTINIT_P (decl)));
 		      initializer = cp_parser_initializer (parser);
 		      finish_lambda_scope ();
 		      finish_initialized_static_member (decl, initializer,

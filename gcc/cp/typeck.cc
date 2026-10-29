@@ -7741,6 +7741,10 @@ cp_build_addr_expr_1 (tree arg, bool strict_lvalue, tsubst_flags_t complain)
 	    break;
 	  }
 
+	/* D4405: calls through the pointer to member are not analyzed.  */
+	if (TREE_CODE (t) == FUNCTION_DECL)
+	  contract_diagnose_address_taken (t, loc, complain);
+
 	type = build_ptrmem_type (context_for_name_lookup (t),
 				  TREE_TYPE (t));
 	t = make_ptrmem_cst (type, t);
@@ -7760,6 +7764,13 @@ cp_build_addr_expr_1 (tree arg, bool strict_lvalue, tsubst_flags_t complain)
 	error_at (loc, "attempt to take address of bit-field");
       return error_mark_node;
     }
+
+  /* D4405: calls through the pointer are not analyzed.  Look through the
+     wrapper of a parenthesized name (force_paren_expr).  */
+  if (tree fn = tree_strip_any_location_wrapper
+		  (maybe_undo_parenthesized_ref (arg));
+      TREE_CODE (fn) == FUNCTION_DECL)
+    contract_diagnose_address_taken (fn, loc, complain);
 
   /* In a template, we are processing a non-dependent expression
      so we can just form an ADDR_EXPR with the correct type.  */
@@ -7784,6 +7795,7 @@ cp_build_addr_expr_1 (tree arg, bool strict_lvalue, tsubst_flags_t complain)
 		  && DECL_STATIC_FUNCTION_P (fn));
       if (!mark_used (fn, complain) && !(complain & tf_error))
 	return error_mark_node;
+      contract_diagnose_address_taken (fn, loc, complain);
       val = build_address (fn);
       if (TREE_SIDE_EFFECTS (TREE_OPERAND (arg, 0)))
 	/* Do not lose object's side effects.  */
