@@ -2131,7 +2131,9 @@ find_func_aliases_for_call (struct function *fn, gcall *t)
 
   fi = get_fi_for_callee (t);
   if (!in_ipa_mode
-      || (fi->decl && fndecl && !fi->is_fn_info))
+      || (fi->decl && fndecl && !fi->is_fn_info)
+      || (fndecl && fi->is_fn_info
+	  && fndecl_call_interposable_p (fn->decl, fndecl)))
     {
       auto_vec<ce_s, 16> rhsc;
       int flags = gimple_call_flags (t);
@@ -2802,10 +2804,12 @@ find_func_clobbers (struct function *fn, gimple *origt)
 	}
 
       /* For callees without function info (that's external functions),
-	 ESCAPED is clobbered and used.  */
-      if (cfi->decl
-	  && TREE_CODE (cfi->decl) == FUNCTION_DECL
-	  && !cfi->is_fn_info)
+	 and for interposable callees, ESCAPED is clobbered and used.  */
+      if ((cfi->decl
+	   && TREE_CODE (cfi->decl) == FUNCTION_DECL
+	   && !cfi->is_fn_info)
+	  || (decl && cfi->is_fn_info
+	      && fndecl_call_interposable_p (fn->decl, decl)))
 	{
 	  varinfo_t vi;
 
