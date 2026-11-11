@@ -1149,7 +1149,17 @@ c_cpp_builtins (cpp_reader *pfile)
       else if (cxx_dialect >= cxx20)
 	cpp_warn (pfile, "__cpp_concepts");
       if (flag_contracts)
-	cpp_define (pfile, "__cpp_contracts=202502L");
+	{
+	  /* The greatest value any enabled paper gives __cpp_contracts,
+	     P2900's 202502L when none raises it.  P3097's value is a private
+	     date, which tracks the month.  */
+	  long cpp_contracts = 202502L;
+	  if (flag_contracts_p3097)
+	    cpp_contracts = MAX (cpp_contracts, 202611L);
+	  char buf[sizeof ("__cpp_contracts=") + 21];
+	  sprintf (buf, "__cpp_contracts=%ldL", cpp_contracts);
+	  cpp_define (pfile, buf);
+	}
       else if (cxx_dialect >= cxx26)
 	cpp_warn (pfile, "__cpp_contracts");
       if (flag_modules)

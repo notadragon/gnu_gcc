@@ -3479,6 +3479,9 @@ each of those @option{-fcontracts-p@var{nnnn}} options individually.  In
 C it enables contracts for C and the options below that apply to C
 (@pxref{C Dialect Options}).  This option and each of the options below
 also enable @option{-fcontracts}, in any C++ dialect.
+@opindex fcontracts-p3097
+@opindex fno-contracts-p3097
+@item -fcontracts-p3097
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines

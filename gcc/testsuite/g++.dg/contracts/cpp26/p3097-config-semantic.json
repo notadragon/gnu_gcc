@@ -1,0 +1,4 @@
+[
+  {"match": {"location": "p3097-config-semantic.C:26-28", "caller": false}, "output": {"semantic": "ignore"}},
+  {"output": {"semantic": "observe"}}
+]

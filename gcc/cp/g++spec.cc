@@ -211,6 +211,7 @@ lang_specific_driver (struct cl_decoded_option **in_decoded_options,
 	  explicit_contracts = decoded_options[i].value;
 	  break;
 
+	case OPT_fcontracts_p3097:
 	case OPT_fcontracts_p3850:
 	  /* Any use of C++ contracts needs the experimental runtime
 	     (libstdc++exp, which hosts the contracts C++ runtime) and the
