@@ -31,6 +31,9 @@ along with GCC; see the file COPYING3.  If not see
 #include "stringpool.h"
 #include "attribs.h"
 #include "asan.h"
+#include "cgraph.h"
+#include "opts.h"
+#include "c-family/contracts-config.h"
 #include "langhooks.h"
 
 /* Instrument division by zero and INT_MIN / -1.  If not instrumenting,
@@ -1024,4 +1027,344 @@ ubsan_maybe_instrument_member_call (tree stmt, bool is_ctor)
 						 : UBSAN_MEMBER_CALL);
   if (op)
     CALL_EXPR_ARG (stmt, 0) = op;
+}
+
+/* P3100 ASan contract routing.
+
+   Under -fcontracts-p3100 the resolved contract-evaluation semantic for the
+   user-space address check (SANITIZE_USER_ADDRESS) controls how a detected
+   AddressSanitizer error is handled at run time:
+
+     observe -> the runtime reports the error via the contract-violation
+                handler and the program continues;
+     enforce -> the runtime reports and then terminates.
+
+   P3100: because the routed report is invoked from inside libasan's
+   implicitly-noexcept ScopedInErrorReport destructor, a throwing handler can
+   never propagate -- it hits "exception escaping a noexcept function" and
+   std::terminate()s (see libsanitizer/asan/asan_report.cpp for the routing
+   details).  The address check therefore offers only NON-throwing
+   realizations, and its resolved semantic is one of:
+
+     assume         -> realized per function via no_sanitize
+                       (c_apply_contract_sanitizer_assume);
+                       no descriptor emitted here;
+     quick_enforce  -> terminate on the error WITHOUT calling the handler;
+                       always available (default when -fcontracts-p4298 is off);
+     noexcept_observe (P4298) -> call the handler, then continue;
+     noexcept_enforce (P4298) -> call the handler, then terminate.
+
+   noexcept_observe/noexcept_enforce require -fcontracts-p4298 and are the
+   run-time continue/terminate-after-handler paths; plain throwing
+   enforce/observe and ignore are hard-errored during option processing, so
+   they never reach here.
+
+   The AddressSanitizer instrumentation itself is semantic-INDEPENDENT: every
+   realization emits identical __asan_report_* calls, and the run-time behavior
+   is decided by the libsanitizer report path reading the descriptor emitted
+   here.  So we convey the resolved semantic to libsanitizer with a per-TU weak
+   byte __asan_contract_semantic whose wire encoding is decoupled from the
+   internal contract_evaluation_semantic values:
+
+     0 = stock  (symbol absent / routing off -> runtime keeps stock behavior)
+     1 = observe        (noexcept_observe: call handler, then continue)
+     2 = enforce        (noexcept_enforce: call handler, then terminate)
+     3 = quick_enforce  (terminate WITHOUT calling the handler)
+
+   Every translation unit emits its own, but being weak they resolve to one
+   definition program-wide, and which translation unit's survives is
+   unspecified: a program whose translation units were compiled with
+   different routing flags gets one of their semantics for all of them.
+
+   Crucially this descriptor is emitted here in the per-TU FRONT-END compile,
+   where -fcontracts-p3100 and the -fsanitize-semantic/-recover/-trap flags are
+   live.  It is a preserved compile-time global, so under -flto it streams
+   through WPA/LTRANS into the final image exactly like a user global -- the LTO
+   and non-LTO paths become identical and no LTO-time flag state is needed.
+   (Emitting it from asan_finish_file, which runs at LTRANS, would read stale
+   flag state and silently drop routing under -flto.)
+
+   -fsanitize-noncontract-callbacks is the global opt-out: when set,
+   we emit no descriptor, so the runtime reads stock (0) and takes its stock
+   report path -- and, because the runtime guardrail keys off the
+   same descriptor, the guardrail disengages too.  The opt-out is orthogonal to
+   the instrument/allowed-set decisions: assume is still realized per function
+   via no_sanitize (c_apply_contract_sanitizer_assume), and the
+   -fsanitize-semantic= allowed-set validation still applies during option
+   processing.  It affects only the runtime report routing and the
+   guardrail.  */
+
+/* The value of a routing wire byte, as libsanitizer reads it (ContractRoute
+   in sanitizer_common/sanitizer_contract_routing.h).  */
+enum contract_route
+{
+  CONTRACT_ROUTE_STOCK = 0,	/* routing off: stock sanitizer behavior */
+  CONTRACT_ROUTE_OBSERVE = 1,	/* call the handler, then continue */
+  CONTRACT_ROUTE_ENFORCE = 2,	/* call the handler, then terminate */
+  CONTRACT_ROUTE_QUICK = 3	/* terminate without calling the handler */
+};
+
+/* The wire value for a routed check whose semantic resolved to SEM.  assume
+   is realized via per-function no_sanitize; ignore and plain throwing
+   enforce/observe are hard-errored; CES_INVALID means routing is off (or the
+   doomed recover-without-p4298 compile).  All of those leave the runtime its
+   stock behavior.  */
+
+static contract_route
+contract_route_for (contract_evaluation_semantic sem)
+{
+  switch (sem)
+    {
+    case CES_NOEXCEPT_OBSERVE:
+      return CONTRACT_ROUTE_OBSERVE;
+    case CES_NOEXCEPT_ENFORCE:
+      return CONTRACT_ROUTE_ENFORCE;
+    case CES_QUICK:
+      return CONTRACT_ROUTE_QUICK;
+    default:
+      return CONTRACT_ROUTE_STOCK;
+    }
+}
+
+/* Emit one weak wire byte NAME conveying the resolved routing semantic of the
+   check CHECK_BIT to libsanitizer, or emit nothing when the check is not
+   routed to the handler.  The ASan address check and the two pointer-pair
+   checks each get their own byte so the address routing scope is independent
+   of the pointer-pair checks (see libsanitizer/asan/asan_report.cpp), and TSan
+   has one of its own.  */
+
+static void
+emit_contract_wire_byte (const char *name, sanitize_code_type check_bit)
+{
+  contract_route wire
+    = contract_route_for (resolved_sanitizer_semantic (check_bit));
+  if (wire == CONTRACT_ROUTE_STOCK)
+    return;
+
+  tree id = get_identifier (name);
+  tree var = build_decl (UNKNOWN_LOCATION, VAR_DECL, id,
+			 unsigned_char_type_node);
+  TREE_STATIC (var) = 1;
+  TREE_PUBLIC (var) = 1;
+  DECL_WEAK (var) = 1;
+  DECL_ARTIFICIAL (var) = 1;
+  /* The descriptor has no in-TU references -- only the sanitizer runtime reads
+     it -- so mark it preserved.  Otherwise (whole-program) analysis would
+     eliminate it as an unreferenced symbol and routing would silently fall
+     back to stock behavior, in particular under -flto.  */
+  DECL_PRESERVE_P (var) = 1;
+  DECL_INITIAL (var) = build_int_cst (unsigned_char_type_node, wire);
+  varpool_node::finalize_decl (var);
+}
+
+/* AddressSanitizer routing descriptor: the weak wire byte
+   __asan_contract_semantic for the address checks, and one each for the two
+   pointer-pair checks, read by libasan's ScopedInErrorReport.  Nothing is
+   emitted without -fcontracts-p3100, or when the sanitizer's own callbacks
+   are in use.  */
+
+static void
+emit_asan_contract_semantic_descriptor (void)
+{
+  if (!flag_contracts_p3100 || flag_sanitize_noncontract_callbacks)
+    return;
+
+  emit_contract_wire_byte ("__asan_contract_semantic",
+				SANITIZE_USER_ADDRESS);
+  /* The two ASan pointer-pair checks report through the same
+     ScopedInErrorReport path but are governed by their own bytes, so the
+     address byte's scope is unchanged.  */
+  emit_contract_wire_byte ("__asan_contract_semantic_pointer_compare",
+				SANITIZE_POINTER_COMPARE);
+  emit_contract_wire_byte ("__asan_contract_semantic_pointer_subtract",
+				SANITIZE_POINTER_SUBTRACT);
+}
+
+/* ThreadSanitizer routing descriptor: a single whole-program check (data race)
+   with its own weak wire byte __tsan_contract_semantic, read by libtsan's
+   OutputReport.  Same wire encoding and emit-nothing-for-stock rule as the ASan
+   descriptor; reuses the shared wire-byte emitter.  */
+
+static void
+emit_tsan_contract_semantic_descriptor (void)
+{
+  if (!flag_contracts_p3100 || flag_sanitize_noncontract_callbacks)
+    return;
+
+  emit_contract_wire_byte ("__tsan_contract_semantic", SANITIZE_THREAD);
+}
+
+/* P3100 (UBSan runtime routing): the per-check analog of the ASan
+   descriptor above.  Whereas ASan has a single whole-program check (one byte),
+   UBSan has many independently-configurable runtime checks, so the conveyance
+   is a weak ARRAY, __ubsan_contract_semantic[RUC_COUNT], one wire byte per
+   routed check.  libubsan's ScopedReport destructor folds its ErrorType to a
+   routed id and reads the corresponding byte (see
+   libsanitizer/ubsan/ubsan_diag.cpp).
+
+   The routed-check id ordering must stay in sync with the RUC_* enum in
+   ubsan_diag.cpp.  Adding a routed check now touches TWO locations:
+     1. gcc/contracts-routed-checks.def -- which generates this RUC_* enum,
+        routed_checks[] below, c_apply_contract_sanitizer_assume's list and the
+        UBSan half of opts.cc's ROUTED_SANITIZER_BITS;
+     2. the matching RUC_* id + ErrorTypeToRoutedId case on the runtime side
+        (libsanitizer/ubsan/ubsan_diag.cpp), which is a separate build unit and
+        cannot share the header -- so that one still has to be kept in step by
+        hand, and the ordering comment in the .def says so.
+
+   Generating the three compiler-side copies from the .def rather than writing
+   each out by hand is what keeps that count at two.  Two of the three fail
+   SILENTLY when they disagree: a check missing from the recognition mask is
+   never routed, and one missing from the assume list never suppresses its
+   instrumentation, neither with any diagnostic.
+
+   Same wire encoding and the same emit-nothing-for-stock rule as the ASan
+   descriptor.  The Clang-only ids (RUC_FUNCTION and the four at the end) are
+   DEF_ROUTED_UBSAN_RESERVED rows: they hold a wire slot for id alignment, GCC
+   has no bit for them, so they contribute no routed_checks[] row and their
+   wire byte always stays stock.  */
+
+enum
+{
+#define DEF_ROUTED_UBSAN_CHECK(ID, BIT) ID,
+#define DEF_ROUTED_UBSAN_RESERVED(ID) ID,
+#include "contracts-routed-checks.def"
+  RUC_COUNT
+};
+
+static void
+emit_ubsan_contract_semantic_descriptor (void)
+{
+  if (!flag_contracts_p3100 || flag_sanitize_noncontract_callbacks)
+    return;
+
+  /* Routed UBSan runtime checks: { RUC id, its -fsanitize= bit }.  Generated
+     from contracts-routed-checks.def; the reserved Clang-only slots have no
+     GCC bit and so contribute no row.  */
+  static const struct { int id; sanitize_code_type bit; }
+  routed_checks[] = {
+#define DEF_ROUTED_UBSAN_CHECK(ID, BIT) { ID, BIT },
+#include "contracts-routed-checks.def"
+  };
+
+  unsigned char wire[RUC_COUNT];
+  memset (wire, CONTRACT_ROUTE_STOCK, sizeof (wire));
+  bool any_routed = false;
+
+  for (unsigned i = 0; i < ARRAY_SIZE (routed_checks); ++i)
+    {
+      contract_route w = contract_route_for
+	(resolved_sanitizer_semantic (routed_checks[i].bit));
+      wire[routed_checks[i].id] = w;
+      if (w != CONTRACT_ROUTE_STOCK)
+	any_routed = true;
+    }
+
+  /* No routed check resolves to a routing semantic -- emit nothing so the
+     runtime keeps stock behavior.  */
+  if (!any_routed)
+    return;
+
+  tree elt_type = unsigned_char_type_node;
+  tree array_type
+    = build_array_type (elt_type, build_index_type (size_int (RUC_COUNT - 1)));
+  tree name = get_identifier ("__ubsan_contract_semantic");
+  tree var = build_decl (UNKNOWN_LOCATION, VAR_DECL, name, array_type);
+  TREE_STATIC (var) = 1;
+  TREE_PUBLIC (var) = 1;
+  DECL_WEAK (var) = 1;
+  DECL_ARTIFICIAL (var) = 1;
+  /* Only the sanitizer runtime reads it; mark preserved so whole-program
+     analysis (in particular -flto) does not eliminate it as unreferenced.  */
+  DECL_PRESERVE_P (var) = 1;
+
+  vec<constructor_elt, va_gc> *elts = NULL;
+  for (int i = 0; i < RUC_COUNT; ++i)
+    CONSTRUCTOR_APPEND_ELT (elts, size_int (i),
+			    build_int_cst (elt_type, wire[i]));
+  tree ctor = build_constructor (array_type, elts);
+  TREE_STATIC (ctor) = 1;
+  TREE_CONSTANT (ctor) = 1;
+  DECL_INITIAL (var) = ctor;
+  varpool_node::finalize_decl (var);
+}
+
+/* Emit the P3100 sanitizer contract-routing descriptors of this translation
+   unit: ASan's, UBSan's and TSan's.  Called at the end of the translation
+   unit by the C and C++ front ends, while -fcontracts-p3100 and the
+   -fsanitize-semantic= flags are live.  */
+
+void
+c_emit_contract_sanitizer_descriptors (void)
+{
+  emit_asan_contract_semantic_descriptor ();
+  emit_ubsan_contract_semantic_descriptor ();
+  emit_tsan_contract_semantic_descriptor ();
+}
+
+/* P3100 (assume): mark FNDECL no_sanitize for each routed sanitizer check
+   that resolves to assume, so that it is not instrumented -- byte identical
+   to a build without that -fsanitize= check.  The attribute lives in
+   DECL_ATTRIBUTES and so streams through LTO.  Called by the C and C++ front
+   ends before genericization, whose own instrumentation consults it.  */
+
+void
+c_apply_contract_sanitizer_assume (tree fndecl)
+{
+  /* P3100 (assume): when -fcontracts-p3100 resolves the user-space
+     address check to assume, AddressSanitizer must not instrument -- byte
+     identical to a build without -fsanitize=address for that check.  Realize
+     this per function by marking the definition no_sanitize("address").  Unlike
+     gating the asan pass on the front-end flags (which are gone at LTRANS), the
+     no_sanitize attribute lives in DECL_ATTRIBUTES and streams through LTO, so
+     pass_asan honors it under both -flto and non-LTO.  */
+  if (flag_contracts_p3100
+      && (flag_sanitize & SANITIZE_ADDRESS)
+      && resolved_sanitizer_semantic (SANITIZE_USER_ADDRESS) == CES_ASSUME)
+    add_no_sanitize_value (fndecl, SANITIZE_ADDRESS);
+
+  /* Same for the two ASan pointer-pair checks (pointer-compare,
+     pointer-subtract): when one resolves to assume, its instrumentation
+     (__sanitizer_ptr_cmp / __sanitizer_ptr_sub) must not be emitted.  Each is a
+     dedicated ASan-family bit, so mark no_sanitize for it individually.  */
+  if (flag_contracts_p3100)
+    {
+      static const sanitize_code_type pointer_pair_bits[]
+	= { SANITIZE_POINTER_COMPARE, SANITIZE_POINTER_SUBTRACT };
+      for (unsigned i = 0; i < ARRAY_SIZE (pointer_pair_bits); ++i)
+	if ((flag_sanitize & pointer_pair_bits[i])
+	    && (resolved_sanitizer_semantic (pointer_pair_bits[i])
+		== CES_ASSUME))
+	  add_no_sanitize_value (fndecl, pointer_pair_bits[i]);
+    }
+
+  /* Same for the routed UBSan runtime checks (vptr, alignment, object-size,
+     nonnull-attribute, returns-nonnull-attribute, pointer-overflow): when one
+     resolves to assume, its instrumentation must not be emitted (byte identical
+     to a build without that -fsanitize= check), realized per function via
+     no_sanitize so it streams through LTO.  */
+  if (flag_contracts_p3100)
+    {
+      /* Generated from contracts-routed-checks.def -- the same list the
+	 wire descriptor is built from, so a check cannot be routed without
+	 also being realizable as "assume" here.  */
+      static const sanitize_code_type routed_ubsan_bits[] = {
+#define DEF_ROUTED_UBSAN_CHECK(ID, BIT) BIT,
+#include "contracts-routed-checks.def"
+      };
+      for (unsigned i = 0; i < ARRAY_SIZE (routed_ubsan_bits); ++i)
+	if ((flag_sanitize & routed_ubsan_bits[i])
+	    && (resolved_sanitizer_semantic (routed_ubsan_bits[i])
+		== CES_ASSUME))
+	  add_no_sanitize_value (fndecl, routed_ubsan_bits[i]);
+    }
+
+  /* Same for ThreadSanitizer: when -fcontracts-p3100 resolves the thread check
+     to assume, TSan must not instrument this function (byte identical to a
+     build without -fsanitize=thread), realized per function via no_sanitize so
+     it streams through LTO -- mirror of the ASan assume line above.  */
+  if (flag_contracts_p3100
+      && (flag_sanitize & SANITIZE_THREAD)
+      && resolved_sanitizer_semantic (SANITIZE_THREAD) == CES_ASSUME)
+    add_no_sanitize_value (fndecl, SANITIZE_THREAD);
 }

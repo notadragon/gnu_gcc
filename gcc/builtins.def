@@ -251,7 +251,10 @@ along with GCC; see the file COPYING3.  If not see
 
 /* Builtin used by the implementation of libsanitizer. These
    functions are mapped to the actual implementation of the
-   libtsan library. */
+   libtsan library.  P3100 implicit contract assertions use the UBSan
+   ones without any sanitizer: declare them up front then too, since a
+   front end may not be able to declare a builtin once its file scope has
+   gone (C's c_builtin_function binds into the external scope).  */
 #undef DEF_SANITIZER_BUILTIN
 #define DEF_SANITIZER_BUILTIN(ENUM, NAME, TYPE, ATTRS) \
   DEF_BUILTIN (ENUM, "__builtin_" NAME, BUILT_IN_NORMAL, TYPE, TYPE,    \
@@ -261,7 +264,7 @@ along with GCC; see the file COPYING3.  If not see
 				| SANITIZE_MEMTAG_STACK \
 				| SANITIZE_UNDEFINED \
 				| SANITIZE_UNDEFINED_NONDEFAULT) \
-	       || flag_sanitize_coverage))
+	       || flag_sanitize_coverage || flag_contracts_p3100))
 
 /* Define an attribute list for math functions that are normally
    "impure" because some of them may write into global memory for

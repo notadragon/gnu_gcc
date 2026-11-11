@@ -97,6 +97,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "dbgcnt.h"
 #include "gcc-urlifier.h"
 #include "unique-argv.h"
+#include "c-family/contracts-config.h"
 
 #include "selftest.h"
 
@@ -2388,6 +2389,21 @@ toplev::main (int argc, char **argv)
 	 sets the original filename if appropriate (e.g. foo.i -> foo.c)
 	 so we can correctly initialize debug output.  */
       no_backend = lang_hooks.post_options (&main_input_filename);
+
+      /* P3100: -fsanitize-semantic= is a Common option, but only the
+	 C-family front ends act on it (and warn when it cannot take
+	 effect there).  Say so in the others.  lto1 stays silent: the option
+	 took effect when the objects were compiled, and repeating compile
+	 options on the link line is ordinary.  */
+      if (!lang_GNU_C () && !lang_GNU_CXX () && !lang_GNU_OBJC ()
+	  && !startswith (lang_hooks.name, "GNU GIMPLE"))
+	for (unsigned bit = 0; bit < SANITIZE_CODE_TYPE_BITS; bit++)
+	  if (flag_sanitize_semantic[bit] != CES_INVALID)
+	    {
+	      warning (0, "%<-fsanitize-semantic=%> has no effect for %s",
+		       lang_hooks.name);
+	      break;
+	    }
 
       process_options ();
 

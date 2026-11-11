@@ -21,15 +21,19 @@
 # Load support procs.
 load_lib gcc-dg.exp
 load_lib asan-dg.exp
+load_lib contracts-dg.exp
 
 # Initialize `dg'.
 dg-init
 # libasan uses libstdc++ so make sure we provide paths for it.
 asan_init 1
+# The P3100 sanitizer-routing tests link libcontracts, which the driver adds
+# for -fcontracts-p3100 and -fcontracts-p4299; make it findable.
+set contracts_flags [contracts_link_flags [get_multilibs]]
 
 # Main loop.
 if [check_effective_target_fsanitize_address] {
-  gcc-dg-runtest [lsort [glob -nocomplain $srcdir/$subdir/*.c $srcdir/c-c++-common/asan/*.c]] "" ""
+  gcc-dg-runtest [lsort [glob -nocomplain $srcdir/$subdir/*.c $srcdir/c-c++-common/asan/*.c]] "" $contracts_flags
 }
 
 # All done.

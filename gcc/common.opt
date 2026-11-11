@@ -212,6 +212,12 @@ sanitize_code_type flag_sanitize_recover = (SANITIZE_UNDEFINED | SANITIZE_UNDEFI
 Variable
 sanitize_code_type flag_sanitize_trap
 
+; Per-check contract-evaluation semantic requested via -fsanitize-semantic=,
+; indexed by the bit position of the corresponding SANITIZE_* code.  0
+; (CES_INVALID) means no semantic was explicitly requested for that check.
+Variable
+unsigned char flag_sanitize_semantic[SANITIZE_CODE_TYPE_BITS] = { }
+
 ; Flag whether a prefix has been added to dump_base_name
 Variable
 bool dump_base_name_prefixed = false
@@ -1188,6 +1194,22 @@ Use traps instead of diagnostics of undefined behavior sanitizers.
 
 fsanitize-trap
 Common Driver
+
+fsanitize-semantic=
+Common Driver Joined RejectNegative
+-fsanitize-semantic=<check>:<semantic>[,...]	Set the contract evaluation semantic for a sanitizer check.
+
+; Debug-only: print the resolved (explicit-or-derived) contract
+; evaluation semantic for every enabled sanitizer check to stderr, as
+; "<check>: <semantic>" lines, once options finish processing.  Testing
+; seam for the P3100 -fsanitize/-recover/-trap lowering, not a
+; documented user-facing flag.
+fsanitize-semantic-print
+Common Undocumented Var(flag_sanitize_semantic_print)
+
+fsanitize-noncontract-callbacks
+Common Driver Var(flag_sanitize_noncontract_callbacks) Init(0)
+Use the sanitizer's stock reporting/callbacks instead of P3100 contract routing.
 
 fsanitize-address-use-after-scope
 Common Driver Var(flag_sanitize_address_use_after_scope) Init(0)
