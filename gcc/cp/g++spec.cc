@@ -218,6 +218,7 @@ lang_specific_driver (struct cl_decoded_option **in_decoded_options,
 	case OPT_fcontracts_p3400:
 	case OPT_fcontracts_p3850:
 	case OPT_fcontracts_p4283:
+	case OPT_fcontracts_p4298:
 	  /* Any use of C++ contracts needs the experimental runtime
 	     (libstdc++exp, which hosts the contracts C++ runtime) and the
 	     contracts ABI core (libcontracts).  This is triggered by the base
