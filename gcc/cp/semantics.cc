@@ -2569,6 +2569,8 @@ finish_asm_stmt (location_t loc, int volatile_p, tree string,
 tree
 finish_label_stmt (tree name)
 {
+  /* D4405: what follows a label is reachable through it (GCC-992).  */
+  contract_never_evaluated_label ();
   tree decl = define_label (input_location, name);
 
   if (decl == error_mark_node)

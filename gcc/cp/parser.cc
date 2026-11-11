@@ -11895,6 +11895,13 @@ cp_parser_binary_expression (cp_parser* parser, bool cast_p,
   enum tree_code rhs_type;
   enum cp_parser_prec new_prec, lookahead_prec;
   tree overload;
+  /* D4405: whether the second operand of CURRENT's operator, and of each
+     operator on the stack, is never evaluated (contract_dead_condition_p),
+     as counted in contract_never_evaluated until the operator is reduced;
+     restored however this returns.  */
+  bool never_evaluated_stack[NUM_PREC_VALUES];
+  bool never_evaluated = false;
+  auto never_evaluated_sentinel = make_temp_override (contract_never_evaluated);
 
   /* Parse the first expression.  */
   current.lhs_type = (cp_lexer_next_token_is (parser->lexer, CPP_NOT)
@@ -11970,6 +11977,12 @@ cp_parser_binary_expression (cp_parser* parser, bool cast_p,
 	  disable_warnings_sp = sp;
 	  ++c_inhibit_evaluation_warnings;
 	}
+      never_evaluated
+	= ((current.tree_type == TRUTH_ANDIF_EXPR
+	    || current.tree_type == TRUTH_ORIF_EXPR)
+	   && contract_dead_condition_p (current.lhs,
+					 current.tree_type == TRUTH_ORIF_EXPR));
+      contract_never_evaluated += never_evaluated;
 
       /* Extract another operand.  It may be the RHS of this expression
 	 or the LHS of a new, higher priority expression.  */
@@ -11992,6 +12005,7 @@ cp_parser_binary_expression (cp_parser* parser, bool cast_p,
 	     monotonically increasing, we do not have to care about
 	     stack overflows.  */
 	  *sp = current;
+	  never_evaluated_stack[sp - stack] = never_evaluated;
 	  ++sp;
 	  current.lhs = rhs;
 	  current.lhs_type = rhs_type;
@@ -12012,6 +12026,7 @@ cp_parser_binary_expression (cp_parser* parser, bool cast_p,
 	  rhs_type = current.lhs_type;
 	  --sp;
 	  current = *sp;
+	  never_evaluated = never_evaluated_stack[sp - stack];
 	}
 
       /* Undo the disabling of warnings done above.  */
@@ -12020,6 +12035,8 @@ cp_parser_binary_expression (cp_parser* parser, bool cast_p,
 	  disable_warnings_sp = NULL;
 	  --c_inhibit_evaluation_warnings;
 	}
+      contract_never_evaluated -= never_evaluated;
+      never_evaluated = false;
 
       if (warn_logical_not_paren
 	  && TREE_CODE_CLASS (current.tree_type) == tcc_comparison
@@ -12146,6 +12163,9 @@ cp_parser_question_colon_clause (cp_parser* parser, cp_expr logical_or_expr)
   cp_expr assignment_expr;
   struct cp_token *token;
   location_t loc = cp_lexer_peek_token (parser->lexer)->location;
+  /* D4405: an operand that the condition never selects.  */
+  bool dead_true = contract_dead_condition_p (logical_or_expr, false);
+  bool dead_false = contract_dead_condition_p (logical_or_expr, true);
 
   /* Consume the `?' token.  */
   cp_lexer_consume_token (parser->lexer);
@@ -12168,7 +12188,9 @@ cp_parser_question_colon_clause (cp_parser* parser, cp_expr logical_or_expr)
       /* Parse the expression.  */
       c_inhibit_evaluation_warnings +=
 	folded_logical_or_expr == truthvalue_false_node;
+      contract_never_evaluated += dead_true;
       expr = cp_parser_expression (parser);
+      contract_never_evaluated -= dead_true;
       c_inhibit_evaluation_warnings +=
 	((folded_logical_or_expr == truthvalue_true_node)
 	 - (folded_logical_or_expr == truthvalue_false_node));
@@ -12178,7 +12200,9 @@ cp_parser_question_colon_clause (cp_parser* parser, cp_expr logical_or_expr)
   /* The next token should be a `:'.  */
   cp_parser_require (parser, CPP_COLON, RT_COLON);
   /* Parse the assignment-expression.  */
+  contract_never_evaluated += dead_false;
   assignment_expr = cp_parser_assignment_expression (parser);
+  contract_never_evaluated -= dead_false;
   c_inhibit_evaluation_warnings -=
     folded_logical_or_expr == truthvalue_true_node;
 
@@ -12558,6 +12582,11 @@ cp_parser_constant_expression (cp_parser* parser,
   /* A manifestly constant-evaluated expression is evaluated even in an
      unevaluated operand.  */
   cp_evaluated ev (/*reset if*/allow_non_constant_p <= 1);
+  /* D4405: and has no analysis evaluation -- unless a non-constant one is
+     accepted (an array bound, an initializer).  */
+  contract_constant_evaluation_sentinel cce (!allow_non_constant_p
+					     || (allow_non_constant_p == 1
+						 && !non_constant_p));
 
   /* Although the grammar says "conditional-expression", when not STRICT_P,
      we parse an "assignment-expression", which also permits
@@ -15264,6 +15293,9 @@ cp_parser_statement_seq_opt (cp_parser* parser, tree in_statement_expr)
     = parser->omp_for_parse_state;
   bool in_omp_loop_block
     = omp_for_parse_state ? omp_for_parse_state->want_nested_loop : false;
+  /* D4405: the statements after one that never completes are never
+     evaluated, but through a label.  */
+  bool never_evaluated_after = false;
 
   /* Scan statements until there aren't any more.  */
   while (true)
@@ -15339,7 +15371,9 @@ cp_parser_statement_seq_opt (cp_parser* parser, tree in_statement_expr)
 
       /* Parse the statement.  */
       cp_parser_statement (parser, in_statement_expr, true, NULL);
+      contract_never_evaluated_after_stmt (&never_evaluated_after);
     }
+  contract_never_evaluated_leave (never_evaluated_after);
 }
 
 /* Return true if this is the C++20 version of range-based-for with
@@ -15581,7 +15615,12 @@ cp_parser_selection_statement (cp_parser* parser, bool *if_p,
 	  }
 
 	/* Parse the condition.  */
-	condition = cp_parser_condition (parser, keyword);
+	{
+	  /* D4405: an `if constexpr' condition is manifestly
+	     constant-evaluated.  */
+	  contract_constant_evaluation_sentinel cce (cx);
+	  condition = cp_parser_condition (parser, keyword);
+	}
 	/* Look for the `)'.  */
 	if (!parens.require_close (parser))
 	  cp_parser_skip_to_closing_parenthesis (parser, true, false,
@@ -15613,9 +15652,15 @@ cp_parser_selection_statement (cp_parser* parser, bool *if_p,
 		in_discarded_stmt = true;
 		++c_inhibit_evaluation_warnings;
 	      }
+	    /* D4405: and a substatement a constant condition never selects
+	       is never evaluated.  */
+	    bool dead_then
+	      = contract_never_evaluated_enter
+		  (!cx && contract_dead_condition_p (condition, false));
 
 	    cp_parser_implicitly_scoped_statement (parser, &nested_if,
 						   guard_tinfo);
+	    contract_never_evaluated_leave (dead_then);
 
 	    parser->in_statement = in_statement;
 
@@ -15639,6 +15684,10 @@ cp_parser_selection_statement (cp_parser* parser, bool *if_p,
 		    in_discarded_stmt = true;
 		    ++c_inhibit_evaluation_warnings;
 		  }
+
+		bool dead_else
+		  = contract_never_evaluated_enter
+		      (!cx && contract_dead_condition_p (condition, true));
 
 		guard_tinfo
 		  = get_token_indent_info (cp_lexer_peek_token (parser->lexer));
@@ -15676,6 +15725,7 @@ cp_parser_selection_statement (cp_parser* parser, bool *if_p,
 		/* Parse the else-clause.  */
 		cp_parser_implicitly_scoped_statement (parser, NULL,
 						       guard_tinfo, chain);
+		contract_never_evaluated_leave (dead_else);
 
 		finish_else_clause (statement);
 
@@ -22366,6 +22416,7 @@ cp_parser_template_argument (cp_parser* parser)
 
       /* With C++17 generalized non-type template arguments we need to handle
 	 lvalue constant expressions, too.  */
+      contract_constant_evaluation_sentinel cce;	/* D4405.  */
       argument = cp_parser_assignment_expression (parser);
       if (UNLIKELY (cp_lexer_peek_token (parser->lexer) == next)
 	  && argument != error_mark_node)
@@ -26760,6 +26811,12 @@ cp_parser_init_declarator (cp_parser* parser,
 
 	  if (has_lambda_scope)
 	    start_lambda_scope (decl);
+	  /* D4405: a constexpr or constinit variable's initializer is
+	     manifestly constant-evaluated.  */
+	  contract_constant_evaluation_sentinel cce
+	    (decl && VAR_P (decl)
+	     && (DECL_DECLARED_CONSTEXPR_P (decl)
+		 || DECL_DECLARED_CONSTINIT_P (decl)));
 	  initializer = cp_parser_initializer (parser,
 					       &is_direct_init,
 					       &is_non_constant_init);
@@ -31994,6 +32051,11 @@ cp_parser_member_declaration (cp_parser* parser)
 							      &decl_specifiers,
 							      attributes);
 		      start_lambda_scope (decl);
+		      /* D4405, as in cp_parser_init_declarator.  */
+		      contract_constant_evaluation_sentinel cce
+			(decl && VAR_P (decl)
+			 && (DECL_DECLARED_CONSTEXPR_P (decl)
+			     || DECL_DECLARED_CONSTINIT_P (decl)));
 
 		      if (cxx_dialect >= cxx11)
 			{
@@ -32027,6 +32089,11 @@ cp_parser_member_declaration (cp_parser* parser)
 							      &decl_specifiers,
 							      attributes);
 		      start_lambda_scope (decl);
+		      /* D4405, as in cp_parser_init_declarator.  */
+		      contract_constant_evaluation_sentinel cce
+			(decl && VAR_P (decl)
+			 && (DECL_DECLARED_CONSTEXPR_P (decl)
+			     || DECL_DECLARED_CONSTINIT_P (decl)));
 		      initializer = cp_parser_initializer (parser);
 		      finish_lambda_scope ();
 		      finish_initialized_static_member (decl, initializer,
@@ -35279,6 +35346,7 @@ cp_parser_contract_assert (cp_parser *parser, cp_token *token)
   if (!cp_parser_require (parser, CPP_SEMICOLON, RT_SEMICOLON))
     return error_mark_node;
 
+  contract_never_evaluated_assertion (contract);
   add_stmt (contract);
   return contract;
 }

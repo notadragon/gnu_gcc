@@ -1275,6 +1275,12 @@ UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-evaluation-semant
 fcontract-checks-outlined
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-checks-outlined)
 
+fcontract-analysis-semantic=
+UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-analysis-semantic)
+
+fcontract-analysis-skip-dead-calls
+UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-analysis-skip-dead-calls)
+
 fcontract-disable-optimized-checks
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-disable-optimized-checks)
 

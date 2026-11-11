@@ -9101,6 +9101,8 @@ push_to_top_level (void)
   s->unevaluated_operand = cp_unevaluated_operand;
   s->unevaluated_typeid_cutoff = cp_unevaluated_typeid_cutoff;
   s->inhibit_evaluation_warnings = c_inhibit_evaluation_warnings;
+  s->contract_never_evaluated = contract_never_evaluated;
+  s->contract_never_evaluated_stmts = contract_never_evaluated_stmts;
   s->suppress_location_wrappers = suppress_location_wrappers;
   s->x_stmt_tree.stmts_are_full_exprs_p = true;
 
@@ -9113,6 +9115,8 @@ push_to_top_level (void)
   cp_unevaluated_operand = 0;
   cp_unevaluated_typeid_cutoff = 0;
   c_inhibit_evaluation_warnings = 0;
+  contract_never_evaluated = 0;
+  contract_never_evaluated_stmts = 0;
   suppress_location_wrappers = 0;
 }
 
@@ -9146,6 +9150,8 @@ pop_from_top_level (void)
   cp_unevaluated_operand = s->unevaluated_operand;
   cp_unevaluated_typeid_cutoff = s->unevaluated_typeid_cutoff;
   c_inhibit_evaluation_warnings = s->inhibit_evaluation_warnings;
+  contract_never_evaluated = s->contract_never_evaluated;
+  contract_never_evaluated_stmts = s->contract_never_evaluated_stmts;
   suppress_location_wrappers = s->suppress_location_wrappers;
 
   /* Make this saved_scope structure available for reuse by
@@ -9164,6 +9170,8 @@ struct local_state_t
   int cp_unevaluated_operand;
   int cp_unevaluated_typeid_cutoff;
   int c_inhibit_evaluation_warnings;
+  int contract_never_evaluated;
+  int contract_never_evaluated_stmts;
   int cp_noexcept_operand_;
   bool has_cfun;
 
@@ -9177,6 +9185,10 @@ struct local_state_t
     ::cp_unevaluated_typeid_cutoff = 0;
     s.c_inhibit_evaluation_warnings = ::c_inhibit_evaluation_warnings;
     ::c_inhibit_evaluation_warnings = 0;
+    s.contract_never_evaluated = ::contract_never_evaluated;
+    ::contract_never_evaluated = 0;
+    s.contract_never_evaluated_stmts = ::contract_never_evaluated_stmts;
+    ::contract_never_evaluated_stmts = 0;
     s.cp_noexcept_operand_ = ::cp_noexcept_operand;
     ::cp_noexcept_operand = 0;
     s.has_cfun = !!cfun;
@@ -9191,6 +9203,8 @@ struct local_state_t
     ::cp_unevaluated_operand = this->cp_unevaluated_operand;
     ::cp_unevaluated_typeid_cutoff = this->cp_unevaluated_typeid_cutoff;
     ::c_inhibit_evaluation_warnings = this->c_inhibit_evaluation_warnings;
+    ::contract_never_evaluated = this->contract_never_evaluated;
+    ::contract_never_evaluated_stmts = this->contract_never_evaluated_stmts;
     ::cp_noexcept_operand = this->cp_noexcept_operand_;
     if (this->has_cfun)
       pop_function_context ();

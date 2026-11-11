@@ -644,6 +644,7 @@ build_target_expr (tree decl, tree value, tsubst_flags_t complain)
     t = NULL_TREE;
   else
     {
+      contract_temporary_cleanup_sentinel tcs;	/* D4405.  */
       t = cxx_maybe_build_cleanup (decl, complain);
       if (t == error_mark_node)
 	return error_mark_node;

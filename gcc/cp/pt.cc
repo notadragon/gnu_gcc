@@ -6718,6 +6718,11 @@ redeclare_class_template (tree type, tree parms, tree cons)
 tree
 instantiate_non_dependent_expr_internal (tree expr, tsubst_flags_t complain)
 {
+  /* D4405: in a template, what this builds is only evaluated as a constant
+     (a static_assert condition, a template argument) or discarded -- the
+     code is the instantiation's -- so its calls have no analysis
+     evaluation.  */
+  contract_constant_evaluation_sentinel cce;
   return tsubst_expr (expr, /*args=*/NULL_TREE, complain, /*in_decl=*/NULL_TREE);
 }
 
@@ -12416,6 +12421,9 @@ tsubst_contract (tree decl, tree t, tree args, tsubst_flags_t complain,
   bool auto_p  = type_uses_auto (type);
 
   tree r = copy_node (t);
+  /* D4405: a contract assertion in code never evaluated, as the parser
+     marks it.  */
+  contract_never_evaluated_assertion (r);
 
   /* Rebuild the result variable, if present.  */
   tree oldvar = NULL_TREE;
@@ -13861,6 +13869,7 @@ tsubst_template_arg (tree t, tree args, tsubst_flags_t complain, tree in_decl)
     {
       if (!(complain & tf_warning))
 	++c_inhibit_evaluation_warnings;
+      contract_constant_evaluation_sentinel cce;	/* D4405.  */
       r = tsubst_expr (t, args, complain, in_decl);
       if (!(complain & tf_warning))
 	--c_inhibit_evaluation_warnings;
@@ -19108,6 +19117,12 @@ tsubst_init (tree init, tree decl, tree args,
   if (!init)
     return NULL_TREE;
 
+  /* D4405: a constexpr or constinit variable's initializer is manifestly
+     constant-evaluated (cp_parser_init_declarator).  */
+  contract_constant_evaluation_sentinel cce
+    (VAR_P (decl)
+     && (DECL_DECLARED_CONSTEXPR_P (decl)
+	 || DECL_DECLARED_CONSTINIT_P (decl)));
   init = tsubst_expr (init, args, complain, in_decl);
 
   tree type = TREE_TYPE (decl);
@@ -20319,8 +20334,14 @@ tsubst_stmt (tree t, tree args, tsubst_flags_t complain, tree in_decl)
     {
     case STATEMENT_LIST:
       {
+	/* D4405: as the parser counts it.  */
+	bool never_evaluated_after = false;
 	for (tree stmt : tsi_range (t))
-	  RECUR (stmt);
+	  {
+	    RECUR (stmt);
+	    contract_never_evaluated_after_stmt (&never_evaluated_after);
+	  }
+	contract_never_evaluated_leave (never_evaluated_after);
 	break;
       }
 
@@ -20696,7 +20717,11 @@ tsubst_stmt (tree t, tree args, tsubst_flags_t complain, tree in_decl)
       {
 	tree cond = IF_COND (t);
 	bool was_dep = dependent_operand_p (cond);
-	cond = RECUR (cond);
+	{
+	  /* D4405.  */
+	  contract_constant_evaluation_sentinel cce (IF_STMT_CONSTEXPR_P (t));
+	  cond = RECUR (cond);
+	}
 	warning_sentinel s1(warn_address, was_dep);
 	tmp = finish_if_stmt_cond (cond, stmt);
       }
@@ -20730,7 +20755,11 @@ tsubst_stmt (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 	  bool inhibit = integer_zerop (folded);
 	  if (inhibit)
 	    ++c_inhibit_evaluation_warnings;
+	  /* D4405: as the parser counts it.  */
+	  bool dead = contract_never_evaluated_enter
+			(contract_dead_condition_p (tmp, false));
 	  RECUR (THEN_CLAUSE (t));
+	  contract_never_evaluated_leave (dead);
 	  if (inhibit)
 	    --c_inhibit_evaluation_warnings;
 	}
@@ -20745,7 +20774,10 @@ tsubst_stmt (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 	  begin_else_clause (stmt);
 	  if (inhibit)
 	    ++c_inhibit_evaluation_warnings;
+	  bool dead = contract_never_evaluated_enter
+			(contract_dead_condition_p (tmp, true));
 	  RECUR (ELSE_CLAUSE (t));
+	  contract_never_evaluated_leave (dead);
 	  if (inhibit)
 	    --c_inhibit_evaluation_warnings;
 	  finish_else_clause (stmt);
@@ -20938,6 +20970,7 @@ tsubst_stmt (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 	tree condition, message;
 
 	++c_inhibit_evaluation_warnings;
+	contract_constant_evaluation_sentinel cce;	/* D4405.  */
 	condition = tsubst_expr (STATIC_ASSERT_CONDITION (t), args,
 				 complain, in_decl);
 	message = tsubst_expr (STATIC_ASSERT_MESSAGE (t), args,
@@ -22512,7 +22545,15 @@ tsubst_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 	const bool was_dep = (dependent_operand_p (op0)
 			      || dependent_operand_p (op1));
 	op0 = RECUR (op0);
+	/* D4405: the second operand of `&&' or `||' that the first never
+	   lets be evaluated, as the parser counts it.  */
+	bool dead = ((TREE_CODE (t) == TRUTH_ANDIF_EXPR
+		      || TREE_CODE (t) == TRUTH_ORIF_EXPR)
+		     && contract_dead_condition_p (op0, (TREE_CODE (t)
+							 == TRUTH_ORIF_EXPR)));
+	contract_never_evaluated += dead;
 	op1 = RECUR (op1);
+	contract_never_evaluated -= dead;
 
 	warning_sentinel s1(warn_type_limits, was_dep);
 	warning_sentinel s2(warn_div_by_zero, was_dep);
@@ -23350,10 +23391,17 @@ tsubst_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 
 	if (TREE_CODE (folded_cond) == INTEGER_CST)
 	  {
+	    /* D4405: the operand the condition never selects, as the parser
+	       counts it.  */
+	    bool dead
+	      = contract_dead_condition_p (folded_cond,
+					   !integer_zerop (folded_cond));
 	    if (integer_zerop (folded_cond))
 	      {
 		++c_inhibit_evaluation_warnings;
+		contract_never_evaluated += dead;
 		exp1 = RECUR (TREE_OPERAND (t, 1));
+		contract_never_evaluated -= dead;
 		--c_inhibit_evaluation_warnings;
 		exp2 = RECUR (TREE_OPERAND (t, 2));
 	      }
@@ -23361,7 +23409,9 @@ tsubst_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 	      {
 		exp1 = RECUR (TREE_OPERAND (t, 1));
 		++c_inhibit_evaluation_warnings;
+		contract_never_evaluated += dead;
 		exp2 = RECUR (TREE_OPERAND (t, 2));
+		contract_never_evaluated -= dead;
 		--c_inhibit_evaluation_warnings;
 	      }
 	    cond = folded_cond;
