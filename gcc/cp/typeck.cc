@@ -40,6 +40,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "attribs.h"
 #include "asan.h"
 #include "gimplify.h"
+#include "contracts.h"
 
 static tree cp_build_addr_expr_strict (tree, tsubst_flags_t);
 static tree cp_build_function_call (tree, tree, tsubst_flags_t);
@@ -7141,6 +7142,65 @@ cp_build_binary_op (const op_location_t &location,
   if (build_type == NULL_TREE)
     build_type = result_type;
 
+  /* P3100: resolve the divide-by-zero / shift-out-of-range evaluation semantic
+     up front so that when it is the status-quo "assume" we leave OP0/OP1 (and
+     thus codegen) untouched.  Integer division/remainder by zero
+     ({expr.mul.div.by.zero}) and shifting by a negative or too-large amount
+     ({expr.shift.neg.and.width}) are core-language UB.  Unlike the sanitizer
+     checks below, these are built outside a function too -- a namespace-scope
+     initializer, a default member initializer or a default argument -- and
+     resolved against the enclosing namespace there.  */
+  contract_evaluation_semantic p3100_div_sem = CES_ASSUME;
+  contract_evaluation_semantic p3100_fdiv_sem = CES_ASSUME;
+  contract_evaluation_semantic p3100_divovf_sem = CES_ASSUME;
+  contract_evaluation_semantic p3100_shift_sem = CES_ASSUME;
+  /* A floating-point division by zero is the same UB, though IEEE arithmetic
+     would yield an infinity or a NaN; it has a group of its own.  */
+  if (implicit_ub_check_context_p ()
+      && doing_div_or_mod
+      && resultcode == RDIV_EXPR
+      && SCALAR_FLOAT_TYPE_P (build_type))
+    p3100_fdiv_sem
+      = resolve_implicit_contract_semantic
+	  (current_function_decl, location,
+	   "ub:expr.mul.div.by.zero.fp.div");
+  if (implicit_ub_check_context_p ()
+      && INTEGRAL_TYPE_P (build_type))
+    {
+      /* No implicit UB check is emitted in an unevaluated operand
+	 (noexcept/sizeof/decltype/requires): there is no code generated for
+	 it, so the runtime guard would be pointless, and -- crucially -- a
+	 P3100 implicit assertion must not change the result of the noexcept
+	 operator regardless of the evaluation semantic selected for it.  A
+	 nested constant expression that is genuinely evaluated (e.g. a
+	 template argument) is still constant-evaluated by the usual
+	 machinery, which enforces any contracts it contains.  Each check
+	 reports the leaf of its operator: .int.div for `/', .int.mod for
+	 `%', .shl for `<<', .shr for `>>'.  */
+      if (doing_div_or_mod)
+	{
+	  bool mod = (code == TRUNC_MOD_EXPR || code == FLOOR_MOD_EXPR);
+	  p3100_div_sem
+	    = resolve_implicit_contract_semantic
+		(current_function_decl, location,
+		 mod ? "ub:expr.mul.div.by.zero.int.mod"
+		     : "ub:expr.mul.div.by.zero.int.div");
+	  /* INT_MIN / -1 overflow only applies to signed operands.  */
+	  if (!TYPE_UNSIGNED (build_type))
+	    p3100_divovf_sem
+	      = resolve_implicit_contract_semantic
+		  (current_function_decl, location,
+		   mod ? "ub:expr.mul.representable.type.result.int.mod"
+		       : "ub:expr.mul.representable.type.result.int.div");
+	}
+      else if (doing_shift)
+	p3100_shift_sem
+	  = resolve_implicit_contract_semantic
+	      (current_function_decl, location,
+	       code == LSHIFT_EXPR ? "ub:expr.shift.neg.and.width.shl"
+				   : "ub:expr.shift.neg.and.width.shr");
+    }
+
   if (doing_shift
       && flag_strong_eval_order == 2
       && TREE_SIDE_EFFECTS (op1)
@@ -7152,11 +7212,16 @@ cp_build_binary_op (const op_location_t &location,
       instrument_expr = op0;
     }
 
-  if (sanitize_flags_p ((SANITIZE_SHIFT
-			 | SANITIZE_DIVIDE
-			 | SANITIZE_FLOAT_DIVIDE
-			 | SANITIZE_SI_OVERFLOW))
-      && current_function_decl != NULL_TREE
+  bool sanitize_here = (current_function_decl != NULL_TREE
+			&& sanitize_flags_p ((SANITIZE_SHIFT
+					      | SANITIZE_DIVIDE
+					      | SANITIZE_FLOAT_DIVIDE
+					      | SANITIZE_SI_OVERFLOW)));
+  if ((sanitize_here
+       || p3100_div_sem != CES_ASSUME
+       || p3100_fdiv_sem != CES_ASSUME
+       || p3100_divovf_sem != CES_ASSUME
+       || p3100_shift_sem != CES_ASSUME)
       && !processing_template_decl
       && (doing_div_or_mod || doing_shift))
     {
@@ -7167,6 +7232,7 @@ cp_build_binary_op (const op_location_t &location,
       op1 = fold_non_dependent_expr (op1, complain);
       tree instrument_expr1 = NULL_TREE;
       if (doing_div_or_mod
+	  && sanitize_here
 	  && sanitize_flags_p (SANITIZE_DIVIDE
 			       | SANITIZE_FLOAT_DIVIDE
 			       | SANITIZE_SI_OVERFLOW))
@@ -7182,7 +7248,8 @@ cp_build_binary_op (const op_location_t &location,
 	    cop1 = cp_convert (orig_type, op1, complain);
 	  instrument_expr1 = ubsan_instrument_division (location, cop0, cop1);
 	}
-      else if (doing_shift && sanitize_flags_p (SANITIZE_SHIFT))
+      else if (doing_shift && sanitize_here
+	       && sanitize_flags_p (SANITIZE_SHIFT))
 	instrument_expr1 = ubsan_instrument_shift (location, code, op0, op1);
       if (instrument_expr != NULL)
 	instrument_expr = add_stmt_to_compound (instrument_expr,
@@ -7192,6 +7259,27 @@ cp_build_binary_op (const op_location_t &location,
     }
 
   result = build2_loc (location, resultcode, build_type, op0, op1);
+
+  /* P3100: guard an integer division/remainder whose divisor may be zero or
+     whose signed quotient may be unrepresentable (INT_MIN / -1), or a shift
+     whose amount may be negative or too large.  For division, the overflow
+     guard is applied first (inner) and the divide-by-zero guard second (outer),
+     so the divide-by-zero condition is tested first at run time.  */
+  if (p3100_divovf_sem != CES_ASSUME)
+    result = build_implicit_divide_overflow_check (current_function_decl,
+						   location, p3100_divovf_sem,
+						   op0, op1, result);
+  if (p3100_div_sem != CES_ASSUME)
+    result = build_implicit_divide_check (current_function_decl, location,
+					  p3100_div_sem, op0, op1, result);
+  else if (p3100_fdiv_sem != CES_ASSUME)
+    result = build_implicit_float_divide_check (current_function_decl,
+						location, p3100_fdiv_sem,
+						op0, op1, result);
+  else if (p3100_shift_sem != CES_ASSUME)
+    result = build_implicit_shift_check (current_function_decl, location,
+					 p3100_shift_sem, op0, op1, result);
+
   if (final_type != 0)
     result = cp_convert (final_type, result, complain);
 
