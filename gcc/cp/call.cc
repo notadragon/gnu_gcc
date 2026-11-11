@@ -10411,6 +10411,9 @@ immediate_invocation_p (tree fn)
 static tree
 p3100_member_call_checks (tree object, bool virt, tree call)
 {
+  call = (build_implicit_this_operation_check
+	  (input_location, object, call,
+	   virt ? ITO_VIRTUAL_CALL : ITO_CALL));
   return build_implicit_handler_member_check (input_location, object, call);
 }
 
