@@ -44,6 +44,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-pass.h"
 #include "internal-fn.h"
 #include "omp-general.h"
+#include "c-family/contracts-prove.h"
 
 /*  The gimplification pass converts the language-dependent trees
     (ld-trees) emitted by the parser into language-independent trees
@@ -830,6 +831,11 @@ c_genericize (tree fndecl)
 	print_c_tree (dump_orig, DECL_SAVED_TREE (fndecl), local_dump_flags);
       fprintf (dump_orig, "\n");
     }
+
+  /* P4405 proving hook: after the dump, which shows the regions where the
+     front end placed them.  */
+  if (flag_contracts_p4405)
+    c_contract_hoist_region_guards (fndecl);
 
   /* Dump all nested functions now.  */
   cgn = cgraph_node::get_create (fndecl);

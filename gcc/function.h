@@ -713,6 +713,7 @@ extern void pop_function_decl (void);
 
 extern int get_next_funcdef_no (void);
 extern int get_last_funcdef_no (void);
+extern void set_last_funcdef_no (int);
 extern void allocate_struct_function (tree, bool);
 extern void push_struct_function (tree fndecl, bool = false);
 extern void push_dummy_function (bool);

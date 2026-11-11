@@ -123,6 +123,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "ipa-strub.h"
 #include "ipa-modref-tree.h"
 #include "ipa-modref.h"
+#include "contracts-shadow.h"
 
 /* Inliner uses greedy algorithm to inline calls in a priority order.
    Badness is used as the key in a Fibonacci heap which roughly corresponds
@@ -1216,6 +1217,10 @@ check_callers (struct cgraph_node *node, void *has_hot_call)
   struct cgraph_edge *e;
   for (e = node->callers; e; e = e->next_caller)
     {
+      /* P4405 proving hook: the calls from analysis-only code do not
+	 decide; inline_to_all_callers_1 inlines them if it can.  */
+      if (contract_analysis_only_call_p (e))
+	continue;
       if (!opt_for_fn (e->caller->decl, flag_inline_functions_called_once)
 	  || !opt_for_fn (e->caller->decl, optimize))
 	return true;
@@ -1246,8 +1251,10 @@ check_callers (struct cgraph_node *node, void *has_hot_call)
 static bool
 has_caller_p (struct cgraph_node *node, void *data ATTRIBUTE_UNUSED)
 {
-  if (node->callers)
-    return true;
+  for (cgraph_edge *e = node->callers; e; e = e->next_caller)
+    /* P4405 proving hook.  */
+    if (!contract_analysis_only_call_p (e))
+      return true;
   return false;
 }
 
@@ -2064,7 +2071,9 @@ inline_account_function_p (struct cgraph_node *node)
 {
    return (!DECL_EXTERNAL (node->decl)
 	   && !opt_for_fn (node->decl, optimize_size)
-	   && node->frequency != NODE_FREQUENCY_UNLIKELY_EXECUTED);
+	   && node->frequency != NODE_FREQUENCY_UNLIKELY_EXECUTED
+	   /* P4405 proving hook: nor analysis-only code.  */
+	   && !contract_analysis_only_p (node));
 }
 
 /* Count number of callers of NODE and store it into DATA (that
@@ -2077,7 +2086,9 @@ sum_callers (struct cgraph_node *node, void *data)
   int *num_calls = (int *)data;
 
   for (e = node->callers; e; e = e->next_caller)
-    (*num_calls)++;
+    /* P4405 proving hook: not the calls from analysis-only code.  */
+    if (!contract_analysis_only_call_p (e))
+      (*num_calls)++;
   return false;
 }
 
@@ -2163,7 +2174,9 @@ inline_small_functions (void)
 
 	for (edge = node->callers; edge; edge = edge->next_caller)
 	  if (edge->count.ipa ().initialized_p ()
-	      && edge->count.ipa ().nonzero_p ())
+	      && edge->count.ipa ().nonzero_p ()
+	      /* P4405 proving hook.  */
+	      && !contract_analysis_only_call_p (edge))
 	  has_nonzero_ipa_profile = true;
       }
   ipa_free_postorder_info ();
@@ -2611,13 +2624,39 @@ inline_to_all_callers_1 (struct cgraph_node *node, void *data,
   int *num_calls = (int *)data;
   bool callee_removed = false;
 
+  /* P4405 proving hook: the calls from analysis-only code are inlined after
+     the others, those that can be, and decide nothing.  */
+  int analysis_calls = 0;
+  for (cgraph_edge *e = node->callers; e; e = e->next_caller)
+    if (contract_analysis_only_call_p (e))
+      analysis_calls++;
+
   while (node->callers && !node->inlined_to)
     {
-      struct cgraph_node *caller = node->callers->caller;
+      cgraph_edge *edge = NULL, *analysis_edge = NULL;
+      for (cgraph_edge *e = node->callers; e && !edge; e = e->next_caller)
+	if (!contract_analysis_only_call_p (e))
+	  edge = e;
+	else if (!analysis_edge
+		 && analysis_calls > 0
+		 && can_inline_edge_p (e, false)
+		 && can_inline_edge_by_limits_p (e, 0)
+		 && !e->recursive_p ())
+	  analysis_edge = e;
+      bool analysis_only = !edge;
+      if (analysis_only)
+	{
+	  if (!analysis_edge)
+	    return false;
+	  edge = analysis_edge;
+	  analysis_calls--;
+	}
+      struct cgraph_node *caller = edge->caller;
 
-      if (!can_inline_edge_p (node->callers, true)
-	  || !can_inline_edge_by_limits_p (node->callers, CAN_INLINE_REPORT)
-	  || node->callers->recursive_p ())
+      if (!analysis_only
+	  && (!can_inline_edge_p (edge, true)
+	      || !can_inline_edge_by_limits_p (edge, CAN_INLINE_REPORT)
+	      || edge->recursive_p ()))
 	{
 	  if (dump_file)
 	    fprintf (dump_file, "Uninlinable call found; giving up.\n");
@@ -2634,20 +2673,20 @@ inline_to_all_callers_1 (struct cgraph_node *node, void *data,
 		   ipa_size_summaries->get (ultimate)->size);
 	  fprintf (dump_file,
 		   " Called once from %s %i insns.\n",
-		   node->callers->caller->dump_name (),
-		   ipa_size_summaries->get (node->callers->caller)->size);
+		   edge->caller->dump_name (),
+		   ipa_size_summaries->get (edge->caller)->size);
 	}
 
       /* Remember which callers we inlined to, delaying updating the
 	 overall summary.  */
-      callers->add (node->callers->caller);
-      inline_call (node->callers, true, NULL, NULL, false, &callee_removed);
+      callers->add (edge->caller);
+      inline_call (edge, true, NULL, NULL, false, &callee_removed);
       if (dump_file)
 	fprintf (dump_file,
 		 " Inlined into %s which now has %i size\n",
 		 caller->dump_name (),
 		 ipa_size_summaries->get (caller)->size);
-      if (!(*num_calls)--)
+      if (!analysis_only && !(*num_calls)--)
 	{
 	  if (dump_file)
 	    fprintf (dump_file, "New calls found; giving up.\n");
@@ -2929,7 +2968,12 @@ ipa_inline (void)
   /* Do first after-inlining removal.  We want to remove all "stale" extern
      inline functions and virtual functions so we really know what is called
      once.  */
+  /* P4405 proving hook: what only the proof shadows call keeps its body
+     until the inlining into all callers below, which may inline it into
+     them; a removal follows.  */
+  bool contract_shadow_boundary_held = contract_shadow_boundary_hold (true);
   symtab->remove_unreachable_nodes (dump_file);
+  contract_shadow_boundary_hold (false);
 
   /* Inline functions with a property that after inlining into all callers the
      code size will shrink because the out-of-line copy is eliminated.
@@ -3007,7 +3051,8 @@ ipa_inline (void)
 
   if (dump_file)
     ipa_dump_fn_summaries (dump_file);
-  return remove_functions ? TODO_remove_functions : 0;
+  return (remove_functions || contract_shadow_boundary_held
+	  ? TODO_remove_functions : 0);
 }
 
 /* Inline always-inline function calls in NODE

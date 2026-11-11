@@ -67,6 +67,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "profile.h"
 #include "sreal.h"
 #include "gcc-urlifier.h"
+#include "contracts-shadow.h"
 
 /* This file contains functions for building the Control Flow Graph (CFG)
    for a function tree.  */
@@ -1180,8 +1181,16 @@ assign_discriminators (void)
   hash_map<int_hash <unsigned, -1U, -2U>, discrim_entry> map (13);
   unsigned int bb_id = 0;
   basic_block bb;
+  /* P4405 proof shadows: the real code as without the contract regions
+     (GCC-997).  */
+  auto_vec<unsigned char> contract_kinds;
+  bool contract_regions = contract_shadow_discriminator_kinds (contract_kinds);
   FOR_EACH_BB_FN (bb, cfun)
     {
+      unsigned char contract_kind
+	= contract_regions ? contract_kinds[bb->index] : CONTRACT_DISCRIM_REAL;
+      if (contract_kind == CONTRACT_DISCRIM_REGION)
+	continue;
       location_t prev_loc = UNKNOWN_LOCATION, prev_replacement = UNKNOWN_LOCATION;
       /* Traverse the basic block, if two function calls within a basic block
 	 are mapped to the same line, assign a new discriminator because a call
@@ -1192,6 +1201,10 @@ assign_discriminators (void)
 	  gimple *stmt = gsi_stmt (gsi);
 	  location_t loc = gimple_location (stmt);
 	  if (loc == UNKNOWN_LOCATION)
+	    continue;
+	  if (contract_kind != CONTRACT_DISCRIM_REAL
+	      && (gsi_one_before_end_p (gsi)
+		  || gimple_call_internal_p (stmt, IFN_CONTRACT_SHADOW_GUARD)))
 	    continue;
 	  if (loc == prev_loc)
 	    gimple_set_location (stmt, prev_replacement);
@@ -1212,13 +1225,16 @@ assign_discriminators (void)
 	      bb_id++;
 	    }
 	}
+      if (contract_kind == CONTRACT_DISCRIM_GUARD_JOINED)
+	continue;
       /* If basic block has multiple successors, consider every edge as a
 	 separate block.  */
       if (!single_succ_p (bb))
 	bb_id++;
       for (edge e : bb->succs)
 	{
-	  if (e->goto_locus != UNKNOWN_LOCATION)
+	  if (e->goto_locus != UNKNOWN_LOCATION
+	      && contract_kind == CONTRACT_DISCRIM_REAL)
 	    e->goto_locus = assign_discriminator (e->goto_locus, bb_id, map);
 	  for (gphi_iterator gpi = gsi_start_phis (bb);
 	       !gsi_end_p (gpi); gsi_next (&gpi))

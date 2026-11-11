@@ -737,3 +737,18 @@ fold_for_warn (tree x)
   /* The C front-end has already folded X appropriately.  */
   return x;
 }
+
+/* The C front end's hooks for the P4405 proof shadows (contracts-prove.h):
+   C has no template instantiation, so it keeps no context for a
+   diagnostic issued at the end of the compilation.  */
+
+unsigned
+c_contract_diagnostic_context ()
+{
+  return 0;
+}
+
+void
+c_contract_switch_diagnostic_context (unsigned, bool)
+{
+}

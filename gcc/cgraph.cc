@@ -71,6 +71,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "symtab-clones.h"
 #include "attr-callback.h"
 #include "callback-info.h"
+#include "contracts-shadow.h"
 
 /* FIXME: Only for PROP_loops, but cgraph shouldn't have to know about this.  */
 #include "tree-pass.h"
@@ -4158,7 +4159,10 @@ cgraph_node::verify_node (void)
     }
   if (symtab->state != LTO_STREAMING)
     {
-      if (calls_comdat_local && !same_comdat_group)
+      /* P4405 proving hook: a proof shadow is never emitted, so it may call
+	 a symbol IPA made local to a comdat group it is not in.  */
+      if (calls_comdat_local && !same_comdat_group
+	  && !contract_analysis_only_p (this))
 	{
 	  error ("calls_comdat_local is set outside of a comdat group");
 	  error_found = true;
@@ -4230,7 +4234,9 @@ cgraph_node::verify_node (void)
       if (e->verify_count ())
 	error_found = true;
       if (check_comdat
-	  && !in_same_comdat_group_p (e->caller))
+	  && !in_same_comdat_group_p (e->caller)
+	  /* P4405 proving hook, as above.  */
+	  && !contract_analysis_only_p (e->caller))
 	{
 	  error ("comdat-local function called by %s outside its comdat",
 		 identifier_to_locale (e->caller->name ()));

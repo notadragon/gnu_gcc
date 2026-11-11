@@ -107,6 +107,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "cfgloop.h"
 #include "attribs.h"
 #include "ipa-strub.h"
+#include "contracts-shadow.h"
 
 /* Per basic block info.  */
 
@@ -1844,9 +1845,16 @@ execute_split_functions (void)
      Note that we are not completely conservative about disqualifying functions
      called once.  It is possible that the caller is called more then once and
      then inlining would still benefit.  */
-  if ((!node->callers
+  /* P4405 proving hook: the calls from analysis-only code do not count.  */
+  cgraph_edge *first_call = node->callers;
+  while (first_call && contract_analysis_only_call_p (first_call))
+    first_call = first_call->next_caller;
+  cgraph_edge *second_call = first_call ? first_call->next_caller : NULL;
+  while (second_call && contract_analysis_only_call_p (second_call))
+    second_call = second_call->next_caller;
+  if ((!first_call
        /* Local functions called once will be completely inlined most of time.  */
-       || (!node->callers->next_caller && node->local))
+       || (!second_call && node->local))
       && !node->address_taken
       && !node->has_aliases_p ()
       && (!flag_lto || !node->externally_visible))
@@ -1854,6 +1862,15 @@ execute_split_functions (void)
       if (dump_file)
 	fprintf (dump_file, "Not splitting: not called directly "
 		 "or called once.\n");
+      return 0;
+    }
+  /* P4405 proving hook: nor is analysis-only code split, so that no
+     function is made for it alone and the real code's functions are
+     numbered as without it.  */
+  if (contract_analysis_only_p (node))
+    {
+      if (dump_file)
+	fprintf (dump_file, "Not splitting: analysis-only code.\n");
       return 0;
     }
 

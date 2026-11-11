@@ -91,6 +91,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "symtab-thunks.h"
 #include "alias.h"
 #include "asan.h"
+#include "contracts-shadow.h"
 
 using namespace ipa_icf_gimple;
 
@@ -1568,6 +1569,11 @@ sem_function::parse (cgraph_node *node, bitmap_obstack *stack,
       || DECL_STATIC_DESTRUCTOR (node->decl))
     return NULL;
 
+  /* P4405 proving hook: analysis-only code is merged with nothing, so that
+     the real code's symbols are what they would be without it.  */
+  if (contract_analysis_only_p (node))
+    return NULL;
+
   sem_function *f = new sem_function (node, stack);
   f->init (checker);
 
@@ -1948,7 +1954,9 @@ sem_variable::parse (varpool_node *node, bitmap_obstack *stack,
 		     func_checker *checker)
 {
   if (TREE_THIS_VOLATILE (node->decl) || DECL_HARD_REGISTER (node->decl)
-      || node->alias)
+      || node->alias
+      /* P4405 proving hook, as in sem_function::parse.  */
+      || contract_analysis_only_p (node))
     return NULL;
 
   sem_variable *v = new sem_variable (node, stack);

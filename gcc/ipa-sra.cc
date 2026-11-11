@@ -89,6 +89,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "ipa-prop.h"
 #include "attr-callback.h"
 #include "callback-info.h"
+#include "contracts-shadow.h"
 
 static void ipa_sra_summarize_function (cgraph_node *);
 
@@ -3200,6 +3201,10 @@ check_for_caller_issues (struct cgraph_node *node, void *data)
 
   for (cgraph_edge *cs = node->callers; cs; cs = cs->next_caller)
     {
+      /* P4405 proving hook: analysis-only code keeps calling the original
+	 (process_isra_node_results), so its calls raise no issue.  */
+      if (contract_analysis_only_call_p (cs))
+	continue;
       if (cs->caller->thunk)
 	{
 	  issues->thunk = true;
@@ -3411,6 +3416,9 @@ process_edge_to_unknown_caller (cgraph_edge *cs)
 static void
 param_removal_cross_scc_edge (cgraph_edge *cs)
 {
+  /* P4405 proving hook.  */
+  if (contract_analysis_only_call_p (cs))
+    return;
   enum availability availability;
   /* Only candidates are considered, and their callers are redirected to a
      clone, so a refinable callee is as good as an available one.  */
@@ -3614,6 +3622,9 @@ propagate_hints_to_all_callees (cgraph_node *node, isra_func_summary *from_ifs,
 {
   for (cgraph_edge *cs = node->callees; cs; cs = cs->next_callee)
     {
+      /* P4405 proving hook.  */
+      if (contract_analysis_only_call_p (cs))
+	continue;
       enum availability availability;
       cgraph_node *callee = cs->callee->function_symbol (&availability);
       isra_func_summary *to_ifs = func_sums->get (callee);
@@ -3702,7 +3713,9 @@ propagate_used_to_scc_callers (cgraph_node *node, void *data)
   vec<cgraph_node *> *stack = (vec<cgraph_node *> *) data;
   cgraph_edge *cs;
   for (cs = node->callers; cs; cs = cs->next_caller)
-    if (ipa_edge_within_scc (cs))
+    if (ipa_edge_within_scc (cs)
+	/* P4405 proving hook.  */
+	&& !contract_analysis_only_call_p (cs))
       propagate_used_across_scc_edge (cs, stack);
   return false;
 }
@@ -3888,6 +3901,10 @@ pull_accesses_from_callee (cgraph_node *caller,
 static bool
 param_splitting_across_edge (cgraph_edge *cs)
 {
+  /* P4405 proving hook: analysis-only code keeps calling the original
+     (process_isra_node_results), whatever its arguments.  */
+  if (contract_analysis_only_call_p (cs))
+    return false;
   bool res = false;
   bool cross_scc = !ipa_edge_within_scc (cs);
   enum availability availability;
@@ -4124,6 +4141,9 @@ retval_used_p (cgraph_node *node, void *)
 {
   for (cgraph_edge *cs = node->callers; cs; cs = cs->next_caller)
     {
+      /* P4405 proving hook.  */
+      if (contract_analysis_only_call_p (cs))
+	continue;
       isra_call_summary *csum = call_sums->get (cs);
       gcc_checking_assert (csum);
       if (csum->m_return_ignored)
@@ -4281,6 +4301,11 @@ process_isra_node_results (cgraph_node *node,
   isra_func_summary *ifs = func_sums->get (node);
   if (!ifs || !ifs->m_candidate)
     return;
+  /* P4405 proving hook: no clone is made for analysis-only code alone, so
+     that the real code's clones and function numbers are what they would
+     be without it.  */
+  if (contract_analysis_only_p (node))
+    return;
 
   auto_vec<bool, 16> surviving_params;
   bool check_surviving = false;
@@ -4355,6 +4380,11 @@ process_isra_node_results (cgraph_node *node,
 			       IDENTIFIER_POINTER (DECL_ASSEMBLER_NAME (
 				 node->decl)));
   auto_vec<cgraph_edge *> callers = node->collect_callers ();
+  /* P4405 proving hook: analysis-only code keeps calling the original, as
+     the decisions did not count its calls.  */
+  for (int i = callers.length () - 1; i >= 0; i--)
+    if (contract_analysis_only_call_p (callers[i]))
+      callers.ordered_remove (i);
   cgraph_node *new_node
     = node->create_virtual_clone (callers, NULL, new_adjustments, "isra",
 				  suffix_counter);

@@ -66,6 +66,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "symtab-thunks.h"
 #include "dbgcnt.h"
 #include "gcc-urlifier.h"
+#include "contracts-shadow.h"
 
 /* Lattice values for const and pure functions.  Everything starts out
    being const, then may drop to pure and then neither depending on
@@ -171,7 +172,12 @@ public:
   pass_ipa_pure_const(gcc::context *ctxt);
 
   /* opt_pass methods: */
-  bool gate (function *) final override { return gate_pure_const (); }
+  bool gate (function *) final override
+  {
+    /* P4405 proving hook: also when only the proof shadows and the copies
+       they call are optimized.  */
+    return gate_pure_const () || contract_analysis_ipa_p ();
+  }
   unsigned int execute (function *fun) final override;
 
   void register_hooks (void);

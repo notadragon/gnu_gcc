@@ -54,25 +54,43 @@ along with GCC; see the file COPYING3.  If not see
 #include "ipa-modref.h"
 #include "symtab-thunks.h"
 #include "symtab-clones.h"
+#include "contracts-shadow.h"
 
 int ncalls_inlined;
 int nfunctions_inlined;
 
+/* True if NODE is called other than by E (as far as its first call tells,
+   unless BLIND).  If BLIND, a call from analysis-only code into real code
+   (contracts-shadow.h) does not count.  */
+
+static bool
+called_otherwise_p (cgraph_node *node, cgraph_edge *e, bool blind)
+{
+  if (!blind)
+    return node->callers && node->callers != e;
+  for (cgraph_edge *c = node->callers; c; c = c->next_caller)
+    if (c != e && !contract_analysis_only_call_p (c))
+      return true;
+  return false;
+}
+
 /* We removed or are going to remove the last call to NODE.
    Return true if we can and want proactively remove the NODE now.
    This is important to do, since we want inliner to know when offline
-   copy of function was removed.  */
+   copy of function was removed.  If BLIND, the calls from analysis-only
+   code do not count.  */
 
 static bool
-can_remove_node_now_p_1 (struct cgraph_node *node, struct cgraph_edge *e)
+can_remove_node_now_p_1 (struct cgraph_node *node, struct cgraph_edge *e,
+			 bool blind)
 {
   ipa_ref *ref;
 
   FOR_EACH_ALIAS (node, ref)
     {
       cgraph_node *alias = dyn_cast <cgraph_node *> (ref->referring);
-      if ((alias->callers && alias->callers != e)
-	  || !can_remove_node_now_p_1 (alias, e))
+      if (called_otherwise_p (alias, e, blind)
+	  || !can_remove_node_now_p_1 (alias, e, blind))
 	return false;
     }
   /* FIXME: When address is taken of DECL_EXTERNAL function we still
@@ -99,10 +117,11 @@ can_remove_node_now_p_1 (struct cgraph_node *node, struct cgraph_edge *e)
    group that the whole comdat group is removable.  */
 
 static bool
-can_remove_node_now_p (struct cgraph_node *node, struct cgraph_edge *e)
+can_remove_node_now_p (struct cgraph_node *node, struct cgraph_edge *e,
+		       bool blind = false)
 {
   struct cgraph_node *next;
-  if (!can_remove_node_now_p_1 (node, e))
+  if (!can_remove_node_now_p_1 (node, e, blind))
     return false;
 
   /* When we see same comdat group, we need to be sure that all
@@ -114,8 +133,8 @@ can_remove_node_now_p (struct cgraph_node *node, struct cgraph_edge *e)
     {
       if (next->alias)
 	continue;
-      if ((next->callers && next->callers != e)
-	  || !can_remove_node_now_p_1 (next, e))
+      if (called_otherwise_p (next, e, blind)
+	  || !can_remove_node_now_p_1 (next, e, blind))
         return false;
     }
   return true;
@@ -204,6 +223,22 @@ clone_inlined_nodes (struct cgraph_edge *e, bool duplicate,
       else
 	{
 	  struct cgraph_node *n;
+
+	  /* P4405 proving hook: when only analysis-only code still calls
+	     the offline copy, it is kept for that code alone, and the size
+	     of the real code drops as if it were removed.  */
+	  if (overall_size
+	      && !e->callee->inlined_to
+	      && e->callee->definition
+	      && !keep_offline_copy
+	      && !called_otherwise_p (e->callee, e, true)
+	      && inline_account_function_p (e->callee)
+	      && can_remove_node_now_p (e->callee, e, true)
+	      && !master_clone_with_noninline_clones_p (e->callee))
+	    {
+	      gcc_assert (!e->callee->alias);
+	      *overall_size -= ipa_size_summaries->get (e->callee)->size;
+	    }
 
 	  n = e->callee->create_clone (e->callee->decl,
 				       e->count,
@@ -428,7 +463,10 @@ inline_call (struct cgraph_edge *e, bool update_original,
 
 
   e->inline_failed = CIF_OK;
-  DECL_POSSIBLY_INLINED (callee->decl) = true;
+  /* A P4405 proof shadow is never described in the debug information
+     (GCC-997).  */
+  if (!contract_analysis_only_inline_p (to))
+    DECL_POSSIBLY_INLINED (callee->decl) = true;
 
   if (DECL_FUNCTION_PERSONALITY (callee->decl))
     DECL_FUNCTION_PERSONALITY (to->decl)

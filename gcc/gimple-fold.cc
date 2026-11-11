@@ -70,6 +70,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "varasm.h"
 #include "internal-fn.h"
 #include "gimple-range.h"
+#include "contracts-shadow.h"
 
 enum strlen_range_kind {
   /* Compute the exact constant string length.  */
@@ -187,6 +188,10 @@ can_refer_decl_in_current_unit_p (tree decl, tree from_decl)
       || ((!snode->definition || DECL_EXTERNAL (decl))
 	  && (!snode->in_other_partition
 	      || (!snode->forced_by_abi && !snode->force_output))))
+    return false;
+  /* P4405 (GCC-1000): a COMDAT definition kept only for analysis-only
+     code is not there for the real code.  */
+  if (contract_analysis_only_definition_p (snode))
     return false;
   node = dyn_cast <cgraph_node *> (snode);
   return !node || !node->inlined_to;

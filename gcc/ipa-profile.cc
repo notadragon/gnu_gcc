@@ -59,6 +59,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "ipa-cp.h"
 #include "ipa-prop.h"
 #include "ipa-fnsummary.h"
+#include "contracts-shadow.h"
 
 /* Entry in the histogram.  */
 
@@ -567,6 +568,10 @@ ipa_propagate_frequency_1 (struct cgraph_node *node, void *data)
 	        || d->only_called_at_startup || d->only_called_at_exit);
        edge = edge->next_caller)
     {
+      /* P4405 proving hook: how often analysis-only code would call NODE
+	 says nothing about the real code.  */
+      if (contract_analysis_only_call_p (edge))
+	continue;
       if (edge->caller != d->function_symbol)
 	{
           d->only_called_at_startup &= edge->caller->only_called_at_startup;

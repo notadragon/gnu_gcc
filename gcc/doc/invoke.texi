@@ -3575,6 +3575,100 @@ has no effect.
 
 Both are accepted for C and Objective-C too.
 
+@opindex fcontracts-prove-shadow
+@opindex fno-contracts-prove-shadow
+@item -fcontracts-prove-shadow
+Another proving strategy, enabled by @option{-fcontracts-p4405} and
+disabled by @option{-fno-contracts-prove-shadow}: prove what the
+optimizers can show about a copy of the function, its @dfn{proof shadow},
+which is optimized but never emitted.  In the shadow,
+each evaluation still to be proven tests its predicate; an earlier
+evaluation whose predicate has no side effects other than through the
+functions it calls is assumed to hold, with
+@code{ignore}, @code{observe}, @code{noexcept_observe} or @code{assume}
+(for a precondition or postcondition, not
+@code{ignore}, which leaves nothing in the function), as
+is one with @code{enforce} or @code{quick_enforce} on its continuing path.
+The function's own code is that of @code{ignore}, and the predicate is
+never evaluated at run time.  The proof is whatever the optimizers can
+show unreachable, including any path with undefined behavior, so it
+depends on how hard the shadow is optimized: at the proof optimization
+level (@option{-fcontracts-prove-optimize=}), whatever the function's own,
+@option{-O0} included; at proof level 0 the option is off unless given,
+and only the other strategies run.  An
+evaluation the shadow finds is never reached is proven, even one whose
+predicate folds to @code{false}; one that does fold to @code{false} is
+diagnosed as always false wherever it may be reached.  A
+caller-side evaluation of a precondition is proven in the caller's shadow,
+with the arguments substituted for the parameters (at a constructor call
+that creates a temporary, the temporary for @code{this}), when every
+argument it uses is free of side effects.  The evaluations are
+diagnosed at the end of the compilation, under @option{-flto} at the
+compilation step.  The strategy does not run in a coroutine, in a module,
+while writing a precompiled header, with @option{-fanalyzer}, or with
+profile instrumentation or feedback.
+
+With @option{-fcontracts-prove-assume}, an evaluation the shadow proves
+soundly -- relying on no earlier evaluation with @code{ignore},
+@code{observe} or @code{noexcept_observe}, on no unproven one, and on no
+predicate that may have side effects (a call counts unless the function
+called is found to be pure or const, terminating and not throwing) -- is
+an assumption in the function's code, as if evaluated with
+@code{assume}: its predicate is still never evaluated, but the function's
+optimizations after the shadow is decided may take it to hold.
+
+The shadows' references to variables and functions still count where the
+compiler works out their properties for the program's code: a
+@code{static} variable that only a function called from a predicate
+stores to is not found to be read-only, and a @code{static} variable or
+function whose address only a predicate takes has its address taken, so
+the code that uses them can differ from that of @code{ignore} or of
+@option{-fno-contracts-prove-shadow}.
+
+With @option{-g}, the debug information of a function holding such
+evaluations can still differ from that of @code{ignore} or of
+@option{-fno-contracts-prove-shadow}, though its code does not: it can
+describe types and functions that only a predicate uses, lose the
+markers of statements in a branch or a loop body that holds an
+evaluation, and, with the override shadows, describe the function's
+local variables in a nested scope.
+
+With @option{-fcontracts-prove-assume}, a function that only the
+predicate of an evaluation left unproven calls, and that is not inlined,
+can still be emitted out of line though nothing calls it; the code of
+the function holding the evaluation, and so the program's behavior, is
+the same.
+
+It is accepted for C and Objective-C too.
+
+@opindex fcontracts-prove-callee-premises
+@opindex fno-contracts-prove-callee-premises
+@item -fcontracts-prove-callee-premises
+Premise copies, a proving strategy enabled by @option{-fcontracts-p4405}
+and disabled by @option{-fno-contracts-prove-callee-premises}, which works
+with @option{-fcontracts-prove-shadow}: an evaluation with @code{observe},
+@code{noexcept_observe} or @code{ignore} in a function the proof shadow
+calls is a premise for the evaluations after the call, as it is in the
+function's own body.  Such a function, and each function a shadow calls
+on the way to one, gets a @dfn{premise copy}, never emitted, that assumes
+those predicates as a proof shadow does; and a shadow that calls such a
+function gets a second shadow that calls the copies instead.  The
+ordinary shadows are decided as without this option; an evaluation one
+of them leaves unproven that the second shadow proves is proven
+conditionally, so it is not diagnosed and, with
+@option{-fcontracts-prove-assume}, never assumed.  A soundly proven
+evaluation stays sound, and the code of the program is the same with or
+without the option.  The copies and second shadows cost an optimization
+of each such function and of each shadow that calls one, though a second
+shadow is optimized only as far as the inliner when its ordinary shadow
+proved everything.  In C++ a precondition or postcondition with
+@code{ignore} leaves nothing in the function's body, so it is no premise
+here either, nor is an @code{ignore} evaluation that follows an analysis
+evaluation of the same assertion.  A call the optimizers find only later
+(an indirect or virtual call made direct) reaches the real function, and
+the override shadows (@option{-fcontracts-prove-override}) call the real
+functions.  The option is accepted for C and Objective-C too.
+
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines

@@ -209,6 +209,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "ipa-inline.h"
 #include "omp-offload.h"
 #include "symtab-thunks.h"
+#include "contracts-shadow.h"
 
 /* Queue of cgraph nodes scheduled to be added into cgraph.  This is a
    secondary queue used during optimization to accommodate passes that
@@ -1289,6 +1290,9 @@ analyze_functions (bool first_time)
 			/* When not optimizing, do not try to analyze extern
 			   inline functions.  Doing so is pointless.  */
 			|| opt_for_fn (edge->callee->decl, optimize)
+			/* Unless P4405 proof shadows, optimized at their
+			   proof level, may inline them.  */
+			|| contract_shadow_external_bodies_p ()
 			/* Weakrefs needs to be preserved.  */
 			|| edge->callee->alias
 			/* always_inline functions are inlined even at -O0.  */
@@ -2432,6 +2436,10 @@ symbol_table::compile (void)
 
   state = EXPANSION;
 
+  /* P4405 proving hook: the proof shadows first, so that every obligation is
+     decided before anything else is optimized further.  */
+  contract_shadow_expand_first ();
+
   /* Output first asm statements and anything ordered. The process
      flag is cleared for these nodes, so we skip them later.  */
   output_in_order ();
@@ -2629,6 +2637,9 @@ symbol_table::finalize_compilation_unit (void)
 
   /* Finally drive the pass manager.  */
   compile ();
+
+  /* P4405 proving hook: diagnose the obligations no proof shadow proved.  */
+  contract_shadow_finish ();
 
   timevar_pop (TV_CGRAPH);
 }

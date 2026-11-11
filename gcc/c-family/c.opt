@@ -2058,9 +2058,17 @@ fcontracts-prove-assume
 C ObjC C++ ObjC++ Var(flag_contracts_prove_assume) Init(0) LangEnabledBy(C ObjC C++ ObjC++,fcontracts-p4405)
 Treat a prove or diagnose evaluation whose predicate is soundly proven as an assumption (P4405).
 
+fcontracts-prove-callee-premises
+C ObjC C++ ObjC++ Var(flag_contracts_prove_callee_premises) Init(0) LangEnabledBy(C ObjC C++ ObjC++,fcontracts-p4405)
+Let a proof shadow conditionally prove an evaluation from the observe, noexcept_observe and ignore evaluations in the callees it inlines, through premise copies of those callees (P4405).
+
 fcontracts-prove-fold
 C ObjC C++ ObjC++ Var(flag_contracts_prove_fold) Init(0) LangEnabledBy(C ObjC C++ ObjC++,fcontracts-p4405)
 Prove a prove or diagnose evaluation whose predicate folds to true (P4405).
+
+fcontracts-prove-shadow
+C ObjC C++ ObjC++ Var(flag_contracts_prove_shadow) Init(0) LangEnabledBy(C ObjC C++ ObjC++,fcontracts-p4405)
+Prove a prove or diagnose evaluation by optimizing a proof shadow of the function (P4405).
 
 fcoroutines
 C++ ObjC++ LTO Var(flag_coroutines)

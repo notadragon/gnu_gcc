@@ -66,6 +66,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "symtab-thunks.h"
 #include "symtab-clones.h"
 #include "asan.h"
+#include "contracts-shadow.h"
 
 /* I'm not real happy about this, but we need to handle gimple and
    non-gimple trees.  */
@@ -5053,6 +5054,10 @@ expand_call_inline (basic_block bb, gimple *stmt, copy_body_data *id,
       prepend_lexical_block (block, id->block);
     }
 
+  /* P4405 proving hook: what the proof shadows may rely on this TU's code
+     for.  */
+  contract_shadow_note_inline (id->dst_node, fn, stmt);
+
   /* Local declarations will be replaced by their equivalents in this map.  */
   st = id->decl_map;
   id->decl_map = new hash_map<tree, tree>;
@@ -5439,8 +5444,9 @@ expand_call_inline (basic_block bb, gimple *stmt, copy_body_data *id,
   /* Output the inlining info for this abstract function, since it has been
      inlined.  If we don't do this now, we can lose the information about the
      variables in the function when the blocks get blown away as soon as we
-     remove the cgraph node.  */
-  if (gimple_block (stmt))
+     remove the cgraph node.  Not for a P4405 proof shadow, which is never
+     described (GCC-997).  */
+  if (gimple_block (stmt) && !contract_analysis_only_inline_p (id->dst_node))
     (*debug_hooks->outlining_inline_function) (fn);
 
   /* Update callgraph if needed.  */

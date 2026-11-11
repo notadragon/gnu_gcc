@@ -1,0 +1,4 @@
+[
+  {"match": {"location": "p4405-prove-assume-lto.C:19"}, "output": {"semantic": "quick_enforce"}},
+  {"match": {}, "output": {"semantic": "prove"}}
+]

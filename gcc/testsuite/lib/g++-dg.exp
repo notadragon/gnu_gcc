@@ -17,6 +17,7 @@
 # Define g++ callbacks for dg.exp.
 
 load_lib gcc-dg.exp
+load_lib contracts-objects.exp
 
 proc g++-dg-test { prog do_what extra_tool_flags } {
     return [gcc-dg-test-1 g++_target_compile $prog $do_what $extra_tool_flags]

@@ -55,6 +55,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree.h"
 #include "tree-pass.h"
 #include "cgraph.h"
+#include "contracts-shadow.h"
 
 /* Main dataflow loop propagating comdat groups across
    the symbol table.  All references to SYMBOL are examined
@@ -67,6 +68,9 @@ propagate_comdat_group (struct symtab_node *symbol,
 {
   int i;
   struct ipa_ref *ref;
+  /* P4405 proving hook: analysis-only code is not emitted, so only the real
+     code's references and calls decide where SYMBOL goes.  */
+  bool real_symbol = !contract_analysis_only_p (symbol);
 
   /* Walk all references to SYMBOL, recursively dive into aliases.  */
 
@@ -75,6 +79,9 @@ propagate_comdat_group (struct symtab_node *symbol,
        && newgroup != error_mark_node; i++)
     {
       struct symtab_node *symbol2 = ref->referring;
+
+      if (real_symbol && contract_analysis_only_p (symbol2))
+	continue;
 
       if (ref->use == IPA_REF_ALIAS)
 	{
@@ -124,6 +131,9 @@ propagate_comdat_group (struct symtab_node *symbol,
 	 edge && newgroup != error_mark_node; edge = edge->next_caller)
       {
 	struct symtab_node *symbol2 = edge->caller;
+
+	if (real_symbol && contract_analysis_only_p (symbol2))
+	  continue;
 
 	if (cgraph_node * cn = dyn_cast <cgraph_node *> (symbol2))
 	  {

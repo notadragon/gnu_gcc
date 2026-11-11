@@ -1,0 +1,3 @@
+[
+  {"match": {"kind": "post"}, "output": {"semantic": "observe"}}
+]

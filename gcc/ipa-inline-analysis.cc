@@ -51,6 +51,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "cfgexpand.h"
 #include "gimplify.h"
 #include "attribs.h"
+#include "contracts-shadow.h"
 
 /* Cached node/edge growths.  */
 fast_call_summary<edge_growth_cache_entry *, va_heap> *edge_growth_cache = NULL;
@@ -422,6 +423,10 @@ do_estimate_growth_1 (struct cgraph_node *node, void *data)
       if (e->callback)
 	continue;
 
+      /* P4405 proving hook: nor calls from analysis-only code.  */
+      if (contract_analysis_only_call_p (e))
+	continue;
+
       if (cgraph_inline_failed_type (e->inline_failed) == CIF_FINAL_ERROR
 	  || !opt_for_fn (e->caller->decl, optimize))
 	{
@@ -508,6 +513,9 @@ check_callers (cgraph_node *node, int *growth, int *n, int offline,
 
       if (e == known_edge)
 	continue;
+      /* P4405 proving hook.  */
+      if (contract_analysis_only_call_p (e))
+	continue;
       if (cgraph_inline_failed_type (e->inline_failed) == CIF_FINAL_ERROR)
 	return true;
       if (edge_growth_cache != NULL
@@ -562,6 +570,9 @@ growth_positive_p (struct cgraph_node *node,
     {
       edge_growth_cache_entry *entry;
 
+      /* P4405 proving hook.  */
+      if (e != known_edge && contract_analysis_only_call_p (e))
+	continue;
       if (cgraph_inline_failed_type (e->inline_failed) == CIF_FINAL_ERROR)
 	return true;
       if (e == known_edge)

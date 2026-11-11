@@ -326,6 +326,47 @@ extern const contract_proof_strategy contract_prove_fold_strategy;
 
 /* -fcontracts-prove-shadow (contracts-prove-shadow.cc; the middle end's
    contracts-shadow.cc does the proving).  */
+extern const contract_proof_strategy contract_prove_shadow_strategy;
+
+/* For the proof shadows of either kind: true if FNDECL's evaluations may
+   go to a proof shadow, whichever strategy's flag is set.  */
+extern bool contract_prove_shadow_may_defer_p (tree fndecl);
+
+/* D4405's proof optimization level: the optimization options of the proof
+   shadows at proof level LEVEL, the command line's with only the level
+   replaced (for contract_shadow_proof_optimization).  */
+extern tree c_contract_proof_optimization (int level);
+
+/* D4405's proof optimization level: in the generic body of FNDECL, make an
+   `if' statement holding nothing but regions a region of its own, so that
+   nothing of it is left in the real function.  */
+extern void c_contract_hoist_region_guards (tree fndecl);
+
+/* For the proof shadows of either kind: true unless QUERY is at a call
+   whose arguments its marker cannot be given (an evaluation nested in an
+   override shadow's, DECISIONS.md E169 (8), may be).  */
+extern bool contract_prove_shadow_substitutable_p
+  (const contract_proof_query &query);
+
+/* For the proof shadows of either kind: the region of kind KIND letting a
+   shadow assume PRED, the predicate of an evaluation at LOC with semantic
+   SEM, or NULL_TREE (contract_proof_strategy's assume).  */
+extern tree contract_prove_shadow_assumption (tree pred,
+					      contract_evaluation_semantic sem,
+					      location_t loc, unsigned kind);
+
+/* True if PRED, the predicate of an evaluation, can be assumed by a proof
+   shadow: it has no side effects of its own (calls aside) and can be
+   evaluated again.  The functions it calls directly are pushed onto
+   CALLEES.  */
+extern bool contract_prove_shadow_assumable_p (tree pred,
+					       vec<tree> &callees);
+
+/* -fcontracts-prove-callee-premises (contracts-prove-callee-premises.cc):
+   premise copies of the callees the proof shadows reach, which the middle
+   end's contracts-shadow.cc makes and uses.  */
+extern const contract_proof_strategy contract_prove_callee_premises_strategy;
+
 /* Defined by each front end, for the folding strategy: EXPR folded as far
    as the front end can fold it -- in C++ including constant evaluation that
    is not manifestly constant-evaluated -- without changing EXPR or anything
@@ -337,4 +378,11 @@ extern tree c_contract_fold_predicate (tree expr);
    context the front end is describing an evaluation in now -- in C++ the
    template instantiation backtrace, "In instantiation of ..." and
    "required from here" -- or 0 if it has none (always, in C).  */
+extern unsigned c_contract_diagnostic_context ();
+
+/* Re-establish CONTEXT, a nonzero handle from c_contract_diagnostic_context,
+   for a diagnostic when ENTER, and what it replaced when not.  */
+extern void c_contract_switch_diagnostic_context (unsigned context,
+						  bool enter);
+
 #endif /* GCC_C_FAMILY_CONTRACTS_PROVE_H */

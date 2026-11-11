@@ -39,6 +39,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "attribs.h"
 #include "builtins.h"
 #include "fold-const.h"
+#include "contracts-shadow.h"
 
 static const char *ipa_ref_use_name[] = {"read","write","addr","alias"};
 
@@ -1295,7 +1296,11 @@ symtab_node::verify_base (void)
 
 	  for (int i = 0; iterate_referring (i, ref); ++i)
 	    {
-	      if (!in_same_comdat_group_p (ref->referring))
+	      if (!in_same_comdat_group_p (ref->referring)
+		  /* P4405 proving hook: a proof shadow is never emitted, so it
+		     may refer to a symbol IPA made local to a comdat group it
+		     is not in.  */
+		  && !contract_analysis_only_p (ref->referring))
 		{
 		  error ("comdat-local symbol referred to by %s outside its "
 			 "comdat",

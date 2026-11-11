@@ -134,6 +134,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "attr-callback.h"
 #include "lto-streamer.h"
 #include "callback-info.h"
+#include "contracts-shadow.h"
 
 /* Allocation pools for values and their sources in ipa-cp.  */
 
@@ -596,6 +597,9 @@ gather_caller_stats (struct cgraph_node *node, void *data)
       {
 	ipa_node_params *info = ipa_node_params_sum->get (cs->caller);
 	if (info && info->node_dead)
+	  continue;
+	/* P4405 proving hook: nor the calls from analysis-only code.  */
+	if (contract_analysis_only_call_p (cs))
 	  continue;
 
 	if (cs->count.ipa ().initialized_p ())
@@ -1409,8 +1413,10 @@ count_callers (cgraph_node *node, void *data)
 
   for (cgraph_edge *cs = node->callers; cs; cs = cs->next_caller)
     /* Local thunks can be handled transparently, but if the thunk cannot
-       be optimized out, count it as a real use.  */
-    if (!cs->caller->thunk || !cs->caller->local)
+       be optimized out, count it as a real use.  The calls from
+       analysis-only code do not count (P4405 proving hook).  */
+    if ((!cs->caller->thunk || !cs->caller->local)
+	&& !contract_analysis_only_call_p (cs))
       ++*caller_count;
   return false;
 }
@@ -1422,8 +1428,10 @@ static bool
 set_single_call_flag (cgraph_node *node, void *)
 {
   cgraph_edge *cs = node->callers;
-  /* Local thunks can be handled transparently, skip them.  */
-  while (cs && cs->caller->thunk && cs->caller->local)
+  /* Local thunks can be handled transparently, skip them, and the calls
+     from analysis-only code (P4405 proving hook).  */
+  while (cs && ((cs->caller->thunk && cs->caller->local)
+		|| contract_analysis_only_call_p (cs)))
     cs = cs->next_caller;
   if (cs)
     if (ipa_node_params* info = ipa_node_params_sum->get (cs->caller))
@@ -3097,6 +3105,10 @@ propagate_constants_across_call (struct cgraph_edge *cs)
   callee = cs->callee->function_symbol (&availability, NULL, true);
   if (!callee->definition)
     return false;
+  /* P4405 proving hook: analysis-only code is not a caller of the real
+     code.  */
+  if (contract_analysis_only_call_p (cs))
+    return false;
   gcc_checking_assert (callee->has_gimple_body_p ());
   callee_info = ipa_node_params_sum->get (callee);
   if (!callee_info)
@@ -4137,7 +4149,8 @@ ipcp_propagate_stage (class ipa_topo_info *topo)
 	  max_number_sweeps = num_sweeps;
       }
 
-    if (!node->alias)
+    /* P4405 proving hook: not counting analysis-only code.  */
+    if (!node->alias && !contract_analysis_only_p (node))
       {
        ipa_size_summary *szs = ipa_size_summaries->get (node);
        if (szs)
@@ -4331,7 +4344,9 @@ cgraph_edge_brings_value_p (cgraph_edge *cs, ipcp_value_source<tree> *src,
   ipa_node_params *caller_info = ipa_node_params_sum->get (cs->caller);
 
   if (!calls_same_node_or_its_all_contexts_clone_p (cs, dest, !src->val)
-      || caller_info->node_dead)
+      || caller_info->node_dead
+      /* P4405 proving hook.  */
+      || contract_analysis_only_call_p (cs))
     return false;
 
   if (!src->val)
@@ -4389,7 +4404,9 @@ cgraph_edge_brings_value_p (cgraph_edge *cs,
   ipa_node_params *caller_info = ipa_node_params_sum->get (cs->caller);
 
   if (!calls_same_node_or_its_all_contexts_clone_p (cs, dest, true)
-      || caller_info->node_dead)
+      || caller_info->node_dead
+      /* P4405 proving hook.  */
+      || contract_analysis_only_call_p (cs))
     return false;
   if (!src->val)
     return true;
@@ -6297,6 +6314,12 @@ decide_whether_version_node (struct cgraph_node *node, int cur_sweep)
   if (info->node_dead || count == 0)
     return false;
 
+  /* P4405 proving hook: no clone is made for analysis-only code alone, so
+     that the real code's clones and function numbers are what they would
+     be without it.  */
+  if (contract_analysis_only_p (node))
+    return false;
+
   bool clone_for_all_contexts = node->local;
   if (dump_file && (dump_flags & TDF_DETAILS))
     {
@@ -6452,6 +6475,10 @@ decide_whether_version_node (struct cgraph_node *node, int cur_sweep)
 	return ret;
 
       auto_vec<cgraph_edge *> callers = node->collect_callers ();
+      /* P4405 proving hook: analysis-only code keeps calling the original.  */
+      for (int i = callers.length () - 1; i >= 0; i--)
+	if (contract_analysis_only_call_p (callers[i]))
+	  callers.ordered_remove (i);
       for (int i = callers.length () - 1; i >= 0; i--)
 	{
 	  cgraph_edge *cs = callers[i];
@@ -6527,7 +6554,9 @@ has_undead_caller_from_outside_scc_p (struct cgraph_node *node,
 	&& cs->caller->call_for_symbol_thunks_and_aliases
 	  (has_undead_caller_from_outside_scc_p, NULL, true))
       return true;
-    else if (!ipa_edge_within_scc (cs))
+    else if (!ipa_edge_within_scc (cs)
+	     /* P4405 proving hook.  */
+	     && !contract_analysis_only_call_p (cs))
       {
 	ipa_node_params *caller_info = ipa_node_params_sum->get (cs->caller);
 	if (!caller_info /* Unoptimized caller are like dead ones.  */

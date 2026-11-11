@@ -1,0 +1,6 @@
+[
+  {"match": {"location": "p4405-premise-multi-tu-inlined-e.cc:6"}, "output": {"semantic": "enforce"}},
+  {"match": {"location": "p4405-premise-multi-tu-inlined-e.cc:14"}, "output": {"semantic": "diagnose"}},
+  {"match": {"location": "p4405-premise-multi-tu-inlined-i.cc:4"}, "output": {"semantic": "ignore"}},
+  {"match": {"caller": false}, "output": {"semantic": "enforce"}}
+]
