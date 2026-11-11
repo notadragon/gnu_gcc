@@ -908,6 +908,17 @@ add_default_capture (tree lambda_stack, tree id, tree initializer)
 			    /*explicit_init_p=*/false, NULL);
       initializer = convert_from_reference (var);
 
+      /* A capture made only so that a lambda in this lambda's contract
+	 predicate can capture it in turn is also a capture only by a contract
+	 assertion ([expr.prim.lambda.closure]/10); as for a direct one, a
+	 later use outside a predicate clears the mark.  */
+      if (flag_contracts
+	  && TREE_CHAIN (node)
+	  && LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P
+	       (TREE_VALUE (TREE_CHAIN (node)))
+	  && !LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (lambda))
+	set_contract_capture_flag (var, true);
+
       /* Warn about deprecated implicit capture of this via [=].  */
       if (cxx_dialect >= cxx20
 	  && this_capture_p
@@ -1040,13 +1051,22 @@ lambda_expr_this_capture (tree lambda, int add_capture_p)
       if (init)
         {
           if (add_capture_p)
-	    this_capture = add_default_capture (lambda_stack,
-					        /*id=*/this_identifier,
-					        init);
+	    {
+	      this_capture = add_default_capture (lambda_stack,
+						  /*id=*/this_identifier,
+						  init);
+	      /* As for a variable in process_outer_var_ref.  */
+	      if (flag_contracts && processing_contract_condition)
+		set_contract_capture_flag (this_capture, true);
+	    }
           else
 	    this_capture = init;
         }
     }
+  else if (flag_contracts && add_capture_p && !processing_contract_condition
+	   && TREE_CODE (this_capture) != FIELD_DECL)
+    /* Used outside a contract assertion too: not a capture only by one.  */
+    set_contract_capture_flag (this_capture, false);
 
   if (cp_unevaluated_operand)
     result = this_capture;
