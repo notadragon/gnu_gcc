@@ -50,6 +50,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "ipa-reference.h"
 #include "alloc-pool.h"
 #include "symbol-summary.h"
+#include "ubsan.h"
 
 /* The static variables defined within the compilation unit that are
    loaded or stored directly by function that owns this structure.  */
@@ -697,6 +698,17 @@ get_read_write_all_from_node (struct cgraph_node *node,
   if (node->get_availability () <= AVAIL_INTERPOSABLE
       || (node->analyzed && !opt_for_fn (node->decl, flag_ipa_reference)))
     read_write_all_from_decl (node, read_all, write_all);
+
+  /* P3100: a sanitizer check that may call the contract-violation handler
+     is a call of user code with no call graph edge.  */
+  if (ubsan_node_may_call_handler_p (node))
+    {
+      read_all = true;
+      write_all = true;
+      if (dump_file && (dump_flags & TDF_DETAILS))
+	fprintf (dump_file, "   %s may call the contract-violation handler"
+		 " -> read all, write all\n", node->dump_name ());
+    }
 
   for (e = node->callees;
        e && !(read_all && write_all);

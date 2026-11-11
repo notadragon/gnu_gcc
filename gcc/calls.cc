@@ -62,6 +62,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-eh.h"
 #include "regs.h"
 #include "function-abi.h"
+#include "ubsan.h"
 
 /* Like PREFERRED_STACK_BOUNDARY but in units of bytes, not bits.  */
 #define STACK_BYTES (PREFERRED_STACK_BOUNDARY / BITS_PER_UNIT)
@@ -832,7 +833,10 @@ flags_from_decl_or_type (const_tree exp)
 
       if (DECL_IS_NOVOPS (exp))
 	flags |= ECF_NOVOPS;
-      if (lookup_attribute ("leaf", DECL_ATTRIBUTES (exp)))
+      /* P3100: a sanitizer runtime entry routed to the contract-violation
+	 handler may call user code.  */
+      if (lookup_attribute ("leaf", DECL_ATTRIBUTES (exp))
+	  && !ubsan_builtin_may_call_handler_p (exp))
 	flags |= ECF_LEAF;
       if (lookup_attribute ("cold", DECL_ATTRIBUTES (exp)))
 	flags |= ECF_COLD;

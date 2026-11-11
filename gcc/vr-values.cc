@@ -1712,6 +1712,14 @@ simplify_using_ranges::simplify_internal_call_using_ranges
 			       build_int_cst (type, ovf));
     }
   gimple_set_location (g, loc);
+  /* P3100: a signed-overflow check routed to the contract-violation
+     handler has virtual operands (gimple_call_flags).  */
+  if (tree vdef = gimple_vdef (stmt))
+    if (TREE_CODE (vdef) == SSA_NAME)
+      {
+	unlink_stmt_vdef (stmt);
+	release_ssa_name (vdef);
+      }
   gsi_replace (gsi, g, false);
   return true;
 }
