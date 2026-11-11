@@ -3896,6 +3896,47 @@ evaluation of the same assertion.  A call the optimizers find only later
 the override shadows (@option{-fcontracts-prove-override}) call the real
 functions.  The option is accepted for C and Objective-C too.
 
+@opindex fcontracts-prove-optimize
+@item -fcontracts-prove-optimize=@r{[}0@r{|}1@r{|}2@r{|}3@r{|}follow@r{]}
+Select the @dfn{proof optimization level}, which decides which of the
+proving strategies described above @option{-fcontracts-p4405} enables:
+each is enabled from a level up, and one given explicitly, in either
+form, is enabled or disabled whatever the level.
+
+@multitable @columnfractions .6 .4
+@headitem Strategy @tab Enabled at proof level
+@item @option{-fcontracts-prove-fold} @tab 0 and up
+@item @option{-fcontracts-prove-shadow} @tab 1 and up
+@item @option{-fcontracts-prove-assume} @tab 1 and up
+@item @option{-fcontracts-prove-override} @tab 2 and up
+@item @option{-fcontracts-prove-callee-premises} @tab 2 and up
+@end multitable
+
+So at level 0 only folding runs, and below level 2 a virtual function's
+contract assertions are proven as with
+@option{-fno-contracts-prove-override}.  By default the proof level is
+the optimization level, but at least 2: @option{-O3} and @option{-Ofast}
+give 3, and @option{-O0}, @option{-O1}, @option{-O2}, @option{-Os},
+@option{-Oz} and @option{-Og} give 2.  @samp{follow} selects the
+optimization level itself, where @option{-Os}, @option{-Oz} and
+@option{-Og} count as 2.  The proof shadows are optimized at the proof
+level, with the options given explicitly, whatever their functions' own
+optimization levels and @code{optimize} attributes; a function a shadow
+calls that is optimized at another level is replaced in the shadow by a
+copy at the proof level, never emitted.  Without
+@option{-fcontracts-prove-assume} the code of the program is the same
+whatever the proof level.  At @option{-O0} the proof shadows also inline
+the bodies of external functions (such as the inline members of a class
+template whose instantiation is declared @code{extern template}), which
+an unoptimized compilation otherwise ignores and which are never emitted,
+and the code is the same with @option{-fcontracts-prove-assume} too:
+@option{-O0} drops its assumptions, as it drops every assumption whose
+condition is not simple.  At proof level 0, which @samp{follow} selects
+at @option{-O0}, the proof shadows are off unless given explicitly; a
+strategy given explicitly at level 0 runs at level 0, where the proof
+shadows are optimized as at @option{-O0} and prove little.  The option is
+accepted for C and Objective-C too.
+
 @opindex fcoroutines
 @opindex fno-coroutines
 @item -fcoroutines

@@ -47,6 +47,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "diagnostics/text-sink.h"
 #include "c-family/contracts-config-source.h"
 #include "c-family/contracts-config.h"
+#include "c-family/contracts-prove.h"
+#include "contracts-shadow.h"
 
 #ifndef DOLLARS_IN_IDENTIFIERS
 # define DOLLARS_IN_IDENTIFIERS true
@@ -1302,6 +1304,45 @@ c_common_post_options (const char **pfilename)
   SET_OPTION_IF_UNSET (&global_options, &global_options_set,
 		       flag_range_for_ext_temps, cxx_dialect >= cxx23);
 
+  /* The P4405 proof optimization level (DECISIONS.md E162-E168, E205):
+     -fcontracts-prove-optimize= gives it; by default it is the
+     code-generation level but never below 2, and with follow it is the
+     code-generation level, where -Os, -Oz and -Og count as 2.  Resolve it
+     into 0-3 here, in flag_contracts_prove_optimize, and give the proof
+     shadows the options of that level.  Each proving strategy is on from a
+     proof level -- folding from 0, the proof shadow and
+     -fcontracts-prove-assume from 1, the override shadows and the callee
+     premise copies, which need the proof shadow, from 2 -- unless it is
+     given, in either form.  */
+  {
+    const int code_level
+      = optimize_size || optimize_debug ? 2 : MIN (optimize, 3);
+    if (flag_contracts_prove_optimize == -1)
+      flag_contracts_prove_optimize = code_level;
+    else if (flag_contracts_prove_optimize == -2)
+      flag_contracts_prove_optimize = MAX (code_level, 2);
+    const int level = flag_contracts_prove_optimize;
+    if (flag_contracts_p4405)
+      {
+	SET_OPTION_IF_UNSET (&global_options, &global_options_set,
+			     flag_contracts_prove_fold, true);
+	SET_OPTION_IF_UNSET (&global_options, &global_options_set,
+			     flag_contracts_prove_shadow, level >= 1);
+	SET_OPTION_IF_UNSET (&global_options, &global_options_set,
+			     flag_contracts_prove_assume, level >= 1);
+	SET_OPTION_IF_UNSET (&global_options, &global_options_set,
+			     flag_contracts_prove_override, level >= 2);
+	SET_OPTION_IF_UNSET (&global_options, &global_options_set,
+			     flag_contracts_prove_callee_premises, level >= 2);
+      }
+    /* The proof shadows are optimized at the proof level, 0 included: a
+       strategy given explicitly at level 0 runs at level 0, where its
+       shadows are optimized as at -O0 (DECISIONS.md E208 (a)).  */
+    contract_shadow_proof_optimization = [] ()
+      {
+	return c_contract_proof_optimization (flag_contracts_prove_optimize);
+      };
+  }
   /* Contracts are in C++26.  */
   SET_OPTION_IF_UNSET (&global_options, &global_options_set,
 		       flag_contracts, cxx_dialect >= cxx26);

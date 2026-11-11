@@ -2088,6 +2088,31 @@ fcontracts-prove-fold
 C ObjC C++ ObjC++ Var(flag_contracts_prove_fold) Init(0) LangEnabledBy(C ObjC C++ ObjC++,fcontracts-p4405)
 Prove a prove or diagnose evaluation whose predicate folds to true (P4405).
 
+; D4405: the proof optimization level.  The default, -2, and follow, -1,
+; are resolved into 0-3 by c_common_post_options.
+
+Enum
+Name(contracts_prove_optimize) Type(int) UnknownError(the proof optimization level must be %<0%>, %<1%>, %<2%>, %<3%> or %<follow%>, not %qs)
+
+EnumValue
+Enum(contracts_prove_optimize) String(0) Value(0)
+
+EnumValue
+Enum(contracts_prove_optimize) String(1) Value(1)
+
+EnumValue
+Enum(contracts_prove_optimize) String(2) Value(2)
+
+EnumValue
+Enum(contracts_prove_optimize) String(3) Value(3)
+
+EnumValue
+Enum(contracts_prove_optimize) String(follow) Value(-1)
+
+fcontracts-prove-optimize=
+C ObjC C++ ObjC++ Joined RejectNegative Enum(contracts_prove_optimize) Var(flag_contracts_prove_optimize) Init(-2)
+-fcontracts-prove-optimize=[0|1|2|3|follow]	Select the optimization level of the P4405 proving strategies (defaults to the optimization level, but at least 2).
+
 fcontracts-prove-override
 C ObjC C++ ObjC++ Var(flag_contracts_prove_override) Init(0) LangEnabledBy(C ObjC C++ ObjC++,fcontracts-p4405)
 Prove a virtual function's contract assertions for calls through each function it overrides by optimizing an override shadow of the function (P4405).
