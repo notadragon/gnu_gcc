@@ -3108,6 +3108,7 @@ cp_genericize (tree fndecl)
   cp_ubsan_retarget_ptrmem_object_checks (fndecl);
 
   cp_maybe_instrument_return (fndecl);
+  apply_implicit_noreturn_check (fndecl);
 
   /* Do everything else.  */
   c_genericize (fndecl);
