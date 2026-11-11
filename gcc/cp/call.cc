@@ -10402,6 +10402,18 @@ immediate_invocation_p (tree fn)
 	  && !in_immediate_context ());
 }
 
+/* P3100: CALL calls a member function of OBJECT -- by name, as an operator
+   or as a conversion function, VIRT if the call is virtual as written.  When
+   OBJECT is `*this', the call may be one before its bases are initialized or
+   after they are destroyed, or one in a constructor or destructor
+   function-try-block handler: return CALL with those checks prepended.  */
+
+static tree
+p3100_member_call_checks (tree object, bool virt, tree call)
+{
+  return build_implicit_handler_member_check (input_location, object, call);
+}
+
 /* Subroutine of the various build_*_call functions.  Overload resolution
    has chosen a winning candidate CAND; build up a CALL_EXPR accordingly.
    ARGS is a TREE_LIST of the unconverted arguments to the call.  FLAGS is a
@@ -10632,6 +10644,17 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
       first_arg = NULL_TREE;
       return object_arg;
     };
+
+  /* P3100: the object argument of a member function call, and whether the
+     call is virtual as written.  */
+  tree p3100_object = NULL_TREE;
+  bool p3100_virtual = false;
+  if (DECL_OBJECT_MEMBER_FUNCTION_P (fn) && !DECL_CONSTRUCTOR_P (fn))
+    {
+      p3100_object = (first_arg ? first_arg
+		      : vec_safe_length (args) ? (*args)[0] : NULL_TREE);
+      p3100_virtual = DECL_VIRTUAL_P (fn) && !(flags & LOOKUP_NONVIRTUAL);
+    }
 
   /* The implicit parameters to a constructor are not considered by overload
      resolution, and must be of the proper type.  */
@@ -11213,12 +11236,19 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
 
       cp_handle_deprecated_or_unavailable (fn, complain);
 
+      if (p3100_object)
+	val = p3100_member_call_checks (p3100_object, p3100_virtual, val);
       return val;
     }
   else if (trivial_fn_p (fn))
     {
       if (DECL_DESTRUCTOR_P (fn))
-	return build_trivial_dtor_call (argarray[0]);
+	{
+	  val = build_trivial_dtor_call (argarray[0]);
+	  if (p3100_object)
+	    val = p3100_member_call_checks (p3100_object, p3100_virtual, val);
+	  return val;
+	}
       else if (default_ctor_p (fn))
 	{
 	  if (is_dummy_object (argarray[0]))
@@ -11285,6 +11315,10 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
 			      NULL_TREE, orig_fn);
   if (call == error_mark_node)
     return call;
+  /* P3100: a member function of (*this) -- called by name, as an operator or
+     as a conversion function.  */
+  if (p3100_object)
+    call = p3100_member_call_checks (p3100_object, p3100_virtual, call);
   if (cand->flags & LOOKUP_LIST_INIT_CTOR)
     {
       tree c = extract_call_expr (call);
