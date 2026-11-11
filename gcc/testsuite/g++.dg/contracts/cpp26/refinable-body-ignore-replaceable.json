@@ -1,0 +1,11 @@
+[
+  {"match": {"location": "refinable-body-ignore-replaceable-i.cc:10"}, "output": {"semantic": "ignore"}},
+  {"match": {"location": "refinable-body-ignore-replaceable-late-i.cc:13"}, "output": {"semantic": "ignore"}},
+  {"match": {"location": "refinable-body-ignore-replaceable-template-i.cc:8"}, "output": {"semantic": "ignore"}},
+  {"match": {"location": "refinable-body-ignore-replaceable-pure-i.cc:9"}, "output": {"semantic": "ignore"}},
+  {"match": {"location": "refinable-body-ignore-replaceable-pure-e.cc:7"}, "output": {"semantic": "observe"}},
+  {"match": {"location": "refinable-body-ignore-replaceable-c99-i.c:13"}, "output": {"semantic": "ignore"}},
+  {"match": {"location": "refinable-body-ignore-replaceable-c99-pure-i.c:11"}, "output": {"semantic": "ignore"}},
+  {"match": {"location": "refinable-body-ignore-replaceable-c99-pure-e.c:8"}, "output": {"semantic": "observe"}},
+  {"match": {"caller": false}, "output": {"semantic": "enforce"}}
+]
