@@ -40,6 +40,11 @@ static const struct c_pch_matching
   const char *flag_name;
 } pch_matching[] = {
   { &flag_exceptions, "-fexceptions" },
+  /* The contract evaluation semantic is resolved while a header is parsed
+     and saved in its contracts, so a header built with another would
+     override the one this translation unit asks for.  */
+  { &flag_contract_evaluation_semantic,
+    "-fcontract-evaluation-semantic=" },
 };
 
 enum {
