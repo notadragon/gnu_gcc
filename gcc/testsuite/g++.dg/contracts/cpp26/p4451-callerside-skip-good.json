@@ -1,0 +1,4 @@
+[
+  {"match": {"caller": true, "location": "p4451-callerside-skip.C:49-50"},
+   "output": {"semantic": "observe"}}
+]

@@ -289,6 +289,14 @@ mismatched_contracts_p (tree old_contract, tree new_contract)
       (old_contract, new_contract,
        G_("mismatched contract diagnostic message in declaration"));
 
+  /* Both are terminating contract assertions, or neither is (P4451): both
+     have an assertion-control-specifier or neither does.  */
+  if (CONTRACT_TERMINATING_P (old_contract)
+      != CONTRACT_TERMINATING_P (new_contract))
+    return diagnose_contract_mismatch
+      (old_contract, new_contract,
+       G_("mismatched assertion-control-specifier in declaration"));
+
   /* Compare assertion-control labels (P3400).  Both must specify the same
      label, or neither specifies one.  */
   tree old_label = CONTRACT_LABEL (old_contract);
@@ -9802,6 +9810,74 @@ grok_contract (tree contract_spec, tree result, cp_expr condition,
     }
 
   return contract;
+}
+
+/* P4451: the semantics a terminating contract assertion may use, those the
+   library's std::contracts::labels::terminating allows under P3400:
+   enforce, quick_enforce and, for its analysis evaluation, prove (which
+   the -fcontracts-p4405 gate removes when the mask is read).  */
+#define CES_TERMINATING_MASK \
+  ((1 << CES_ENFORCE) | (1 << CES_QUICK) | (1 << CES_PROVE))
+
+/* Make CONTRACT a terminating contract assertion (P4451).  It may use
+   exactly the semantics P3400's std::contracts::labels::terminating allows,
+   so a configured semantic outside them is adjusted as it is for that label
+   (contract_semantic_best_fit); no label object is involved, so the
+   violation record is that of an unlabelled assertion.  */
+
+void
+mark_contract_terminating (tree contract)
+{
+  CONTRACT_TERMINATING_P (contract) = true;
+  CONTRACT_ALLOWED_MASK (contract)
+    = build_int_cst (uint16_type_node, CES_TERMINATING_MASK);
+}
+
+/* P4451 [basic.contract.control]: check an assertion-control-specifier
+   `< terminating >' at LOC.  A declaration of
+   std::contracts::labels::terminating shall precede it -- ordinary
+   visibility: qualified lookup finds only what is declared earlier or
+   imported -- and unqualified lookup of `terminating' from it shall find
+   nothing or only that declaration.  The entity is whatever qualified lookup
+   finds (under P4451 alone, <contracts> declares it in an inline
+   namespace).  Called where the predicate is parsed, so that a member
+   function's class is complete and a function's parameters are in scope.
+   Returns false if it diagnosed.  */
+
+bool
+check_terminating_specifier (location_t loc)
+{
+  tree id = get_identifier ("terminating");
+  tree entity = error_mark_node;
+  tree ns = lookup_qualified_name (std_node, get_identifier ("contracts"));
+  if (TREE_CODE (ns) == NAMESPACE_DECL)
+    ns = lookup_qualified_name (ns, get_identifier ("labels"));
+  if (TREE_CODE (ns) == NAMESPACE_DECL)
+    entity = strip_using_decl (lookup_qualified_name (ns, id));
+  if (!VAR_P (entity))
+    {
+      auto_diagnostic_group d;
+      error_at (loc, "no declaration of %<std::contracts::labels::"
+		"terminating%> precedes this assertion-control-specifier");
+      inform (loc, "%<std::contracts::labels::terminating%> is declared "
+	      "by %<<contracts>%>");
+      return false;
+    }
+
+  tree found = lookup_name (id);
+  if (found)
+    found = strip_using_decl (found);
+  if (found && found != entity)
+    {
+      auto_diagnostic_group d;
+      error_at (loc, "unqualified lookup of %<terminating%> from this "
+		"assertion-control-specifier finds a declaration other "
+		"than %<std::contracts::labels::terminating%>");
+      if (DECL_P (found))
+	inform (DECL_SOURCE_LOCATION (found), "%q#D declared here", found);
+      return false;
+    }
+  return true;
 }
 
 /* Update condition of a late-parsed contract and postcondition variable,

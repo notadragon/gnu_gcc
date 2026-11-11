@@ -1,0 +1,16 @@
+[
+  {"match": {"caller": true, "location": "p4451-callerside-later.C:39"},
+   "output": {"semantic": "prove"}},
+  {"match": {"caller": true, "location": "p4451-callerside-later.C:43"},
+   "output": {"semantic": "diagnose"}},
+  {"match": {"caller": true, "location": "p4451-callerside-later.C:47"},
+   "output": {"semantic": "assume"}},
+  {"match": {"caller": true, "location": "p4451-callerside-later.C:51"},
+   "output": {"semantic": "enforce"}},
+  {"match": {"caller": true, "location": "p4451-callerside-later.C:55"},
+   "output": {"semantic": "quick_enforce"}},
+  {"match": {"caller": true, "location": "p4451-callerside-later.C:59"},
+   "output": {"semantic": "noexcept_observe"}},
+  {"match": {"caller": true, "location": "p4451-callerside-later.C:63"},
+   "output": {"semantic": "noexcept_enforce"}}
+]

@@ -131,6 +131,12 @@ enum detection_mode : uint16_t {
 #define DECL_HAS_CONTRACTS_P(NODE) \
   (get_fn_contract_specifiers (NODE) != NULL_TREE)
 
+/* True if NODE is a terminating contract assertion (P4451): one whose
+   assertion-control-specifier is `< terminating >' while -fcontracts-p3400,
+   under which that is an ordinary label, is off.  Its allowed semantics are
+   in CONTRACT_ALLOWED_MASK; it has no CONTRACT_LABEL.  */
+#define CONTRACT_TERMINATING_P(NODE) \
+  (TREE_LANG_FLAG_5 (CONTRACT_CHECK (NODE)))
 
 /* True iff the condition of the contract NODE is not yet parsed.  */
 #define CONTRACT_CONDITION_DEFERRED_P(NODE) \
@@ -212,6 +218,8 @@ extern void update_late_contract		(tree, tree, tree, cp_expr,
 extern void check_redecl_contract		(tree, tree);
 extern void check_contract_on_defaulted_or_deleted (tree, bool);
 extern tree invalidate_contract			(tree);
+extern void mark_contract_terminating		(tree);
+extern bool check_terminating_specifier		(location_t);
 extern tree copy_and_remap_contracts		(tree, tree, contract_match_kind = cmk_all);
 extern tree finish_contract_control_expr	(location_t, tree);
 extern void diagnose_coroutine_postcondition_params (tree);

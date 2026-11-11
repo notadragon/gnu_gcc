@@ -1156,6 +1156,10 @@ c_cpp_builtins (cpp_reader *pfile)
 	  long cpp_contracts = 202502L;
 	  if (flag_contracts_p3097)
 	    cpp_contracts = MAX (cpp_contracts, 202611L);
+	  /* D4451R0's wording gives P4451's value as 202611L, which is used
+	     as is.  */
+	  if (flag_contracts_p4451)
+	    cpp_contracts = MAX (cpp_contracts, 202611L);
 	  char buf[sizeof ("__cpp_contracts=") + 21];
 	  sprintf (buf, "__cpp_contracts=%ldL", cpp_contracts);
 	  cpp_define (pfile, buf);
@@ -1168,6 +1172,11 @@ c_cpp_builtins (cpp_reader *pfile)
 	cpp_define (pfile, "__gcc_contracts_p3290=202611L");
       if (flag_contracts && flag_contracts_p3400)
 	cpp_define (pfile, "__cpp_contracts_labels=202611L");
+      /* P4451 raises __cpp_contracts, which the library cannot key on (P3097
+	 raises it too), so a vendor macro tells <contracts> to declare its
+	 terminating label and raise __cpp_lib_contracts.  */
+      if (flag_contracts && flag_contracts_p4451)
+	cpp_define (pfile, "__gcc_contracts_p4451=202611L");
       if (flag_contracts && flag_contracts_p3098)
 	cpp_define (pfile, "__cpp_contracts_postcondition_captures=202611L");
       if (flag_contracts && flag_contracts_p4283)

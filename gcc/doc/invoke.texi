@@ -3790,6 +3790,8 @@ also enable @option{-fcontracts}, in any C++ dialect.
 @opindex fno-contracts-p4301
 @opindex fcontracts-p4405
 @opindex fno-contracts-p4405
+@opindex fcontracts-p4451
+@opindex fno-contracts-p4451
 @item -fcontracts-p3097
 @itemx -fcontracts-p3098
 @itemx -fcontracts-p3099
@@ -3799,6 +3801,26 @@ also enable @option{-fcontracts}, in any C++ dialect.
 @itemx -fcontracts-p4298
 @itemx -fcontracts-p4301
 @itemx -fcontracts-p4405
+@itemx -fcontracts-p4451
+Under @option{-fcontracts-p4451} without @option{-fcontracts-p3400}, the
+only assertion-control-specifier accepted after @code{pre}, @code{post} or
+@code{contract_assert} is @code{<terminating>}, which makes the assertion
+a terminating contract assertion: it allows the semantics
+@code{std::contracts::labels::terminating} allows, @code{enforce} and
+@code{quick_enforce} (and @code{prove}, under @option{-fcontracts-p4405}),
+so a selected @code{ignore} or @code{observe}, whether by these options, a
+configuration or a dynamic selection, becomes @code{enforce}.  Whether a
+variable's initializer is a constant expression is still decided as if
+with @code{ignore}.  A declaration of
+@code{std::contracts::labels::terminating}, from @code{<contracts>} or the
+@code{std} module, must precede the specifier, and unqualified lookup of
+@code{terminating} from it must find nothing else; for a member function
+both are checked with the class complete.  Two declarations of a function
+must agree on which of its contract assertions are terminating.  Under
+@option{-fcontracts-p3400}, @code{terminating} is instead the
+assertion-control label of that name, with the same effect.  Without
+either option the specifier is an error.
+
 @opindex fcontracts-prove-fold
 @opindex fno-contracts-prove-fold
 @opindex fcontracts-prove-assume

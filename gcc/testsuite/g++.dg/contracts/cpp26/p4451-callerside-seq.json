@@ -1,0 +1,13 @@
+[
+  {"match": {"caller": false, "location": "p4451-callerside-seq.C:59"},
+   "output": {"semantic": "ignore"}},
+  {"match": {"caller": {"namespace": "c1"},
+             "location": "p4451-callerside-seq.C:58,64"},
+   "output": {"semantic": "observe"}},
+  {"match": {"caller": {"namespace": "c2"},
+             "location": "p4451-callerside-seq.C:59,65"},
+   "output": {"semantic": "observe"}},
+  {"match": {"caller": {"namespace": "c12"},
+             "location": "p4451-callerside-seq.C:58-59,64-65"},
+   "output": {"semantic": "observe"}}
+]

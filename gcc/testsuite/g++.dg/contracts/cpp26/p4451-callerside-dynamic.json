@@ -1,0 +1,7 @@
+[
+  {"match": {"caller": true, "location": "p4451-callerside-dynamic.C:53,57"},
+   "output": {"semantic": "ignore",
+              "dynamic": {"linkage": "C++", "name": "p4451_callerside_sel"}}},
+  {"match": {"caller": true, "location": "p4451-callerside-dynamic.C:54"},
+   "output": {"semantic": "observe"}}
+]

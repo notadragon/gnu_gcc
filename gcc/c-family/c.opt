@@ -2083,6 +2083,10 @@ fcontracts-p4405
 C ObjC C++ ObjC++ Var(flag_contracts_p4405) Init(0) LangEnabledBy(C ObjC C++ ObjC++,fcontracts-p3850)
 Enable P4405 prove and diagnose evaluation semantics.
 
+fcontracts-p4451
+C++ ObjC++ Var(flag_contracts_p4451) Init(0) LangEnabledBy(C++ ObjC++,fcontracts-p3850 || fcontracts-p3400)
+Enable P4451 terminating contract assertions.
+
 fcontracts-prove-assume
 C ObjC C++ ObjC++ Var(flag_contracts_prove_assume) Init(0) LangEnabledBy(C ObjC C++ ObjC++,fcontracts-p4405)
 Treat a prove or diagnose evaluation whose predicate is soundly proven as an assumption (P4405).

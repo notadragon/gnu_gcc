@@ -1050,6 +1050,13 @@ export namespace std::contracts
   using std::contracts::is_continuing;
   using std::contracts::invoke_default_contract_violation_handler;
 }
+#if defined(__gcc_contracts_p4451) && !__cpp_lib_contracts_labels
+// P4451 without P3400: the one label <contracts> declares.
+export namespace std::contracts::labels
+{
+  using std::contracts::labels::terminating;
+}
+#endif // __gcc_contracts_p4451 && !__cpp_lib_contracts_labels
 #endif // __cpp_lib_contracts
 
 #if __cpp_lib_contracts_api

@@ -2476,6 +2476,15 @@ ftms = {
 // whose own FTM is cxxmin = 20.
 ftms = {
   name = contracts;
+  // P4451 raises the value to D4451R0's 202611, a concrete value in that
+  // paper's wording (not a private date); __gcc_contracts_p4451 is the
+  // compiler's signal, as __cpp_contracts is raised by P3097 too.
+  values = {
+    v = 202611;
+    cxxmin = 20;
+    extra_cond = "__cpp_contracts >= 202502L "
+    "&& defined(__gcc_contracts_p4451)";
+  };
   values = {
     v = 202502;
     cxxmin = 20;

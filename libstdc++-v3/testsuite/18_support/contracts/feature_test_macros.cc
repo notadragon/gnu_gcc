@@ -12,6 +12,7 @@
 
 #ifndef __cpp_lib_contracts
 # error "__cpp_lib_contracts is not defined"
+#elif __cpp_lib_contracts <= 202502L // raised by P4451, which P3850 implies
 # error "__cpp_lib_contracts has the wrong value"
 #endif
 #ifndef __cpp_lib_contracts_message

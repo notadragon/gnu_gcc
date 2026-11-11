@@ -298,6 +298,15 @@ namespace contracts
   void
   invoke_default_contract_violation_handler(const contract_violation&) noexcept;
 
+#if defined(__gcc_contracts_p4451) && !defined(__cpp_lib_contracts_labels)
+  // P4451 without P3400: labels declares terminating alone, of an internal
+  // type and in an inline namespace, so never P3400's labels::terminating.
+  struct __terminating_label_t { explicit __terminating_label_t() = default; };
+  namespace labels::inline __p4451
+  {
+    inline constexpr __terminating_label_t terminating{};
+  }
+#endif
 
 } // namespace contracts
 

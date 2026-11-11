@@ -34377,6 +34377,11 @@ cp_parser_late_contract_condition (cp_parser *parser, tree fn, tree contract)
     if (TREE_CODE (label) == DEFERRED_PARSE)
       cp_parser_late_assertion_control_label (parser, contract, label);
 
+  /* P4451: a terminating assertion's lookup checks, for the same reason; a
+     lambda's ran at the specifier.  */
+  if (CONTRACT_TERMINATING_P (contract) && !LAMBDA_FUNCTION_P (fn))
+    check_terminating_specifier (EXPR_LOCATION (contract));
+
   /* Replay a deferred requires-clause (P4283) first.  Like the predicate it
      may name the function's parameters, which are in scope here and were
      not where it was written; unlike the predicate it is not part of the
@@ -35070,6 +35075,56 @@ cp_parser_assertion_control_specifier (cp_parser *parser)
   return label_expr;
 }
 
+/* P4451: parse an assertion-control-specifier `< terminating >' while
+   -fcontracts-p3400, under which it is an ordinary label, is off.
+   `terminating' is an identifier with special meaning there, not looked up
+   as an expression.  Returns true if one was consumed.  Under
+   -fcontracts-p4451 any other specifier, and without it `<terminating>', is
+   diagnosed and skipped; anything else is left to
+   cp_parser_assertion_control_specifier.  */
+
+static bool
+cp_parser_terminating_specifier (cp_parser *parser)
+{
+  if (flag_contracts_p3400
+      || !cp_lexer_next_token_is (parser->lexer, CPP_LESS))
+    return false;
+
+  location_t loc = cp_lexer_peek_token (parser->lexer)->location;
+  cp_token *name = cp_lexer_peek_nth_token (parser->lexer, 2);
+  bool terminating
+    = (name->type == CPP_NAME
+       && id_equal (name->u.value, "terminating")
+       && cp_lexer_nth_token_is (parser->lexer, 3, CPP_GREATER));
+  if (terminating && flag_contracts_p4451)
+    {
+      cp_lexer_consume_token (parser->lexer);
+      cp_lexer_consume_token (parser->lexer);
+      cp_lexer_consume_token (parser->lexer);
+      return true;
+    }
+  if (flag_contracts_p4451)
+    error_at (loc, "only %<<terminating>%> is allowed as an "
+	      "assertion-control-specifier without %<-fcontracts-p3400%>");
+  else if (terminating)
+    error_at (loc, "assertion-control-specifier %<<terminating>%> "
+	      "requires %<-fcontracts-p4451%>");
+  else
+    return false;
+  cp_parser_skip_assertion_control_specifier (parser);
+  return false;
+}
+
+/* Recover from a requires-clause on a contract assertion that has been
+   diagnosed and will not be parsed: consume it, and whatever sits between
+   it and the predicate, leaving the predicate's ( as the next token.  The
+   next token is the clause's `requires'.
+
+   A paren skip from `requires' is not enough.  The constraint need not be
+   parenthesized at all, and cp_parser_skip_to_closing_parenthesis started
+   on a ( steps into it and carries on to the next unmatched ) or ; --
+   through the predicate, any later specifier, and a function body.  */
+
 static void
 cp_parser_skip_rejected_contract_requires_clause (cp_parser *parser)
 {
@@ -35268,6 +35323,12 @@ cp_parser_contract_assert (cp_parser *parser, cp_token *token)
   token = cp_lexer_consume_token (parser->lexer);
   location_t loc = token->location;
 
+  /* P4451: `< terminating >' without P3400.  Its lookup checks run here,
+     where the predicate is parsed.  */
+  bool terminating = cp_parser_terminating_specifier (parser);
+  if (terminating)
+    check_terminating_specifier (loc);
+
   /* Parse optional assertion-control-specifier: < constant-expression >  */
   tree label = cp_parser_assertion_control_specifier (parser);
 
@@ -35337,6 +35398,8 @@ cp_parser_contract_assert (cp_parser *parser, cp_token *token)
   tree contract = grok_contract (cont_assert,
 			    /*result*/NULL_TREE, condition, loc, message,
 			    label, requires_clause, comment);
+  if (terminating && contract && contract != error_mark_node)
+    mark_contract_terminating (contract);
   processing_postcondition_predicate = old_pc;
   pop_bindings_and_leave_scope ();
 
@@ -35696,6 +35759,13 @@ cp_parser_function_contract_specifier (cp_parser *parser, bool defer)
      same answer.  See the comment on the deferral below.  */
   const bool defer_p
     = defer || (current_class_type && TYPE_BEING_DEFINED (current_class_type));
+
+  /* P4451: `< terminating >' without P3400.  Its lookup checks run where a
+     label would be parsed: here for a lambda, otherwise in
+     cp_parser_late_contract_condition.  */
+  bool terminating = cp_parser_terminating_specifier (parser);
+  if (terminating && !defer)
+    check_terminating_specifier (loc);
 
   /* Parse optional assertion-control-specifier: < constant-expression >
      At its grammar position it is deferred with the predicate, which is
@@ -36072,6 +36142,9 @@ cp_parser_function_contract_specifier (cp_parser *parser, bool defer)
       contract = grok_contract (contract_name, identifier,
 				condition, loc, /*message*/NULL_TREE, label,
 				requires_clause);
+      if (terminating && contract != error_mark_node)
+	mark_contract_terminating (contract);
+
       /* Carry any attribute-specifier-seq written on the result name to the
 	 late parse, which is where the result VAR_DECL is built.  Before
 	 this the deferred path had nowhere to put them and silently dropped
@@ -36202,6 +36275,9 @@ cp_parser_function_contract_specifier (cp_parser *parser, bool defer)
       contract = grok_contract (contract_name, result,
 				condition, loc, message, label,
 				requires_clause, comment);
+      if (terminating && contract != error_mark_node)
+	mark_contract_terminating (contract);
+
       /* Store captures on the postcondition node.  */
       if (!captures_error && captures && contract != error_mark_node
 	  && POSTCONDITION_P (contract))
