@@ -226,8 +226,8 @@ in the following sections.
 -fcontracts
 -fcontract-analysis-semantic=@r{[}ignore@r{|}diagnose@r{|}prove@r{]}
 -fno-contract-analysis-skip-dead-calls
+-fcontract-evaluation-semantic=@r{[}ignore@r{|}observe@r{|}enforce@r{|}quick_enforce@r{|}assume@r{|}noexcept_enforce@r{|}noexcept_observe@r{|}prove@r{|}diagnose@r{]}
 -fcontract-checks-outlined
--fcontract-evaluation-semantic=@r{[}ignore@r{|}observe@r{|}enforce@r{|}quick_enforce@r{]}
 -fcontract-disable-optimized-checks
 -fno-contract-bypass-rethrowing-local-handler
 -fcontract-comment-from-expression
@@ -236,6 +236,12 @@ in the following sections.
 -fcontract-group-evaluation-semantic=@var{group}:@var{semantic}@r{[},@dots{}@r{]}
 -fcontract-configuration=@var{json}  -fcontract-configuration-file=@var{file}
 -fcontracts-allow-assume
+-fcontracts-p3097  -fcontracts-p3098  -fcontracts-p3099  -fcontracts-p3100
+-fcontracts-p3290  -fcontracts-p3400  -fcontracts-p3850  -fcontracts-p4283
+-fcontracts-p4298  -fcontracts-p4301  -fcontracts-p4405  -fcontracts-p4451
+-fcontracts-prove-assume  -fcontracts-prove-fold  -fcontracts-prove-override
+-fcontracts-prove-shadow  -fcontracts-prove-callee-premises
+-fcontracts-prove-optimize=@r{[}0@r{|}1@r{|}2@r{|}3@r{|}follow@r{]}
 -fcoroutines  -fdiagnostics-all-candidates
 -fno-elide-constructors
 -fno-enforce-eh-specs
@@ -396,6 +402,8 @@ Objective-C and Objective-C++ Dialects}.
 -Wclobbered  -Wcomment
 -Wcompare-distinct-pointer-types
 -Wno-complain-wrong-lang  -Wconstant-logical-operand
+-Wno-contract-configuration  -Wno-contract-invalid-label-facet
+-Wno-contract-unproven
 -Wconversion  -Wno-coverage-mismatch  -Wno-cpp
 -Wdangling-else  -Wdangling-pointer  -Wdangling-pointer=@var{n}
 -Wdate-time
@@ -3406,6 +3414,21 @@ handle_contract_violation (const std::contracts::contract_violation&);
 As an extension, @code{__pre} and @code{__post} may be written in place
 of @code{pre} and @code{post} wherever contracts are enabled.
 
+@cindex @file{libcontracts.so.1}
+A program that @command{g++} links with contracts enabled (by
+@option{-std=c++26} or a later standard, @option{-fcontracts}, or any of
+the @option{-fcontracts-p@var{nnnn}} options below), and a C program
+linked with @option{-fcontracts-p4299} or an option that enables it,
+depends on the shared contracts runtime @file{libcontracts.so.1}, which
+is installed with GCC's other shared libraries, in
+@file{@var{prefix}/lib64} on x86-64 GNU/Linux.  When GCC is installed
+outside the system's library path, the dynamic loader does not find it
+and the program fails to start, unless the program is linked with
+@option{-Wl,-rpath,@var{prefix}/lib64} or run with that directory in
+@env{LD_LIBRARY_PATH}.  This is the same requirement as for the
+installation's @file{libstdc++.so.6}: without it, a program that does
+start uses the system's @file{libstdc++.so.6} instead.
+
 @opindex fcontract-evaluation-semantic
 @item -fcontract-evaluation-semantic=@var{semantic}
 Set the semantic with which contracts will be evaluated to @var{semantic}.
@@ -3808,6 +3831,17 @@ each of those @option{-fcontracts-p@var{nnnn}} options individually.  In
 C it enables contracts for C and the options below that apply to C
 (@pxref{C Dialect Options}).  This option and each of the options below
 also enable @option{-fcontracts}, in any C++ dialect.
+These options add up, and their @option{-fno-} forms are always accepted;
+giving one of them positively with a final @option{-fno-contracts} is an
+error, as is @option{-fno-contracts-p4451} with @option{-fcontracts-p3400}
+in effect.  The other contracts options have no effect when contracts are
+disabled, nor the P4405 strategies below without @option{-fcontracts-p4405},
+and GCC warns when one of them is given then, except in its negative
+@option{-fno-} form.  In C, the per-paper options that apply to C relate
+to @option{-fcontracts-p4299} in the same way.
+@option{-fcontract-violation-information} is not among those options: it
+takes effect whatever the contracts options, and GCC never warns for it.
+
 @opindex fcontracts-p3097
 @opindex fno-contracts-p3097
 @opindex fcontracts-p3098
@@ -3841,6 +3875,42 @@ also enable @option{-fcontracts}, in any C++ dialect.
 @itemx -fcontracts-p4301
 @itemx -fcontracts-p4405
 @itemx -fcontracts-p4451
+Enable an individual proposed extension to the contracts facility, named
+after the WG21 paper that proposes it.  Where contracts are enabled, each
+defines a feature-test macro, to a date of the form @code{YYYYMML}:
+
+@multitable @columnfractions .12 .48 .40
+@headitem Paper @tab Extension @tab Macro
+@item P3097 @tab contracts on virtual functions
+@tab @code{__cpp_contracts}, raised from @code{202502L}
+@item P3098 @tab postcondition captures
+@tab @code{__cpp_contracts_postcondition_captures}
+@item P3099 @tab the @code{comment} and @code{message} accessors
+@tab @code{__cpp_contracts_message}
+@item P3100 @tab implicit contract assertions for undefined behaviour
+@tab @code{__gcc_contracts_p3100}
+@item P3290 @tab integration with @code{assert}
+@tab @code{__gcc_contracts_p3290}
+@item P3400 @tab assertion-control labels
+@tab @code{__cpp_contracts_labels}
+@item P4283 @tab @code{requires} clauses on contract assertions
+@tab @code{__cpp_contracts_requires}
+@item P4298 @tab non-throwing evaluation semantics
+@tab @code{__cpp_contracts_nonthrowing_semantics}
+@item P4301 @tab context reports for the violation handler
+@tab @code{__cpp_contracts_report}
+@item P4405 @tab the @code{prove} and @code{diagnose} evaluation semantics
+@tab @code{__cpp_contracts_prove}
+@item P4451 @tab terminating contract assertions, @code{pre<terminating>};
+@option{-fcontracts-p3400} implies it (@code{terminating} is then a label)
+@tab @code{__cpp_contracts}, raised from @code{202502L} to at least
+@code{202611L}, and @code{__gcc_contracts_p4451}
+@end multitable
+
+@option{-fcontracts-p3100} and @option{-fcontracts-p4298} are accepted for
+C and Objective-C too (@pxref{C Dialect Options}).
+So is @option{-fcontracts-p4405}.
+
 Under @option{-fcontracts-p4451} without @option{-fcontracts-p3400}, the
 only assertion-control-specifier accepted after @code{pre}, @code{post} or
 @code{contract_assert} is @code{<terminating>}, which makes the assertion

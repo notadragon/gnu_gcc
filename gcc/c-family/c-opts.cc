@@ -1331,6 +1331,183 @@ c_common_post_options (const char **pfilename)
   SET_OPTION_IF_UNSET (&global_options, &global_options_set,
 		       flag_range_for_ext_temps, cxx_dialect >= cxx23);
 
+  /* Contracts are in C++26, so C++26 mode enables -fcontracts.  Only ever turn
+     it on here -- never force it off -- so the LangEnabledBy implications from
+     the per-paper sub-flags (each -fcontracts-pNNNN implies -fcontracts, and
+     -fcontracts-p3850 implies the individual paper flags; see c.opt) are
+     preserved in pre-C++26 dialects.  Those auto-handlers run during option
+     handling and do not mark flag_contracts as explicitly set, so a plain
+     SET_OPTION_IF_UNSET (..., cxx_dialect >= cxx26) here would clobber them
+     back to 0 for -std=c++23 &c.  An explicit -fno-contracts still wins (it
+     marks the option set, which both this guard and the auto-handlers
+     honor).  */
+  if (cxx_dialect >= cxx26)
+    SET_OPTION_IF_UNSET (&global_options, &global_options_set,
+			 flag_contracts, true);
+
+  /* The contracts option rule (DECISIONS.md E175-E177).  The options that
+     imply another contracts option are additive: a LangEnabledBy
+     implication in c.opt is decided by whichever implying option comes
+     last, so -fcontracts-p3400 -fno-contracts-p3850 would leave
+     -fcontracts-p4451 off, and before C++26 a trailing -fno-contracts-pNNNN
+     would turn -fcontracts off while another per-paper option is on.
+     Decide them here, from the final values.
+
+     In C++ every per-paper option turns -fcontracts on, and one left on is
+     an error when contracts end up off, which only an explicit, final
+     -fno-contracts does; a negative per-paper option is always allowed.  In
+     C, -fcontracts-p3100, -fcontracts-p4298, -fcontracts-p4405 and the
+     umbrella -fcontracts-p3850, which implies the first three there (see
+     c.opt), relate to -fcontracts-p4299 in the same way; the umbrella
+     turns C contracts on even with all three disabled.
+
+     P4451 is on when it is given, or when P3400 or P3850 is on.  P3400
+     subsumes P4451, so an explicit -fno-contracts-p4451 may turn off only
+     what -fcontracts-p3850 adds: with P3400 on it is an error.  */
+  struct contracts_paper_option
+  {
+    const char *name;
+    bool on;
+    bool given;
+  };
+#define CONTRACTS_PAPER_OPTION(N) \
+  { "-fcontracts-" #N, flag_contracts_##N != 0, \
+    OPTION_SET_P (flag_contracts_##N) != 0 }
+  if (c_dialect_cxx ())
+    {
+      if (!OPTION_SET_P (flag_contracts_p4451))
+	flag_contracts_p4451 = flag_contracts_p3400 || flag_contracts_p3850;
+
+      /* This list is c.opt's LangEnabledBy list for -fcontracts (and
+	 g++spec.cc's).  */
+      const contracts_paper_option papers[] = {
+	CONTRACTS_PAPER_OPTION (p3097), CONTRACTS_PAPER_OPTION (p3098),
+	CONTRACTS_PAPER_OPTION (p3099), CONTRACTS_PAPER_OPTION (p3100),
+	CONTRACTS_PAPER_OPTION (p3290), CONTRACTS_PAPER_OPTION (p3400),
+	CONTRACTS_PAPER_OPTION (p3850), CONTRACTS_PAPER_OPTION (p4283),
+	CONTRACTS_PAPER_OPTION (p4298), CONTRACTS_PAPER_OPTION (p4301),
+	CONTRACTS_PAPER_OPTION (p4405), CONTRACTS_PAPER_OPTION (p4451)
+      };
+      for (const contracts_paper_option &paper : papers)
+	if (paper.on)
+	  SET_OPTION_IF_UNSET (&global_options, &global_options_set,
+			       flag_contracts, true);
+
+      if (!flag_contracts)
+	{
+	  /* A per-paper option left on only by -fcontracts-p3850 (or P4451
+	     by P3400) is diagnosed through the option that implied it.  */
+	  for (const contracts_paper_option &paper : papers)
+	    if (paper.on && paper.given)
+	      error ("%qs cannot be combined with %<-fno-contracts%>",
+		     paper.name);
+	}
+      else if (!flag_contracts_p4451 && flag_contracts_p3400)
+	{
+	  if (OPTION_SET_P (flag_contracts_p3400))
+	    error ("%<-fno-contracts-p4451%> cannot be combined with "
+		   "%<-fcontracts-p3400%>, which subsumes P4451");
+	  else
+	    error ("%<-fno-contracts-p4451%> cannot be combined with "
+		   "%<-fcontracts-p3850%>, which implies "
+		   "%<-fcontracts-p3400%>; also pass "
+		   "%<-fno-contracts-p3400%>");
+	}
+    }
+  else
+    {
+      const contracts_paper_option papers[] = {
+	CONTRACTS_PAPER_OPTION (p3100), CONTRACTS_PAPER_OPTION (p3850),
+	CONTRACTS_PAPER_OPTION (p4298), CONTRACTS_PAPER_OPTION (p4405)
+      };
+      for (const contracts_paper_option &paper : papers)
+	if (paper.on)
+	  SET_OPTION_IF_UNSET (&global_options, &global_options_set,
+			       flag_contracts_p4299, true);
+
+      if (!flag_contracts_p4299)
+	for (const contracts_paper_option &paper : papers)
+	  if (paper.on && paper.given)
+	    error ("%qs cannot be combined with %<-fno-contracts-p4299%>",
+		   paper.name);
+    }
+#undef CONTRACTS_PAPER_OPTION
+
+  /* The contracts options that mean nothing when contracts end up off, and
+     the P4405 sub-options given positively when P4405 ends up off, have no
+     effect; say so.  The configuration options are diagnosed with the
+     configuration below.  -fcontract-violation-information= is not among
+     them: <contracts.h> and <cassert> honour it whatever the contracts
+     options.  A -fno- form asks for nothing, so it does not warn; a joined
+     option warns for any value, its default included.  */
+  {
+    const bool contracts_on
+      = c_dialect_cxx () ? flag_contracts : flag_contracts_p4299;
+    const char *const contracts_name
+      = c_dialect_cxx () ? "-fcontracts" : "-fcontracts-p4299";
+    struct contracts_dependent_option
+    {
+      const char *name;
+      bool given;
+      bool on;
+      bool cxx_only;
+    };
+#define CONTRACTS_DEPENDENT_OPTION(NAME, VAR, CXX_ONLY) \
+  { "-f" NAME, global_options_set.x_##VAR != 0, \
+    global_options.x_##VAR != 0, CXX_ONLY }
+    const contracts_dependent_option dependent[] = {
+      CONTRACTS_DEPENDENT_OPTION ("contracts-allow-assume",
+				  flag_contracts_allow_assume, false),
+      CONTRACTS_DEPENDENT_OPTION ("contract-evaluation-semantic=",
+				  flag_contract_evaluation_semantic, false),
+      CONTRACTS_DEPENDENT_OPTION ("contract-analysis-semantic=",
+				  flag_contract_analysis_semantic, false),
+      CONTRACTS_DEPENDENT_OPTION ("contracts-client-check=",
+				  flag_contract_client_check, false),
+      CONTRACTS_DEPENDENT_OPTION ("contracts-definition-check=",
+				  flag_contracts_definition_check, false),
+      CONTRACTS_DEPENDENT_OPTION ("contract-checks-outlined",
+				  flag_contract_checks_outlined, true),
+      CONTRACTS_DEPENDENT_OPTION ("contract-disable-optimized-checks",
+				  flag_contract_disable_optimized_checks, true),
+      CONTRACTS_DEPENDENT_OPTION ("contract-bypass-rethrowing-local-handler",
+				  flag_contract_bypass_rethrowing_local_handler,
+				  true),
+      CONTRACTS_DEPENDENT_OPTION ("contract-comment-from-expression",
+				  flag_contract_comment_from_expression, true)
+    };
+    const contracts_dependent_option p4405_dependent[] = {
+      CONTRACTS_DEPENDENT_OPTION ("contracts-prove-fold",
+				  flag_contracts_prove_fold, false),
+      CONTRACTS_DEPENDENT_OPTION ("contracts-prove-shadow",
+				  flag_contracts_prove_shadow, false),
+      CONTRACTS_DEPENDENT_OPTION ("contracts-prove-override",
+				  flag_contracts_prove_override, false),
+      CONTRACTS_DEPENDENT_OPTION ("contracts-prove-callee-premises",
+				  flag_contracts_prove_callee_premises, false),
+      CONTRACTS_DEPENDENT_OPTION ("contracts-prove-assume",
+				  flag_contracts_prove_assume, false),
+      CONTRACTS_DEPENDENT_OPTION ("contracts-prove-optimize=",
+				  flag_contracts_prove_optimize, false),
+      CONTRACTS_DEPENDENT_OPTION ("contract-analysis-skip-dead-calls",
+				  flag_contract_analysis_skip_dead_calls, true)
+    };
+#undef CONTRACTS_DEPENDENT_OPTION
+    if (!contracts_on)
+      for (const contracts_dependent_option &opt : dependent)
+	if (opt.given && (c_dialect_cxx () || !opt.cxx_only)
+	    && (opt.on || opt.name[strlen (opt.name) - 1] == '='))
+	  /* A joined option is named without its argument.  */
+	  warning (0, "%qs has no effect without %qs", opt.name,
+		   contracts_name);
+    if (!contracts_on || !flag_contracts_p4405)
+      for (const contracts_dependent_option &opt : p4405_dependent)
+	if (opt.given && (c_dialect_cxx () || !opt.cxx_only)
+	    && (opt.on || opt.name[strlen (opt.name) - 1] == '='))
+	  warning (0, "%qs has no effect without %<-fcontracts-p4405%>",
+		   opt.name);
+  }
+
   /* The P4405 proof optimization level (DECISIONS.md E162-E168, E205):
      -fcontracts-prove-optimize= gives it; by default it is the
      code-generation level but never below 2, and with follow it is the
@@ -1370,9 +1547,6 @@ c_common_post_options (const char **pfilename)
 	return c_contract_proof_optimization (flag_contracts_prove_optimize);
       };
   }
-  /* Contracts are in C++26.  */
-  SET_OPTION_IF_UNSET (&global_options, &global_options_set,
-		       flag_contracts, cxx_dialect >= cxx26);
 
   /* EnabledBy unfortunately can't specify value to use if set and
      LangEnabledBy can't specify multiple options with &&.  For -Wunused
