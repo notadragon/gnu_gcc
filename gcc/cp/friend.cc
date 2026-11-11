@@ -21,6 +21,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "cp-tree.h"
+#include "contracts.h"
 
 /* Friend data structures are described in cp-tree.h.  */
 
@@ -582,10 +583,30 @@ do_friend (tree scope, tree declarator, tree decl,
 	       validity of the declaration later.  */
 	    decl = push_template_decl (decl, /*is_friend=*/true);
 	  else
-	    decl = check_classfn (ctype, decl,
-				  template_member_p
-				  ? current_template_parms
-				  : NULL_TREE);
+	    {
+	      tree fdecl = decl;
+	      decl = check_classfn (ctype, decl,
+				    template_member_p
+				    ? current_template_parms
+				    : NULL_TREE);
+
+	      /* A qualified friend declaration redeclares a member that
+		 already exists: check_classfn looks it up and returns it,
+		 and FDECL is discarded without duplicate_decls ever running.
+		 That is the only place a redeclaration's contracts are
+		 normally checked, so this case had to be checked here or
+		 not at all -- and it was not at all.  The seq on
+		 "friend void C::f (int n) pre (...);" was accepted however
+		 it was written: never compared with the member's, and, once
+		 predicates became universally deferred, never even parsed,
+		 so an undeclared name in it went unreported.  */
+	      if (flag_contracts
+		  && decl
+		  && decl != error_mark_node
+		  && decl != fdecl
+		  && TREE_CODE (decl) == FUNCTION_DECL)
+		check_redecl_contract (fdecl, decl);
+	    }
 
 	  if ((template_member_p
 	       /* Always pull out the TEMPLATE_DECL if we have a friend
