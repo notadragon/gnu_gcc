@@ -2783,6 +2783,16 @@
 #endif /* !defined(__cpp_lib_contracts_labels) */
 #undef __glibcxx_want_contracts_labels
 
+#if !defined(__cpp_lib_contracts_report)
+# if (__cplusplus >= 202002L) && (defined(__cpp_contracts_report))
+#  define __glibcxx_contracts_report 202611L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_contracts_report)
+#   define __cpp_lib_contracts_report 202611L
+#  endif
+# endif
+#endif /* !defined(__cpp_lib_contracts_report) */
+#undef __glibcxx_want_contracts_report
+
 #if !defined(__cpp_lib_replaceable_contract_violation_handler)
 # if (__cplusplus >= 202002L) && (__cpp_contracts >= 202502L && __ELF__)
 #  define __glibcxx_replaceable_contract_violation_handler 202603L
