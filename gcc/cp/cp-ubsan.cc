@@ -26,6 +26,9 @@ along with GCC; see the file COPYING3.  If not see
 #include "stringpool.h"
 #include "attribs.h"
 #include "asan.h"
+#include "opts.h"
+#include "c-family/contracts-config.h"
+#include "contracts.h"
 
 /* Test if we should instrument vptr access.  */
 
@@ -36,6 +39,14 @@ cp_ubsan_instrument_vptr_p (tree type)
     return false;
 
   if (!sanitize_flags_p (SANITIZE_VPTR))
+    return false;
+
+  /* P3100: a vptr check resolved to "assume" is not instrumented.  The
+     no_sanitize attribute c_apply_contract_sanitizer_assume adds before
+     genericization comes too late for the casts instrumented while
+     parsing.  */
+  if (flag_contracts_p3100
+      && resolved_sanitizer_semantic (SANITIZE_VPTR) == CES_ASSUME)
     return false;
 
   if (current_function_decl == NULL_TREE)
