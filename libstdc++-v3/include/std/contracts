@@ -320,6 +320,14 @@ _GLIBCXX_END_NAMESPACE_VERSION
 
 // The default location of a P3290 manual contract violation.
 #define _GLIBCXX_CONTRACTS_DEFAULT_LOCATION std::source_location::current()
+#ifdef __gcc_contracts_violation_information_none
+// -fcontract-violation-information=none: an empty default location, as the
+// compiler records for the contract violations it emits.  A location passed
+// explicitly is kept.
+#undef _GLIBCXX_CONTRACTS_DEFAULT_LOCATION
+#define _GLIBCXX_CONTRACTS_DEFAULT_LOCATION std::source_location()
+#endif
+
 namespace std _GLIBCXX_VISIBILITY(default)
 {
 _GLIBCXX_BEGIN_NAMESPACE_VERSION

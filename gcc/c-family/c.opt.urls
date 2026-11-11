@@ -1299,6 +1299,9 @@ UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-configuration-fil
 fcontract-group-evaluation-semantic=
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-group-evaluation-semantic)
 
+fcontract-violation-information=
+UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontract-violation-information)
+
 fcontracts-allow-assume
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-allow-assume)
 

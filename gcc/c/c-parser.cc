@@ -4766,6 +4766,16 @@ c_emit_contract_check (int semantic, tree selector, location_t loc, tree neg,
 		   build_predict_expr (PRED_COLD_LABEL, NOT_TAKEN), react);
   };
 
+  /* -fcontract-violation-information=none: the violation carries an empty
+     location and an empty comment.  */
+  if (flag_contract_violation_information)
+    {
+      comment = build_string_literal ("");
+      file = build_string_literal ("");
+      func = build_string_literal ("");
+      line = build_int_cst (unsigned_type_node, 0);
+    }
+
   if (semantic != -1)
     {
       /* P4405 proving hook: a terminating check another translation unit

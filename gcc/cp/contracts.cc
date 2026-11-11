@@ -11487,6 +11487,20 @@ build_contract_data_block_ctor (tree contract, tree *out_type)
   else
     message = build_zero_cst (const_string_type_node);
 
+  /* -fcontract-violation-information=none: the record carries an empty
+     location, an empty comment and no message, as if the contract had none.
+     Only the emitted record: CONTRACT_COMMENT and CONTRACT_MESSAGE stay as
+     they are for constant evaluation's diagnostics.  */
+  if (flag_contract_violation_information)
+    {
+      file_str = build_string_literal ("");
+      func_str = build_string_literal ("");
+      line_val = build_int_cst (unsigned_type_node, 0);
+      col_val = build_int_cst (unsigned_type_node, 0);
+      comment = build_string_literal ("");
+      message = build_zero_cst (const_string_type_node);
+    }
+
   /* Build the constructor.  */
   vec<constructor_elt, va_gc> *elts = NULL;
   tree f = next_aggregate_field (TYPE_FIELDS (block_type));

@@ -2012,6 +2012,19 @@ fcontract-group-evaluation-semantic=
 C C++ ObjC ObjC++ Joined RejectNegative
 -fcontract-group-evaluation-semantic=<group>:<semantic>[,...]	Set the evaluation semantic for contracts in the named groups.
 
+Enum
+Name(contract_violation_information) Type(int) UnknownError(the contract violation information must be %<full%> or %<none%>, not %qs)
+
+EnumValue
+Enum(contract_violation_information) String(full) Value(0)
+
+EnumValue
+Enum(contract_violation_information) String(none) Value(1)
+
+fcontract-violation-information=
+C C++ ObjC ObjC++ Joined RejectNegative Enum(contract_violation_information) Var(flag_contract_violation_information) Init(0)
+-fcontract-violation-information=[full|none]	Select whether a contract violation records its source location, comment and message (defaults to full).
+
 fcontracts-allow-assume
 C C++ ObjC ObjC++ Var(flag_contracts_allow_assume) Init(0)
 Allow the assume contract evaluation semantic to be used; a resolved assume is otherwise treated as ignore.

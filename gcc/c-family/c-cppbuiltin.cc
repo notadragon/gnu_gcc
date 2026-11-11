@@ -1257,6 +1257,13 @@ c_cpp_builtins (cpp_reader *pfile)
   /* P4299 C contracts honour -fcontracts-allow-assume too.  */
   if (!c_dialect_cxx () && flag_contracts_p4299 && flag_contracts_allow_assume)
     cpp_define (pfile, "__gcc_contracts_allow_assume");
+  /* -fcontract-violation-information=none: <cassert>'s contract path and
+     <contracts.h>'s P3290 convenience macros then pass an empty location
+     and comment, as the compiler does for the violations it emits.  Like
+     the option, in every language and whichever contracts flags are on;
+     a configuration rather than a feature, so it is 1, not a date.  */
+  if (flag_contract_violation_information)
+    cpp_define (pfile, "__gcc_contracts_violation_information_none");
   /* Note that we define this for C as well, so that we know if
      __attribute__((cleanup)) will interface with EH.  */
   if (flag_exceptions)

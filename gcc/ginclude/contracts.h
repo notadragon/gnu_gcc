@@ -114,6 +114,24 @@ void stdc_handle_quick_enforced_contract_violation_explicit (
   stdc_handle_quick_enforced_contract_violation_explicit ((comment), __FILE__, \
 							  __func__, __LINE__)
 
+/* -fcontract-violation-information=none: an empty location and comment, as
+   the compiler records for the contract violations it emits.  The comment
+   argument is still evaluated.  */
+#ifdef __gcc_contracts_violation_information_none
+#undef stdc_handle_enforced_contract_violation
+#define stdc_handle_enforced_contract_violation(comment) \
+  stdc_handle_enforced_contract_violation_explicit (((void) (comment), ""), \
+						    "", "", 0)
+#undef stdc_handle_observed_contract_violation
+#define stdc_handle_observed_contract_violation(comment) \
+  stdc_handle_observed_contract_violation_explicit (((void) (comment), ""), \
+						    "", "", 0)
+#undef stdc_handle_quick_enforced_contract_violation
+#define stdc_handle_quick_enforced_contract_violation(comment) \
+  stdc_handle_quick_enforced_contract_violation_explicit \
+    (((void) (comment), ""), "", "", 0)
+#endif
+
 #ifdef __cplusplus
 }
 #endif
