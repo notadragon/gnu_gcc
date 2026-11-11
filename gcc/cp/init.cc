@@ -3611,6 +3611,23 @@ build_new_1 (vec<tree, va_gc> **placement, tree type, tree nelts,
 		     (current_function_decl, input_location,
 		      "ub:expr.new.non.allocating.null"),
 		   alloc_expr));
+  /* P3100: and it must be suitably aligned for the object created there
+     ({basic.align.object.alignment}).  Where the initialization stores to
+     the object, the store is checked; this checks the pointer itself where
+     it does not -- default-initialization that performs no initialization,
+     or an empty class -- the .nostore leaf.  */
+  if (std_placement
+      && implicit_ub_check_context_p ()
+      && !cookie_size
+      && (!is_initialized || is_empty_class (elt_type))
+      && TYPE_ALIGN_UNIT (elt_type) > 1)
+    alloc_expr = (build_implicit_placement_new_align_check
+		  (input_location,
+		   resolve_implicit_contract_semantic
+		     (current_function_decl, input_location,
+		      "ub:basic.align.object.alignment.nostore"),
+		   alloc_expr, TYPE_ALIGN_UNIT (elt_type)));
+
   /* In the simple case, we can stop now.  */
   pointer_type = build_pointer_type (type);
   if (!cookie_size && !is_initialized && !member_delete_p && !do_clobber)
