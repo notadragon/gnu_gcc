@@ -1,0 +1,3 @@
+[
+  {"match": {"kind": "implicit", "namespace": "ign_ns", "group": "ub:conv.lval.valid.representation"}, "output": {"semantic": "ignore"}}
+]
