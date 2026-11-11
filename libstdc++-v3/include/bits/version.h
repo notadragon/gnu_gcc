@@ -2719,7 +2719,12 @@
 #undef __glibcxx_want_is_implicit_lifetime
 
 #if !defined(__cpp_lib_contracts)
-# if (__cplusplus >  202302L) && (__cpp_contracts >= 202502L)
+# if (__cplusplus >= 202002L) && (__cpp_contracts >= 202502L && defined(__gcc_contracts_p4451))
+#  define __glibcxx_contracts 202611L
+#  if defined(__glibcxx_want_all) || defined(__glibcxx_want_contracts)
+#   define __cpp_lib_contracts 202611L
+#  endif
+# elif (__cplusplus >= 202002L) && (__cpp_contracts >= 202502L)
 #  define __glibcxx_contracts 202502L
 #  if defined(__glibcxx_want_all) || defined(__glibcxx_want_contracts)
 #   define __cpp_lib_contracts 202502L
@@ -2729,12 +2734,12 @@
 #undef __glibcxx_want_contracts
 
 #if !defined(__cpp_lib_replaceable_contract_violation_handler)
-# if (__cplusplus >  202302L) && (__cpp_contracts >= 202502L && __ELF__)
+# if (__cplusplus >= 202002L) && (__cpp_contracts >= 202502L && __ELF__)
 #  define __glibcxx_replaceable_contract_violation_handler 202603L
 #  if defined(__glibcxx_want_all) || defined(__glibcxx_want_replaceable_contract_violation_handler)
 #   define __cpp_lib_replaceable_contract_violation_handler 202603L
 #  endif
-# elif (__cplusplus >  202302L) && (__cpp_contracts >= 202502L)
+# elif (__cplusplus >= 202002L) && (__cpp_contracts >= 202502L)
 #  define __glibcxx_replaceable_contract_violation_handler 0L
 #  if defined(__glibcxx_want_all) || defined(__glibcxx_want_replaceable_contract_violation_handler)
 #   define __cpp_lib_replaceable_contract_violation_handler 0L
