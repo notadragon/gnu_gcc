@@ -790,6 +790,21 @@ build_dynamic_cast_1 (location_t loc, tree type, tree expr,
 	  /* Determine how T and V are related.  */
 	  boff = dcast_base_hint (static_type, target_type);
 
+	  /* P3100: the cast reads the dynamic type of the object through its
+	     vtable pointer, an access through the pointer the object is
+	     reached through (DECISIONS.md E102 (a)).  */
+	  if (tc == REFERENCE_TYPE)
+	    {
+	      tree ref = tree_strip_any_location_wrapper (expr);
+	      if (TREE_CODE (ref) == NOP_EXPR && TYPE_REF_P (TREE_TYPE (ref)))
+		{
+		  ref = copy_node (ref);
+		  if (cp_ubsan_maybe_check_dynamic_type_read
+		      (loc, &TREE_OPERAND (ref, 0)))
+		    expr = ref;
+		}
+	    }
+
 	  /* Since expr is used twice below, save it.  */
 	  expr = save_expr (expr);
 
