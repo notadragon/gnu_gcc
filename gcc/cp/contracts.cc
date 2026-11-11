@@ -3155,6 +3155,43 @@ check_redecl_contract (tree newdecl, tree olddecl)
   if (TREE_CODE (olddecl) == TEMPLATE_DECL)
     olddecl = DECL_TEMPLATE_RESULT (olddecl);
 
+  /* An implicit instantiation is not a declaration anyone wrote: an explicit
+     specialization that register_specialization merges with one is the
+     first declaration of that specialization, and its contracts are its
+     own.  */
+  if (DECL_IMPLICIT_INSTANTIATION (olddecl)
+      && DECL_TEMPLATE_SPECIALIZATION (newdecl))
+    {
+      /* OLDDECL is the node that survives the merge.  It has exactly
+	 NEWDECL's contracts -- none, if NEWDECL has none: an explicit
+	 specialization does not inherit the ones the implicit instantiation
+	 was given from the template -- onto its own parameters (the tokens,
+	 while deferred), so later redeclarations compare with them.  */
+      tree nc = get_fn_contract_specifiers (newdecl);
+      if (!nc)
+	remove_fn_contract_specifiers (olddecl);
+      else if (contract_any_deferred_p (nc))
+	{
+	  /* The tokens are replayed against OLDDECL's parameters, which
+	     still carry the names the template gave them.  OLDDECL is the
+	     specialization from here on, so give them the names it wrote:
+	     `template<> int g<double> (double a) pre (a > 1);' must find
+	     `a'.  A definition replaces the parameters with its own anyway;
+	     a declaration keeps OLDDECL's, so this is the only point at
+	     which the specialization's names can reach them.  */
+	  for (tree op = DECL_ARGUMENTS (olddecl),
+		 np = DECL_ARGUMENTS (newdecl);
+	       op && np; op = DECL_CHAIN (op), np = DECL_CHAIN (np))
+	    DECL_NAME (op) = DECL_NAME (np);
+	  set_fn_contract_specifiers (olddecl, nc);
+	}
+      else
+	set_fn_contract_specifiers (olddecl,
+				    copy_and_remap_contracts (olddecl,
+							      newdecl));
+      return;
+    }
+
   tree new_contracts = get_fn_contract_specifiers (newdecl);
   tree old_contracts = get_fn_contract_specifiers (olddecl);
 
@@ -3169,6 +3206,8 @@ check_redecl_contract (tree newdecl, tree olddecl)
   gcc_checking_assert(rdp || !old_contracts);
 
   location_t new_loc = DECL_SOURCE_LOCATION (newdecl);
+  /* An explicit specialization is a function of its own, so this holds for
+     its redeclarations too.  */
   if (new_contracts && !old_contracts)
     {
       /* If a re-declaration has contracts, they must be the same as those
@@ -3240,6 +3279,71 @@ check_redecl_contract (tree newdecl, tree olddecl)
     }
 
   return;
+}
+
+/* DECL declares an explicit specialization of a member template of a class
+   template specialization:
+
+     template<> template<class Q> int A<long>::f (long a, Q) pre (a > 3);
+
+   check_explicit_specialization folds it into RESULT, the pattern of the
+   member template A<long> instantiated, rather than having duplicate_decls
+   merge the two, so do here what duplicate_decls does for the contracts.
+   REDECL_P if RESULT already is that specialization and DECL redeclares it;
+   DEFINING_P if DECL is a definition, whose parameters replace RESULT's.
+   grokfndecl gives RESULT DECL's contracts afterwards if it has none.  */
+
+void
+member_template_spec_contracts (tree decl, tree result, bool redecl_p,
+				bool defining_p)
+{
+  if (!redecl_p)
+    {
+      /* The first declaration of the specialization.  The contracts the
+	 instantiated member was given from the template are not the
+	 specialization's.  Its own predicates are replayed against RESULT's
+	 parameters, which still carry the names the template gave them, so
+	 give them the names DECL wrote, as check_redecl_contract does for an
+	 implicit instantiation; a definition replaces them anyway.  */
+      remove_fn_contract_specifiers (result);
+      if (!defining_p)
+	for (tree op = DECL_ARGUMENTS (result), np = DECL_ARGUMENTS (decl);
+	     op && np; op = DECL_CHAIN (op), np = DECL_CHAIN (np))
+	  DECL_NAME (op) = DECL_NAME (np);
+      return;
+    }
+
+  /* A redeclaration: compare its contracts with the specialization's.  */
+  check_redecl_contract (decl, result);
+
+  if (!defining_p)
+    return;
+
+  /* A definition's parameters are about to replace RESULT's.  Its own
+     contracts are what its body is checked against, as
+     update_contract_arguments has it; without any, RESULT's are rewritten
+     in terms of the definition's parameters.  */
+  tree contracts = get_fn_contract_specifiers (decl);
+  if (contracts)
+    set_fn_contract_specifiers (result, contracts);
+  else if ((contracts = get_fn_contract_specifiers (result))
+	   && !contract_any_deferred_p (contracts))
+    {
+      contracts = copy_and_remap_contracts (decl, result);
+      /* The copies' own decls belong to RESULT, which survives, not to
+	 DECL.  */
+      for (tree c : tree_vec_range (contracts))
+	if (POSTCONDITION_P (c))
+	  {
+	    tree var = POSTCONDITION_IDENTIFIER (c);
+	    if (var && var != error_mark_node)
+	      DECL_CONTEXT (var) = result;
+	    for (tree cap = POSTCONDITION_CAPTURES (c); cap;
+		 cap = TREE_CHAIN (cap))
+	      DECL_CONTEXT (TREE_VALUE (cap)) = result;
+	  }
+      set_fn_contract_specifiers (result, contracts);
+    }
 }
 
 /* Update the contracts of DEST to match the argument names from contracts
