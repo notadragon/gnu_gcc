@@ -1949,6 +1949,11 @@ fcontract-disable-optimized-checks
 C++ ObjC++ Var(flag_contract_disable_optimized_checks) Init(0)
 -fcontract-disable-optimized-checks	Disable optimisation of contract checks.
 
+fcontract-bypass-rethrowing-local-handler
+C++ ObjC++ Var(flag_contract_bypass_rethrowing_local_handler) Init(1)
+-fcontract-bypass-rethrowing-local-handler	Let a predicate's exception bypass a
+label's local violation handler that would only rethrow it.
+
 fcontract-comment-from-expression
 C++ ObjC++ Var(flag_contract_comment_from_expression) Init(0)
 -fcontract-comment-from-expression	Form the comment of a contract violation
