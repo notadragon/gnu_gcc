@@ -1,0 +1,4 @@
+[
+  {"match": {"location": "refinable-body-enforce-replaceable-i.cc:6"}, "output": {"semantic": "ignore"}},
+  {"match": {"caller": false}, "output": {"semantic": "enforce"}}
+]
