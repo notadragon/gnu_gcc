@@ -993,6 +993,20 @@ ubsan_maybe_instrument_reference (tree *stmt_p)
     }
 }
 
+/* Instrument OP, the object pointer of a pointer-to-data-member access
+   (OP->*PM), if needed, before the member's offset is added to it.  Return
+   the instrumented pointer, or OP.  */
+
+tree
+ubsan_maybe_instrument_ptrmem_object (location_t loc, tree op)
+{
+  if (op == error_mark_node || !POINTER_TYPE_P (TREE_TYPE (op)))
+    return op;
+  tree r = ubsan_maybe_instrument_reference_or_call (loc, op, TREE_TYPE (op),
+						     UBSAN_MEMBER_ACCESS);
+  return r ? r : op;
+}
+
 /* Instrument a CALL_EXPR to a method if needed.  */
 
 void

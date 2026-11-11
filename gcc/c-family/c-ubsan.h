@@ -30,5 +30,8 @@ extern bool ubsan_array_ref_instrumented_p (const_tree);
 extern void ubsan_maybe_instrument_array_ref (tree *, bool);
 extern void ubsan_maybe_instrument_reference (tree *);
 extern void ubsan_maybe_instrument_member_call (tree, bool);
+extern tree ubsan_maybe_instrument_ptrmem_object (location_t, tree);
+extern void c_emit_contract_sanitizer_descriptors (void);
+extern void c_apply_contract_sanitizer_assume (tree);
 
 #endif  /* GCC_C_UBSAN_H  */
