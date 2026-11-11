@@ -8876,8 +8876,14 @@ pushtag (tree name, tree type, TAG_how how)
 	  if (processing_template_decl)
 	    {
 	      /* Push a DECL_EXPR so we call pushtag at the right time in
-		 template instantiation rather than in some nested context.  */
-	      add_decl_expr (decl);
+		 template instantiation rather than in some nested context.
+		 There is no statement list for the closure of a lambda in
+		 the contract of a declaration, which is not in a body; it is
+		 instantiated with the contract's LAMBDA_EXPR.  */
+	      if (building_stmt_list_p ())
+		add_decl_expr (decl);
+	      else
+		gcc_checking_assert (LAMBDA_TYPE_P (type));
 	    }
 	  /* Lambdas use LAMBDA_EXPR_DISCRIMINATOR instead.  */
 	  else if (!LAMBDA_TYPE_P (type))
