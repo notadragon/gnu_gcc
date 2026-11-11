@@ -1115,7 +1115,8 @@ maybe_warn_nodiscard (tree expr, impl_conv_void implicit)
 
   tree call = expr;
   if (TREE_CODE (expr) == TARGET_EXPR)
-    call = TARGET_EXPR_INITIAL (expr);
+    /* P4405 proving hook: maybe_contract_wrap_call's proof markers.  */
+    call = contract_strip_proof_markers (TARGET_EXPR_INITIAL (expr));
   location_t loc = cp_expr_loc_or_input_loc (call);
   tree callee = cp_get_callee (call);
   if (!callee || !TREE_TYPE (callee))

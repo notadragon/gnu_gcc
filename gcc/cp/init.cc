@@ -370,6 +370,10 @@ build_value_init (tree type, tsubst_flags_t complain)
       tree fn = NULL_TREE;
       if (TREE_CODE (ctor) == CALL_EXPR)
 	fn = get_callee_fndecl (ctor);
+      else if (TREE_CODE (ctor) == TARGET_EXPR && extract_call_expr (ctor))
+	/* The temporary was built with the call (maybe_contract_wrap_call)
+	   of a constructor with contracts, which is user-provided.  */
+	return ctor;
       ctor = build_aggr_init_expr (type, ctor);
       if (fn && user_provided_p (fn))
 	return ctor;
@@ -2269,7 +2273,19 @@ expand_default_init (tree binfo, tree true_exp, tree exp, tree init, int flags,
 	{
 	  tree e = maybe_constant_init (rval, exp);
 	  if (TREE_CONSTANT (e))
-	    rval = cp_build_init_expr (exp, e);
+	    {
+	      /* P4405 proving hook: the call is still evaluated where it was,
+		 as far as the program can tell, so the analysis evaluations
+		 it carries stay (GCC-920) -- unless this is the constant
+		 initialization of a variable of static or thread storage
+		 duration, which is constant evaluation.  */
+	      tree markers = contract_object_proof_markers (rval);
+	      if (VAR_P (exp) && decl_storage_duration (exp) != dk_auto)
+		markers = NULL_TREE;
+	      rval = cp_build_init_expr (exp, e);
+	      if (markers)
+		rval = build2 (COMPOUND_EXPR, TREE_TYPE (rval), markers, rval);
+	    }
 	}
     }
 

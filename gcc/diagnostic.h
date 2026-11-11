@@ -52,6 +52,32 @@ extern diagnostics::context *global_dc;
   (!(DC)->m_inhibit_warnings						\
    && !(in_system_header_at (LOC) && !(DC)->m_warn_system_headers))
 
+/* While one of these is live, warnings are reported at locations in system
+   headers, as with -Wsystem-headers, if ORIGIN -- the location of the code
+   a warning is about, where that differs from where it is reported -- is
+   known and not itself in a system header.  */
+
+class warn_system_headers_sentinel
+{
+public:
+  explicit warn_system_headers_sentinel (location_t origin)
+    : m_saved (global_dc->m_warn_system_headers)
+  {
+    if (origin != UNKNOWN_LOCATION && !in_system_header_at (origin))
+      global_dc->m_warn_system_headers = true;
+  }
+  ~warn_system_headers_sentinel ()
+  {
+    global_dc->m_warn_system_headers = m_saved;
+  }
+  warn_system_headers_sentinel (const warn_system_headers_sentinel &) = delete;
+  warn_system_headers_sentinel &
+  operator= (const warn_system_headers_sentinel &) = delete;
+
+private:
+  bool m_saved;
+};
+
 /* Override the option index to be used for reporting a
    diagnostic.  */
 

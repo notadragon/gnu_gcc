@@ -34,6 +34,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "contracts.h"
 #include "cp/contracts-config.h"
 #include "cp-objcp-common.h"
+#include "c-family/contracts-prove.h"
 #include "tree.h"
 #include "tree-inline.h"
 #include "attribs.h"
@@ -442,6 +443,243 @@ contract_semantic_has_no_runtime_check (uint16_t sem)
 	  || contract_semantic_proving_p ((contract_evaluation_semantic) sem));
 }
 
+struct contract_nested_chain;
+static tree contract_nested_evaluations (void *, tree,
+					 const contract_proof_nesting *);
+static bool predicate_has_nested_p (tree);
+
+/* E169: the recursion of nested evaluations stops at this depth.  It is
+   otherwise bounded only by a precondition's not being made twice on the
+   way, which a template whose precondition calls another specialization of
+   it would defeat.  */
+#define CONTRACT_NESTED_DEPTH 8
+
+/* E169: an evaluation whose nested evaluations are being made, and the
+   ones it is nested in.  */
+
+struct contract_nested_chain
+{
+  /* The evaluation it is nested in, or null.  */
+  const contract_nested_chain *up;
+  /* Its contract, as its callee has it (not a substituted copy).  */
+  tree contract;
+  /* 1 for one nested in none.  */
+  unsigned depth;
+  /* The override pair the evaluation is made for, and whether in its
+     override shadow (diagnose_unproven_contract's OVERRIDE_PAIR and
+     OVERRIDE_SHADOW), which those nested in it are made for too.  */
+  unsigned override_pair;
+  bool override_shadow;
+};
+
+/* Diagnose the analysis evaluation of CONTRACT with the P4405 semantic SEM,
+   prove or diagnose, unless its predicate is proven: an error for prove, a
+   -Wcontract-unproven warning for diagnose.  LOC is where the evaluation
+   happens -- the contract itself for one in the function body, the call for
+   one at a call -- and the predicate is noted when it is elsewhere.  For
+   one at a call, CALL is the call to FNDECL.  The predicate is never
+   evaluated.  The proof itself is the proving strategies'
+   (c-family/contracts-prove.h); this only describes the evaluation.
+
+   PRED, if given, is the predicate as it would be evaluated there, in place
+   of the contract's own.  MARKER is non-null if the caller can place a
+   marker where the evaluation happens; if a strategy then defers the
+   evaluation, *MARKER is set to it (for a caller-side evaluation, built for
+   the predicate with the callee's parameters replaced by the call's
+   arguments).  OPAQUE is true if the predicate cannot be described
+   (contract_for_caller_side_proof): it is then not proven.  OVERRIDE_PAIR
+   is 0, or the override pair for which the evaluation is made
+   (begin_override_shadows), in its override shadow if OVERRIDE_SHADOW and
+   otherwise as an obligation of the overriding function itself.
+
+   DECISIONS.md E169: the evaluation depends on those of the preconditions
+   of the calls its predicate makes (contract_nested_evaluations), which
+   are made with it.  NEST is null, or how it is itself nested in another
+   evaluation (contract_proof_nesting), UP that one's chain
+   (contract_nested_chain), and NESTED_CONTRACT the contract of its callee
+   that CONTRACT is or was substituted from, CONTRACT if null.  A nested
+   evaluation is made for the override pair (and in the override shadow)
+   that the one it is nested in is made for (E169 (8)): its marker is in
+   that one's region, and its diagnostic names the pair (E155).  Not for an
+   opaque evaluation.  Returns the result.  */
+
+static contract_proof_result
+diagnose_unproven_contract (tree contract, contract_evaluation_semantic sem,
+			    location_t loc, tree fndecl = NULL_TREE,
+			    tree call = NULL_TREE, tree *marker = NULL,
+			    tree pred = NULL_TREE, bool opaque = false,
+			    unsigned override_pair = 0,
+			    bool override_shadow = true,
+			    const contract_proof_nesting *nest = NULL,
+			    const contract_nested_chain *up = NULL,
+			    tree nested_contract = NULL_TREE)
+{
+  gcc_checking_assert (contract_semantic_proving_p (sem));
+  contract_proof_query query = {};
+  query.predicate = pred ? pred : CONTRACT_CONDITION (contract);
+  query.semantic = sem;
+  query.kind = (PRECONDITION_P (contract) ? CAK_PRE
+		: POSTCONDITION_P (contract) ? CAK_POST : CAK_ASSERT);
+  query.loc = loc;
+  query.pred_loc = cp_expr_loc_or_loc (CONTRACT_CONDITION (contract),
+				       EXPR_LOCATION (contract));
+  /* A precondition sees the parameters as the call initialized them, so the
+     strategies may use the arguments.  The predicate names the parameters
+     of FNDECL's origin, `this' included, which the call passes in order --
+     unless an in-charge or VTT parameter gets in the way.  In the callee
+     (a constructor or destructor clone) it does; in its origin only, the
+     predicate is made to name the clone's own parameters instead
+     (GCC-917): a call of the complete object constructor of a class with a
+     virtual base calls a clone that has neither.  */
+  tree origin = fndecl ? DECL_ORIGIN (fndecl) : NULL_TREE;
+  if (call && PRECONDITION_P (contract)
+      && TREE_CODE (call) == CALL_EXPR
+      && !DECL_HAS_IN_CHARGE_PARM_P (fndecl)
+      && !DECL_HAS_VTT_PARM_P (fndecl))
+    {
+      if (!DECL_HAS_IN_CHARGE_PARM_P (origin)
+	  && !DECL_HAS_VTT_PARM_P (origin))
+	{
+	  query.call = call;
+	  query.parms = DECL_ARGUMENTS (origin);
+	}
+      else if (fndecl != origin)
+	{
+	  /* Map ORIGIN's parameters, but for the in-charge and VTT ones, to
+	     FNDECL's, which must line up.  */
+	  hash_map<tree, tree> map;
+	  tree c = DECL_ARGUMENTS (fndecl);
+	  bool lined_up = true;
+	  for (tree o = DECL_ARGUMENTS (origin); o; o = DECL_CHAIN (o))
+	    if (DECL_NAME (o) != in_charge_identifier
+		&& DECL_NAME (o) != vtt_parm_identifier)
+	      {
+		if (!c)
+		  lined_up = false;
+		else
+		  {
+		    map.put (o, c);
+		    c = DECL_CHAIN (c);
+		  }
+	      }
+	  if (lined_up && !c)
+	    {
+	      query.predicate = unshare_expr (query.predicate);
+	      cp_walk_tree (&query.predicate,
+			    [] (tree *tp, int *walk_subtrees, void *data)
+			    {
+			      if (TYPE_P (*tp))
+				*walk_subtrees = 0;
+			      else if (TREE_CODE (*tp) == PARM_DECL)
+				if (tree *r = (static_cast<hash_map<tree, tree> *>
+					       (data)->get (*tp)))
+				  *tp = *r;
+			      return NULL_TREE;
+			    }, &map, NULL);
+	      query.call = call;
+	      query.parms = DECL_ARGUMENTS (fndecl);
+	    }
+	}
+    }
+  query.opaque = opaque;
+  if (up && up->override_pair)
+    {
+      override_pair = up->override_pair;
+      override_shadow = up->override_shadow;
+    }
+  query.override_pair = override_pair;
+  query.override_shadow = override_pair && override_shadow;
+  /* A caller-side marker needs the arguments.  */
+  query.deferrable = marker && (!call || query.call) && !opaque;
+  /* E169.  */
+  query.nest = nest;
+  contract_nested_chain link
+    = { up, nested_contract ? nested_contract : contract,
+	up ? up->depth + 1 : 1, override_pair, query.override_shadow };
+  if (!opaque && link.depth < CONTRACT_NESTED_DEPTH
+      && predicate_has_nested_p (query.predicate))
+    {
+      query.nested = contract_nested_evaluations;
+      query.nested_data = &link;
+    }
+  /* P4405 proving hook.  */
+  return contract_diagnose_unless_proven (query,
+					  query.deferrable ? marker : NULL);
+}
+
+static void remap_dummy_this (tree, tree *);
+static void remap_retval (tree, tree);
+static tree compute_caller_semantic_tuple (tree, location_t, tree,
+					  vec<contract_evaluation_semantic> *);
+static bool handle_caller_contracts_p (tree);
+
+/* True if a proving strategy may defer the evaluations in FN's body
+   (contract_proof_defers_p), which is not the case for a module's
+   functions, whose bodies may be compiled by another translation unit than
+   the one that placed the markers, nor for a coroutine, whose body moves
+   into helper functions.  */
+
+static bool
+contract_proof_deferral_ok_p (tree fn)
+{
+  return (contract_proof_defers_p (fn)
+	  && !modules_p ()
+	  && !(DECL_LANG_SPECIFIC (fn) && DECL_COROUTINE_P (fn))
+	  && !DECL_RAMP_FN (fn));
+}
+
+/* True if a proving strategy may defer CONTRACT's evaluation here, or
+   assume it, in the current function.  A postcondition with captures may
+   not: the captures are initialized only for a checked evaluation.  */
+
+static bool
+contract_proof_deferrable_p (tree contract)
+{
+  return (contract_proof_deferral_ok_p (current_function_decl)
+	  && !(POSTCONDITION_P (contract)
+	       && POSTCONDITION_CAPTURES (contract)));
+}
+
+/* CONTRACT's predicate as a check of it would evaluate it here, or
+   NULL_TREE on error.  */
+
+static tree
+contract_check_condition (tree contract)
+{
+  remap_dummy_this (current_function_decl, &CONTRACT_CONDITION (contract));
+  if (POSTCONDITION_P (contract) && !flag_contract_checks_outlined
+      && CONTRACT_CONDITION (contract) != error_mark_node)
+    remap_retval (current_function_decl, contract);
+  tree cond = CONTRACT_CONDITION (contract);
+  return cond == error_mark_node ? NULL_TREE : cond;
+}
+
+/* CHECK, the check of CONTRACT under SEMANTIC where a strategy may defer
+   the evaluation (contract_proof_deferrable_p), followed by what lets the
+   strategies that defer evaluations assume the predicate, when one wants
+   that (contract_proof_assumption).  */
+
+static tree
+add_contract_proof_assumption (tree contract,
+			       contract_evaluation_semantic semantic,
+			       tree check)
+{
+  if (!check || check == error_mark_node
+      || contract_semantic_proving_p (semantic))
+    return check;
+  tree pred = contract_check_condition (contract);
+  tree assumption = contract_proof_assumption (pred, semantic,
+					       EXPR_LOCATION (contract));
+  if (!assumption)
+    return check;
+  if (check == void_node)
+    return assumption;
+  tree list = alloc_stmt_list ();
+  append_to_statement_list_force (check, &list);
+  append_to_statement_list_force (assumption, &list);
+  return list;
+}
+
 /* True if SEM never permits an exception to escape a handler call: the
    contract is either unchecked, or checked through a terminating entry
    point.  Used to decide whether a compiler-synthesized wrapper function
@@ -533,6 +771,463 @@ contract_active_p (tree contract, tree fndecl)
    template that is the inherited template's specialization; the template
    itself leads to a TEMPLATE_DECL, and gives NULL_TREE.  */
 
+static tree
+inherited_ctor_for_proving (tree fn)
+{
+  if (!flag_new_inheriting_ctors || !DECL_CONSTRUCTOR_P (fn))
+    return NULL_TREE;
+  tree orig = DECL_ORIGIN (fn);
+  tree inh = orig;
+  while (tree i = DECL_INHERITED_CTOR (inh))
+    inh = OVL_FIRST (i);
+  if (inh == orig || TREE_CODE (inh) != FUNCTION_DECL)
+    return NULL_TREE;
+  return inh;
+}
+
+/* P4405: diagnose the analysis evaluations of a call of CALLEE with the
+   prove or diagnose semantic (call_analysis_semantic), which happen now,
+   unless proven: resolved for the call site (TUPLE_LOC, the current
+   function) and diagnosed at LOC.  CALL, if non-null, is a call whose
+   arguments are CALLEE's own, for the proof.
+
+   DECISIONS.md E169: NEST and UP are null, or how the evaluations are
+   nested in another and its chain (diagnose_unproven_contract), and then
+   only the preconditions' are made, each only if it is not already being
+   made on the way (UP).  If MARKERS, a strategy may defer a precondition's
+   evaluation when CALL can carry markers: return the markers of those it
+   defers, to be placed ahead of CALL, or NULL_TREE.  */
+
+static tree
+diagnose_caller_side_proving (tree callee, tree call, location_t tuple_loc,
+			      location_t loc,
+			      const contract_proof_nesting *nest = NULL,
+			      const contract_nested_chain *up = NULL,
+			      bool markers = false)
+{
+  prepare_call_analysis (callee);
+  auto_vec<contract_evaluation_semantic> analyses;
+  tree tuple = compute_caller_semantic_tuple (callee, tuple_loc,
+					      current_function_decl,
+					      &analyses);
+  tree origin = DECL_ORIGIN (callee);
+  tree specs = get_fn_contract_specifiers (origin);
+  /* A marker goes ahead of the call, as maybe_contract_wrap_call places
+     them, which needs a call that need not stay a call where it is: not a
+     constructor or destructor call, nor one returning a class.  */
+  markers = (markers && call && TREE_CODE (call) == CALL_EXPR
+	     && !DECL_CONSTRUCTOR_P (callee) && !DECL_DESTRUCTOR_P (callee)
+	     && !MAYBE_CLASS_TYPE_P (TREE_TYPE (call)));
+  tree proof_markers = NULL_TREE;
+  unsigned position = 0;
+  for (tree t = tuple; t; t = TREE_CHAIN (t), position++)
+    {
+      tree contract = TREE_VEC_ELT (specs, position);
+      if (nest && !PRECONDITION_P (contract))
+	continue;
+      contract_evaluation_semantic sem
+	= call_analysis_semantic (contract, callee, analyses[position]);
+      if (!contract_semantic_proving_p (sem))
+	continue;
+      if (CONTRACT_CONDITION (contract) == error_mark_node)
+	continue;
+      bool again = false;
+      for (const contract_nested_chain *c = up; c && !again; c = c->up)
+	again = c->contract == contract;
+      if (again)
+	continue;
+      tree proof = contract_for_caller_side_proof (origin, contract);
+      if (!proof)
+	continue;
+      bool opaque = proof == error_mark_node;
+      tree marker = NULL_TREE;
+      tree pred = NULL_TREE;
+      if (markers && PRECONDITION_P (contract) && !opaque)
+	{
+	  /* As contract_analyze_call: the callee's own `this', for which
+	     the call's object is substituted.  */
+	  pred = unshare_expr (CONTRACT_CONDITION (proof));
+	  remap_dummy_this (origin, &pred);
+	}
+      diagnose_unproven_contract (opaque ? contract : proof, sem, loc, callee,
+				  call, pred ? &marker : NULL, pred, opaque,
+				  0, true, nest, up, contract);
+      if (marker)
+	proof_markers = (proof_markers
+			 ? build2 (COMPOUND_EXPR, void_type_node,
+				   proof_markers, marker)
+			 : marker);
+    }
+  return proof_markers;
+}
+
+/* P4405: a call of an inheriting constructor is a call of the constructor
+   it inherits ([class.inhctor.init]), so that constructor's prove and
+   diagnose analysis evaluations happen at CALL, the call of FNDECL, and
+   are diagnosed there, with the call's arguments for the parameters.  The
+   inheriting constructor GCC defines calls the inherited one, and does not
+   diagnose them again (maybe_contract_wrap_call).  IN_PREDICATE is true
+   for a call in a contract predicate that a check evaluates, or whose
+   evaluations are nested in another's (contract_nested_call: NEST and UP,
+   as for diagnose_caller_side_proving).  */
+
+static void
+diagnose_inheriting_ctor_call (tree fndecl, tree call,
+			       bool in_predicate = false,
+			       const contract_proof_nesting *nest = NULL,
+			       const contract_nested_chain *up = NULL)
+{
+  tree inh = inherited_ctor_for_proving (fndecl);
+  if (!inh || !handle_caller_contracts_p (inh))
+    return;
+  if (!in_predicate && (cp_unevaluated_operand || processing_contract_condition
+			|| contract_constant_evaluation_p (fndecl)
+			|| contract_never_evaluated_p ()))
+    return;
+  /* Nor is the call diagnosed in an inheriting constructor of a further
+     derived class, which calls this one for its own caller.  */
+  if (current_function_decl
+      && inherited_ctor_for_proving (current_function_decl) == inh)
+    return;
+  /* What the odr-use of INH would do (mark_used), which the inheriting
+     constructor's own definition does only later.  */
+  maybe_instantiate_contracts (inh);
+  /* The call passes the derived object, which the inherited constructor's
+     `this' sees converted to its base, and then the arguments; an
+     in-charge or VTT argument of FNDECL would get in the way.  */
+  tree icall = NULL_TREE;
+  if (TREE_CODE (call) == CALL_EXPR && call_expr_nargs (call) > 0
+      && !DECL_HAS_IN_CHARGE_PARM_P (fndecl)
+      && !DECL_HAS_VTT_PARM_P (fndecl))
+    {
+      tree obj = CALL_EXPR_ARG (call, 0);
+      tree base = NULL_TREE;
+      if (TYPE_PTR_P (TREE_TYPE (obj)))
+	base = lookup_base (TREE_TYPE (TREE_TYPE (obj)), DECL_CONTEXT (inh),
+			    ba_any, NULL, tf_none);
+      if (base && base != error_mark_node)
+	obj = build_base_path (PLUS_EXPR, obj, base, 1, tf_none);
+      if (base && base != error_mark_node && obj != error_mark_node)
+	{
+	  icall = copy_node (call);
+	  CALL_EXPR_ARG (icall, 0) = obj;
+	}
+    }
+  location_t loc = (in_predicate
+		    ? EXPR_LOC_OR_LOC (call, input_location)
+		    : cp_expr_loc_or_input_loc (call));
+  diagnose_caller_side_proving (inh, icall,
+				in_predicate ? loc : input_location, loc,
+				nest, up);
+}
+
+/* P4405, DECISIONS.md E169: how contract_nested_walk_r makes the analysis
+   evaluations of the calls in a predicate.  */
+
+struct contract_nested_walk
+{
+  /* For evaluations nested in another (contract_nested_evaluations): how,
+     and its chain.  Both null for those of a predicate a check evaluates
+     (checked_predicate_evaluations), which are made as at any call.  */
+  const contract_proof_nesting *nest;
+  const contract_nested_chain *up;
+};
+
+/* The analysis evaluations of CALL, a call in a predicate, as W says: the
+   markers of those a strategy defers, to be placed ahead of CALL, if
+   MARKERS allows them, or NULL_TREE.  */
+
+static tree
+contract_nested_call (tree call, const contract_nested_walk &w, bool markers)
+{
+  tree fn = cp_get_callee_fndecl_nofold (call);
+  if (!fn)
+    return NULL_TREE;
+  if (tree orig = get_orig_func_for_wrapper (fn))
+    fn = orig;
+  if (TREE_CODE (call) == CALL_EXPR && inherited_ctor_for_proving (fn))
+    {
+      diagnose_inheriting_ctor_call (fn, call, /*in_predicate=*/true, w.nest,
+				     w.up);
+      return NULL_TREE;
+    }
+  if (!handle_caller_contracts_p (fn))
+    return NULL_TREE;
+  location_t loc = EXPR_LOC_OR_LOC (call, input_location);
+  return diagnose_caller_side_proving (fn, (TREE_CODE (call) == CALL_EXPR
+					    ? call : NULL_TREE),
+				       loc, loc, w.nest, w.up, markers);
+}
+
+/* Make the analysis evaluations of the calls in the predicate *TP, as W
+   says, the operands of a call before the call; when MARKERS, those a
+   strategy defers get their markers ahead of their calls, in *TP, which is
+   then a copy of its own (an operand of a node that is not copied with
+   it -- a temporary, a saved expression -- is not, and gets none).  A call
+   that folding shows the predicate never evaluates -- the second operand
+   of `&&' or `||', an arm of `?:' -- is skipped, as is an unevaluated
+   operand, a lambda's body (a function of its own), a statement and a
+   list or constructor.  Returns true if a marker was placed.  */
+
+static bool
+contract_nested_walk_r (tree *tp, const contract_nested_walk &w, bool markers)
+{
+  tree t = *tp;
+  if (!t || !EXPR_P (t))
+    return false;
+  bool changed = false;
+  switch (TREE_CODE (t))
+    {
+    case SIZEOF_EXPR:
+    case ALIGNOF_EXPR:
+    case NOEXCEPT_EXPR:
+    case TYPEID_EXPR:
+    case REQUIRES_EXPR:
+    case STMT_EXPR:
+    case BIND_EXPR:
+    case DECL_EXPR:
+      return false;
+    case SAVE_EXPR:
+      contract_nested_walk_r (&TREE_OPERAND (t, 0), w, false);
+      return false;
+    case TARGET_EXPR:
+      /* Not into the cleanup, which destroys the temporary.  */
+      contract_nested_walk_r (&TARGET_EXPR_INITIAL (t), w, false);
+      return false;
+    case TRUTH_ANDIF_EXPR:
+    case TRUTH_ORIF_EXPR:
+    case COND_EXPR:
+      {
+	tree c = c_contract_fold_predicate (TREE_OPERAND (t, 0));
+	bool known = TREE_CODE (c) == INTEGER_CST;
+	bool value = known && !integer_zerop (c);
+	changed = contract_nested_walk_r (&TREE_OPERAND (t, 0), w, markers);
+	if (TREE_CODE (t) == COND_EXPR)
+	  {
+	    if (!known || value)
+	      changed |= contract_nested_walk_r (&TREE_OPERAND (t, 1), w,
+						 markers);
+	    if (!known || !value)
+	      changed |= contract_nested_walk_r (&TREE_OPERAND (t, 2), w,
+						 markers);
+	  }
+	else if (!known
+		 || value == (TREE_CODE (t) == TRUTH_ANDIF_EXPR))
+	  changed |= contract_nested_walk_r (&TREE_OPERAND (t, 1), w,
+					     markers);
+	break;
+      }
+    default:
+      for (int i = 0; i < TREE_OPERAND_LENGTH (t); i++)
+	changed |= contract_nested_walk_r (&TREE_OPERAND (t, i), w, markers);
+      if (TREE_CODE (t) == CALL_EXPR || TREE_CODE (t) == AGGR_INIT_EXPR)
+	if (tree m = contract_nested_call (t, w, markers))
+	  {
+	    *tp = build2 (COMPOUND_EXPR, TREE_TYPE (t), m, t);
+	    changed = true;
+	  }
+      break;
+    }
+  /* What now holds a marker has side effects, which the folders must
+     respect.  */
+  if (changed)
+    TREE_SIDE_EFFECTS (*tp) = TREE_SIDE_EFFECTS (t) = 1;
+  return changed;
+}
+
+/* walk_tree callback for predicate_has_nested_p.  */
+
+static tree
+predicate_has_nested_r (tree *tp, int *walk_subtrees, void *)
+{
+  tree t = *tp;
+  if (TYPE_P (t) || TREE_CODE (t) == LAMBDA_EXPR
+      || TREE_CODE (t) == SIZEOF_EXPR || TREE_CODE (t) == ALIGNOF_EXPR
+      || TREE_CODE (t) == NOEXCEPT_EXPR || TREE_CODE (t) == TYPEID_EXPR
+      || TREE_CODE (t) == REQUIRES_EXPR || TREE_CODE (t) == STMT_EXPR
+      || TREE_CODE (t) == BIND_EXPR)
+    {
+      *walk_subtrees = 0;
+      return NULL_TREE;
+    }
+  if (TREE_CODE (t) != CALL_EXPR && TREE_CODE (t) != AGGR_INIT_EXPR)
+    return NULL_TREE;
+  tree fn = cp_get_callee_fndecl_nofold (t);
+  if (!fn)
+    return NULL_TREE;
+  if (tree orig = get_orig_func_for_wrapper (fn))
+    fn = orig;
+  if (handle_caller_contracts_p (fn) || inherited_ctor_for_proving (fn))
+    return t;
+  return NULL_TREE;
+}
+
+/* E169: true if PRED calls a function that may have analysis evaluations
+   at the call (one with contract assertions, or an inheriting constructor),
+   so that an evaluation of PRED may have nested ones.  */
+
+static bool
+predicate_has_nested_p (tree pred)
+{
+  return (flag_contracts_p4405
+	  && pred
+	  && pred != error_mark_node
+	  && cp_walk_tree_without_duplicates (&pred, predicate_has_nested_r,
+					      NULL));
+}
+
+/* P4405, DECISIONS.md E169: the evaluations nested in an analysis
+   evaluation (contract_proof_query's nested): those of the preconditions of
+   the calls its predicate PRED makes, NEST says how, DATA being the
+   evaluation's chain (contract_nested_chain).  The evaluation depends on
+   them whether or not PRED is ever evaluated at run time.  Each is made
+   at its call and resolved there, as an evaluation at a call of the
+   current function; postconditions and assertions of the callees are
+   analyzed in their bodies, as ever.  Returns PRED, with the markers of
+   those a strategy defers ahead of their calls when NEST allows it.  */
+
+static tree
+contract_nested_evaluations (void *data, tree pred,
+			     const contract_proof_nesting *nest)
+{
+  contract_nested_walk w
+    = { nest, static_cast<const contract_nested_chain *> (data) };
+  contract_nested_walk_r (&pred, w, nest->markers);
+  return pred;
+}
+
+/* P4405: CONTRACT's predicate is about to be evaluated by a check (or, for
+   a dynamically selected semantic, may be), so the prove and diagnose
+   analysis evaluations of the calls in it happen too, each at its call
+   (DECISIONS.md E169 (5): as well as nested in CONTRACT's own analysis
+   evaluation, if it has one).  Where the predicate was parsed nothing
+   could be done, as nothing was known of the semantics it would be
+   evaluated with (maybe_contract_wrap_call).  Where a strategy defers
+   them, their markers are placed ahead of their calls in a copy of the
+   predicate, as a check here would evaluate it, which this returns, for
+   the check to evaluate in place of CONTRACT's own (GCC-953); otherwise
+   NULL_TREE.  */
+
+static tree
+checked_predicate_evaluations (tree contract)
+{
+  if (CONTRACT_CONDITION (contract) == error_mark_node
+      || !predicate_has_nested_p (CONTRACT_CONDITION (contract)))
+    return NULL_TREE;
+  tree cond = contract_check_condition (contract);
+  if (!cond)
+    return NULL_TREE;
+  bool markers = contract_proof_deferral_ok_p (current_function_decl);
+  tree copy = markers ? unshare_expr (cond) : cond;
+  contract_nested_walk w = { NULL, NULL };
+  if (!contract_nested_walk_r (&copy, w, markers))
+    return NULL_TREE;
+  return copy;
+}
+
+/* While it lives, CONTRACT's predicate is PRED, if not null: a check
+   evaluates the copy checked_predicate_evaluations made.  */
+
+class contract_condition_override
+{
+ public:
+  contract_condition_override (tree contract, tree pred)
+    : m_contract (pred ? contract : NULL_TREE),
+      m_saved (pred ? CONTRACT_CONDITION (contract) : NULL_TREE)
+  {
+    if (pred)
+      CONTRACT_CONDITION (contract) = pred;
+  }
+  ~contract_condition_override ()
+  {
+    if (m_contract)
+      CONTRACT_CONDITION (m_contract) = m_saved;
+  }
+ private:
+  tree m_contract;
+  tree m_saved;
+};
+
+/* P4405 proving hook: true if T is the proof markers that
+   maybe_contract_wrap_call places ahead of a call -- the regions of
+   contract_prove_shadow_strategy's shadow_mark, each `if
+   (.CONTRACT_SHADOW_GUARD (0)) ...' and possibly followed by an `.ASSUME',
+   chained with COMPOUND_EXPRs.  */
+
+bool
+contract_proof_markers_p (const_tree t)
+{
+  switch (TREE_CODE (t))
+    {
+    case COMPOUND_EXPR:
+      return (contract_proof_markers_p (TREE_OPERAND (t, 0))
+	      && contract_proof_markers_p (TREE_OPERAND (t, 1)));
+    case COND_EXPR:
+      {
+	const_tree c = TREE_OPERAND (t, 0);
+	return (TREE_CODE (c) == CALL_EXPR
+		&& CALL_EXPR_FN (c) == NULL_TREE
+		&& CALL_EXPR_IFN (c) == IFN_CONTRACT_SHADOW_GUARD);
+      }
+    case CALL_EXPR:
+      return CALL_EXPR_FN (t) == NULL_TREE && CALL_EXPR_IFN (t) == IFN_ASSUME;
+    default:
+      return false;
+    }
+}
+
+/* P4405 proving hook: T without the proof markers that
+   maybe_contract_wrap_call puts ahead of a call in the initializer of its
+   temporary, for a caller looking for the call there.  */
+
+tree
+contract_strip_proof_markers (tree t)
+{
+  while (TREE_CODE (t) == COMPOUND_EXPR
+	 && contract_proof_markers_p (TREE_OPERAND (t, 0)))
+    t = TREE_OPERAND (t, 1);
+  return t;
+}
+
+/* P4405 proving hook: the proof markers that maybe_contract_wrap_call put
+   in the object argument of CALL, a constructor call, or NULL_TREE.  A
+   caller that replaces such a call by an initialization of the object --
+   a constexpr constructor call folded to a constant -- keeps them.  */
+
+tree
+contract_object_proof_markers (tree call)
+{
+  if (TREE_CODE (call) != CALL_EXPR || call_expr_nargs (call) == 0)
+    return NULL_TREE;
+  tree arg = CALL_EXPR_ARG (call, 0);
+  if (TREE_CODE (arg) == COMPOUND_EXPR
+      && contract_proof_markers_p (TREE_OPERAND (arg, 0)))
+    return TREE_OPERAND (arg, 0);
+  return NULL_TREE;
+}
+
+/* walk_tree callback: find what a copy of a proof marker cannot share
+   with the original -- a temporary, a saved expression or a
+   declaration.  */
+
+/* walk_tree callback: find the PARM_DECL DATA.  */
+
+static tree
+find_parm_r (tree *tp, int *walk_subtrees, void *data)
+{
+  if (TYPE_P (*tp))
+    *walk_subtrees = 0;
+  else if (*tp == (tree) data)
+    return *tp;
+  return NULL_TREE;
+}
+
+/* D4405: diagnose the analysis evaluations at CALL, a call of FNDECL
+   located at LOC, unless proven: each precondition's, and what a
+   caller-side prove or diagnose gives any contract (call_analysis_semantic,
+   from ANALYSES, the caller-side resolution's).  None when SKIP.  When
+   MARKER_CALL_P, a precondition's may be deferred to a proving strategy;
+   return the markers of those that are, or NULL_TREE.  PLACEHOLDER_CTOR,
 
 static bool
 contract_any_active_p (tree fndecl)
@@ -890,6 +1585,8 @@ contract_base_allowed_mask ()
     mask |= (1 << CES_ASSUME);
   if (flag_contracts_p4298)
     mask |= (1 << CES_NOEXCEPT_ENFORCE) | (1 << CES_NOEXCEPT_OBSERVE);
+  if (flag_contracts_p4405)
+    mask |= (1 << CES_PROVE) | (1 << CES_DIAGNOSE);
   return mask;
 }
 
@@ -6263,6 +6960,10 @@ maybe_contract_wrap_call (tree fndecl, tree call, bool is_virtual_dispatch)
   if (error_operand_p (fndecl) || !call || call == error_mark_node)
     return error_mark_node;
 
+  /* P4405 proving hook: a call of an inheriting constructor.  */
+  if (flag_contracts && !processing_template_decl)
+    diagnose_inheriting_ctor_call (fndecl, call);
+
   if (!handle_caller_contracts_p (fndecl))
     return call;
 
@@ -6281,6 +6982,46 @@ maybe_contract_wrap_call (tree fndecl, tree call, bool is_virtual_dispatch)
      wrappers are keyed by the resolved caller-semantic tuple.  */
   tree tuple = NULL_TREE;
   bool any_active = is_virtual;
+  /* P4405 proving hook: the markers of deferred caller-side evaluations,
+     evaluated before the call.  Only for a precondition.  Most calls are
+     preceded by them (a COMPOUND_EXPR).  A constructor or destructor call,
+     or one returning a class, has to stay a call for its users
+     (build_cplus_new, AGGR_INIT_EXPR, cleanups), so it carries them
+     instead (CARRIER):
+     - a constructor or destructor call whose object exists, in its object
+       argument, which is evaluated before the call as well (and which a
+       constexpr constructor call folded to a constant keeps,
+       contract_object_proof_markers);
+     - a call that initializes a temporary -- one returning a class, or a
+       constructor call whose object is a placeholder -- is made the
+       initialization of that temporary here, with the markers ahead of the
+       call in its TARGET_EXPR_INITIAL, as the comma operator puts its left
+       operand (cp_build_compound_expr).  The placeholder is not the object:
+       a precondition that names `this' is given the temporary's slot
+       (TEMP, built early for it; GCC-926), which an initialization that
+       elides the temporary replaces in the markers too
+       (cp_gimplify_init_expr).
+     PLACEHOLDER_CTOR: a constructor call whose object is still a
+     placeholder (a prvalue, `T ()'), which its callers make the
+     initialization of a temporary (build_cplus_new) whose slot replaces
+     the placeholder.  */
+  tree temp = NULL_TREE;
+  tree this_call = NULL_TREE;
+  bool placeholder_ctor = (TREE_CODE (call) == CALL_EXPR
+			   && DECL_CONSTRUCTOR_P (fndecl)
+			   && call_expr_nargs (call) > 0
+			   && is_dummy_object (CALL_EXPR_ARG (call, 0)));
+  enum { MARK_BEFORE, MARK_OBJECT, MARK_TEMPORARY } carrier = MARK_BEFORE;
+  if (DECL_CONSTRUCTOR_P (fndecl) || DECL_DESTRUCTOR_P (fndecl))
+    carrier = placeholder_ctor ? MARK_TEMPORARY : MARK_OBJECT;
+  else if (MAYBE_CLASS_TYPE_P (TREE_TYPE (call)))
+    carrier = MARK_TEMPORARY;
+  tree proof_markers = NULL_TREE;
+  bool marker_call_p = (contract_proof_deferral_ok_p (current_function_decl)
+			&& !processing_template_decl
+			&& TREE_CODE (call) == CALL_EXPR
+			&& (carrier != MARK_OBJECT
+			    || call_expr_nargs (call) > 0));
   if (!is_virtual)
     tuple = compute_caller_semantic_tuple (fndecl, input_location,
 					   current_function_decl, &analyses);
@@ -6303,6 +7044,57 @@ maybe_contract_wrap_call (tree fndecl, tree call, bool is_virtual_dispatch)
 	  }
     }
 
+  /* P4405 proving hook: the markers come before the call or the wrapper
+     call, or in the call's object argument, which the wrapper call copies,
+     or in the initializer of the temporary the call initializes (CARRIER).
+     A constructor call for a placeholder object initializes its temporary
+     here whenever the call is not left as it was: with a caller-side
+     wrapper, which is called in place of the constructor (GCC-921: the
+     wrapper is not a constructor, so build_cplus_new would not replace the
+     placeholder by the temporary's slot), or with proof markers.  */
+  if (proof_markers && carrier == MARK_OBJECT)
+    {
+      tree arg = CALL_EXPR_ARG (call, 0);
+      CALL_EXPR_ARG (call, 0)
+	= build2 (COMPOUND_EXPR, TREE_TYPE (arg), proof_markers, arg);
+      proof_markers = NULL_TREE;
+    }
+  auto with_proof_markers = [=] (tree c) {
+    if (placeholder_ctor || (proof_markers && carrier == MARK_TEMPORARY))
+      {
+	/* Built as the callers would (build_cplus_new), for a constructor
+	   from the constructor call, so that its AGGR_INIT_EXPR replaces the
+	   placeholder.  Should that fail (an incomplete or abstract class),
+	   the callers' build_cplus_new diagnoses it.  */
+	tree type = (placeholder_ctor
+		     ? TREE_TYPE (TREE_TYPE (CALL_EXPR_ARG (call, 0)))
+		     : TREE_TYPE (c));
+	tree t = (temp && TREE_CODE (temp) == TARGET_EXPR ? temp
+		  : build_cplus_new (type, placeholder_ctor ? call : c,
+				     tf_none));
+	if (TREE_CODE (t) != TARGET_EXPR)
+	  return c;
+	tree init = TARGET_EXPR_INITIAL (t);
+	if (placeholder_ctor && c != call)
+	  {
+	    gcc_checking_assert (TREE_CODE (init) == AGGR_INIT_EXPR
+				 && AGGR_INIT_VIA_CTOR_P (init));
+	    AGGR_INIT_EXPR_FN (init) = CALL_EXPR_FN (c);
+	  }
+	if (proof_markers)
+	  TARGET_EXPR_INITIAL (t)
+	    = build2 (COMPOUND_EXPR, TREE_TYPE (init), proof_markers, init);
+	return t;
+      }
+    if (!proof_markers)
+      return c;
+    tree r = build2 (COMPOUND_EXPR, TREE_TYPE (c), proof_markers, c);
+    suppress_warning (r, OPT_Wunused_value);
+    return r;
+  };
+  if (proof_markers && !any_active)
+    return with_proof_markers (call);
+
   if (!any_active)
     return call;
 
@@ -6321,6 +7113,9 @@ maybe_contract_wrap_call (tree fndecl, tree call, bool is_virtual_dispatch)
   tree wrapcall = build_call_expr_loc_vec (DECL_SOURCE_LOCATION (wrapdecl),
 					   wrapdecl, argwrap);
 
+  /* P4405 proving hook.  */
+  if (proof_markers || placeholder_ctor)
+    return with_proof_markers (wrapcall);
   return wrapcall;
 }
 
@@ -11137,6 +11932,53 @@ build_dynamic_capture_selection (tree contract)
    caller-side evaluation in a wrapper: another translation unit may make
    no caller-side check at all, so it may be left out.  */
 
+static bool
+contract_premise_settled_p (tree contract)
+{
+  if (current_function_decl
+      && DECL_CONTRACT_WRAPPER (current_function_decl)
+      && !wrapper_for_virtual_dispatch_p (current_function_decl))
+    return false;
+  tree mask_tree = CONTRACT_ALLOWED_MASK (contract);
+  if (!mask_tree)
+    return false;
+  uint16_t mask = (uint16_t) tree_to_uhwi (mask_tree);
+  const uint16_t continuing
+    = ((1 << CES_IGNORE) | (1 << CES_OBSERVE) | (1 << CES_NOEXCEPT_OBSERVE)
+       | (1 << CES_PROVE) | (1 << CES_DIAGNOSE));
+  return mask != 0 && !(mask & continuing);
+}
+
+/* P4405 proving hook: tell the strategies when the check of CONTRACT under
+   SEMANTIC, if a plain one, lets the optimizers take its predicate to hold
+   where the function continues -- enforce and noexcept_enforce call a
+   noreturn entry point, quick_enforce traps inline and assume is an
+   assumption -- unless every translation unit's evaluation would
+   (contract_proof_note_premise).  */
+
+static void
+note_contract_premise (tree contract, contract_evaluation_semantic semantic)
+{
+  if (contract_dynamic_name (contract))
+    return;
+  switch (semantic)
+    {
+    case CES_ENFORCE:
+    case CES_NOEXCEPT_ENFORCE:
+    case CES_QUICK:
+    case CES_ASSUME:
+      break;
+    default:
+      return;
+    }
+  if (!contract_premise_settled_p (contract))
+    contract_proof_note_premise (current_function_decl);
+}
+
+/* Genericize a CONTRACT tree, but do not attach it to the current context,
+   the caller is responsible for that.
+   This is called during genericization.  */
+
 static tree
 build_runtime_contract_check (tree contract,
 			      contract_evaluation_semantic semantic,
@@ -11144,6 +11986,29 @@ build_runtime_contract_check (tree contract,
 {
   /* Plain (non-dynamic) contract: emit the single resolved check.  */
   const char *dyn_name = contract_dynamic_name (contract);
+  /* P4405 proving hook: the calls in a predicate that a check evaluates,
+     whose markers, if any, are in the copy of the predicate the check
+     evaluates.  */
+  tree checked = NULL_TREE;
+  if (flag_contracts_p4405
+      && (dyn_name || !contract_semantic_has_no_runtime_check (semantic)))
+    checked = checked_predicate_evaluations (contract);
+  /* P4405 proving hook: what a plain check lets the optimizers take to
+     hold.  */
+  note_contract_premise (contract, semantic);
+  /* P4405 proving hook: a plain check, followed by what lets a strategy
+     that defers evaluations assume the predicate -- the predicate itself,
+     not the check's copy with the markers.  */
+  if (!dyn_name && contract_proof_deferrable_p (contract))
+    {
+      tree check;
+      {
+	contract_condition_override o (contract, checked);
+	check = emit_check_for_semantic (contract, semantic);
+      }
+      return add_contract_proof_assumption (contract, semantic, check);
+    }
+  contract_condition_override o (contract, checked);
   if (!dyn_name)
     return emit_check_for_semantic (contract, semantic);
 
