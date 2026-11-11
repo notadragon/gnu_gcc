@@ -1,0 +1,5 @@
+[
+  {"match": {"caller": true},
+   "output": {"semantic": "enforce",
+              "dynamic": {"linkage": "C", "name": "caller_weak_compute_sel"}}}
+]

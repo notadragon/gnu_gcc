@@ -40,6 +40,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "attribs.h"
 #include "pretty-print-format-impl.h"
 #include "diagnostics/text-sink.h"
+#include "contracts.h"
 
 #define pp_separate_with_comma(PP) pp_cxx_separate_with (PP, ',')
 #define pp_separate_with_semicolon(PP) pp_cxx_separate_with (PP, ';')
@@ -1939,6 +1940,11 @@ dump_function_decl (cxx_pretty_printer *pp, tree t, int flags)
   tree exceptions;
   bool constexpr_p;
   tree ret = NULL_TREE;
+
+  /* A contract wrapper stands for the function it wraps: name that one.  */
+  if (TREE_CODE (t) == FUNCTION_DECL && DECL_CONTRACT_WRAPPER (t))
+    if (tree orig = get_orig_func_for_wrapper (t))
+      t = orig;
 
   int dump_function_name_flags = flags & ~TFF_UNQUALIFIED_NAME;
   flags = dump_function_name_flags & ~TFF_TEMPLATE_NAME;

@@ -1,0 +1,5 @@
+[
+  {"match": {"caller": {"location": "p3595-caller-location.C:20-20"}},
+   "output": {"semantic": "observe"}},
+  {"match": {"caller": true}, "output": {"semantic": "ignore"}}
+]

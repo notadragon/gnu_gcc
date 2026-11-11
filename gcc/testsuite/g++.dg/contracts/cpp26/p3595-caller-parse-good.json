@@ -1,0 +1,4 @@
+[
+  {"match": {"caller": {"location": "p3595-caller-parse.C:1-999", "namespace": "app", "module": "m"}},
+   "output": {"semantic": "enforce"}}
+]

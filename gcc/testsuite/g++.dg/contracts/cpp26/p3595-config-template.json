@@ -1,0 +1,4 @@
+[
+  {"match": {"location": "p3595-config-template.C:19-21", "caller": false}, "output": {"semantic": "observe"}},
+  {"output": {"semantic": "enforce"}}
+]

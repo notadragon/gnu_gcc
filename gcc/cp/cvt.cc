@@ -1131,6 +1131,10 @@ maybe_warn_nodiscard (tree expr, impl_conv_void implicit)
 
   tree rettype = TREE_TYPE (type);
   tree fn = cp_get_fndecl_from_callee (callee);
+  /* A call through a contract wrapper is a call of the callee.  */
+  if (fn && DECL_CONTRACT_WRAPPER (fn))
+    if (tree orig = get_orig_func_for_wrapper (fn))
+      fn = orig;
   tree attr;
   if (implicit != ICV_CAST && fn
       && (attr = lookup_attribute ("nodiscard", DECL_ATTRIBUTES (fn))))

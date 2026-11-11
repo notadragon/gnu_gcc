@@ -1,0 +1,6 @@
+[
+  {"match": {"caller": true, "kind": "pre", "namespace": "n"},
+   "output": {"semantic": "ignore"}},
+  {"match": {"caller": true, "kind": "post"},
+   "output": {"semantic": "ignore"}}
+]
