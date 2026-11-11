@@ -1044,6 +1044,14 @@ name_lookup::search_usings (tree scope)
   if (vec<tree, va_gc> *usings = NAMESPACE_LEVEL (scope)->using_directives)
     for (unsigned ix = usings->length (); ix--;)
       found |= search_qualified (strip_using_decl ((*usings)[ix]), true);
+  /* A contract-control using-directive is followed by qualified lookup
+     too, but only within an assertion-control expression, as by
+     unqualified lookup (queue_namespace).  */
+  if (in_assertion_control_expression_p)
+    if (vec<tree, va_gc> *usings
+	  = NAMESPACE_LEVEL (scope)->contract_control_usings)
+      for (unsigned ix = usings->length (); ix--;)
+	found |= search_qualified (strip_using_decl ((*usings)[ix]), true);
 
   /* Look in its inline children.  */
   if (vec<tree, va_gc> *inlinees = DECL_NAMESPACE_INLINEES (scope))
@@ -1106,6 +1114,9 @@ name_lookup::queue_namespace (using_queue& queue, int depth, tree scope)
 
   /* Queue its using targets.  */
   queue_usings (queue, depth, NAMESPACE_LEVEL (scope)->using_directives);
+  if (in_assertion_control_expression_p)
+    queue_usings (queue, depth,
+		  NAMESPACE_LEVEL (scope)->contract_control_usings);
 }
 
 /* Add the namespaces in USINGS to the unqualified search queue.  */
@@ -1132,7 +1143,12 @@ name_lookup::search_unqualified (tree scope, cp_binding_level *level)
 
   /* Queue local using-directives.  */
   for (; level->kind != sk_namespace; level = level->level_chain)
-    queue_usings (queue, SCOPE_DEPTH (scope), level->using_directives);
+    {
+      queue_usings (queue, SCOPE_DEPTH (scope), level->using_directives);
+      if (in_assertion_control_expression_p)
+	queue_usings (queue, SCOPE_DEPTH (scope),
+		      level->contract_control_usings);
+    }
 
   for (; !found; scope = CP_DECL_CONTEXT (scope))
     {
@@ -9310,6 +9326,18 @@ add_imported_using_namespace (tree ns, tree target)
 		       /*imported=*/true);
 }
 
+/* As above, for a P3400 contract-control using-directive, which lives in a
+   separate vector because the names it introduces are visible only inside
+   assertion-control expressions.  */
+
+void
+add_imported_contract_control_using_namespace (tree ns, tree target)
+{
+  add_using_namespace (NAMESPACE_LEVEL (ns)->contract_control_usings,
+		       ORIGINAL_NAMESPACE (target),
+		       /*imported=*/true);
+}
+
 /* Tell the debug system of a using directive.  */
 
 static void
@@ -9379,6 +9407,25 @@ finish_using_directive (tree target, tree attribs)
 	else if (!attribute_ignored_p (a))
 	  warning (OPT_Wattributes, "%qD attribute directive ignored", name);
       }
+}
+
+/* Record a contract-control using directive (P3400).  Names from TARGET
+   will be visible only within assertion-control expressions.
+
+   Unlike finish_using_directive, this records no USING_STMT at block scope
+   and emits no debug information: the directive affects only lookup in
+   assertion-control expressions, whose names are bound where the
+   expression is parsed, so neither later passes nor a debugger have
+   anything to apply it to.  */
+
+void
+finish_contract_control_using_directive (tree target)
+{
+  if (target == error_mark_node)
+    return;
+
+  add_using_namespace (current_binding_level->contract_control_usings,
+		       ORIGINAL_NAMESPACE (target));
 }
 
 /* Pushes X into the global namespace.  */
