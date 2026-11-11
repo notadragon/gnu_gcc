@@ -4780,6 +4780,11 @@ process_outer_var_ref (tree decl, tsubst_flags_t complain,
     return decl;
 
   tree context = DECL_CONTEXT (decl);
+  /* A postcondition's capture (P3098) is a variable of the function the
+     postcondition belongs to, though it may have no context (see
+     contextless_postcondition_capture_p).  */
+  if (!context)
+    contextless_postcondition_capture_p (decl, &context);
   tree containing_function = current_function_decl;
   tree lambda_stack = NULL_TREE;
   tree lambda_expr = NULL_TREE;
@@ -4894,8 +4899,22 @@ process_outer_var_ref (tree decl, tsubst_flags_t complain,
 	}
       return error_mark_node;
     }
-  else if (processing_contract_condition && TREE_CODE (decl) == PARM_DECL)
-    /* Use of a parameter in a contract condition is fine.  */
+  else if (processing_contract_condition
+	   && (TREE_CODE (decl) == PARM_DECL || is_capture_proxy (decl)))
+    /* Use of a parameter in a contract condition is fine, and so is use of a
+       capture: a contract on a lambda may name what the lambda captured, and
+       by the time the predicate is substituted the capture proxy belongs to
+       the instantiated operator() rather than to the enclosing function.  */
+    return decl;
+  else if (processing_postcondition_predicate && VAR_P (decl)
+	   && DECL_ARTIFICIAL (decl))
+    /* Use of a postcondition capture (a VAR_DECL, already remapped to the
+       instantiated capture) in the predicate is fine -- the capture is
+       available in the postcondition context.  During class-template
+       instantiation the capture's context is the instantiated function, so it
+       would otherwise look like an outer-function local.  Captures are
+       artificial; a local the user declared in an enclosing function is not,
+       and is diagnosed below like any other.  */
     return decl;
   else
     {
@@ -5076,8 +5095,13 @@ finish_id_expression_1 (tree id_expression,
 	set_contract_capture_flag (decl, false);
 
       /* Disallow uses of local variables from containing functions, except
-	 within lambda-expressions.  */
-      if (outer_automatic_var_p (decl))
+	 within lambda-expressions.  A postcondition's capture (P3098) may
+	 have no context, so outer_automatic_var_p cannot see that a lambda in
+	 the predicate names it from outside; it is captured all the same.  */
+      tree capture_fn = NULL_TREE;
+      if (outer_automatic_var_p (decl)
+	  || (contextless_postcondition_capture_p (decl, &capture_fn)
+	      && capture_fn != current_function_decl))
 	{
 	  decl = process_outer_var_ref (decl, tf_warning_or_error);
 	  if (decl == error_mark_node)
