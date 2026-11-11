@@ -1179,6 +1179,25 @@ enum constexpr_switch_state {
   css_default_processing
 };
 
+/* A non-terminating (observe) contract violation recorded during a single
+   cxx_eval_outermost_constant_expr call, so that all of them can be reported
+   rather than just the first.  NON_CONST distinguishes a condition that was not
+   a constant expression from one that was constant but evaluated to false.
+   EXCEPTION is non-null when the predicate exited via an exception instead:
+   a TREE_LIST whose TREE_VALUE is the exception's type and whose
+   TREE_PURPOSE is its what () string, if one could be had.  */
+
+struct constexpr_contract_violation
+{
+  tree stmt;
+  bool non_const;
+  tree exception;
+};
+
+/* At most this many observe violations are reported individually; any beyond
+   are summarised as a count.  */
+static const unsigned constexpr_contract_violation_limit = 8;
+
 /* The constexpr expansion context part which needs one instance per
    cxx_eval_outermost_constant_expr invocation.  VALUES is a map of values of
    variables initialized within the expression.  */
@@ -1221,12 +1240,25 @@ public:
   unsigned heap_dealloc_count;
   /* Number of uncaught exceptions.  */
   unsigned uncaught_exceptions;
-  /* A contract statement that failed or was not constant, we only store the
-     first one that fails.  */
+  /* A contract statement that failed or was not constant.  Holds the
+     representative violation: a terminating (enforce) one if any was seen,
+     otherwise the first non-terminating (observe) one.  Non-null means some
+     problem was recorded; whether it is terminating decides whether the
+     evaluation is ill-formed.  */
   tree contract_statement;
   /* [basic.contract.eval]/7.3 if this expression would otherwise be constant
      then a non-const contract makes the program ill-formed.  */
   bool contract_condition_non_const;
+  /* Every violation seen, terminating or not, once per contract statement,
+     in evaluation order and capped at constexpr_contract_violation_limit;
+     further ones are counted in contract_extra_violations.  Reported together
+     by check_for_failed_contracts.  */
+  auto_vec<constexpr_contract_violation> contract_violations;
+  /* Count of violations beyond the reporting cap.  */
+  unsigned contract_extra_violations;
+  /* Where the outermost expression being evaluated is, which identifies the
+     construct a contract problem is reported for.  */
+  location_t contract_outer_loc;
   /* Some metafunctions aren't dependent just on their arguments, but also
      on various other dependencies, e.g. has_identifier on a function parameter
      reflection can change depending on further declarations of corresponding
@@ -1248,7 +1280,39 @@ public:
       rollback (nullptr),
       consteval_block (NULL_TREE), heap_dealloc_count (0),
       uncaught_exceptions (0), contract_statement (NULL_TREE),
-      contract_condition_non_const (false), state_dependent (false) {}
+      contract_condition_non_const (false), contract_extra_violations (0),
+      contract_outer_loc (UNKNOWN_LOCATION), state_dependent (false) {}
+
+  /* Record a contract violation found during constant evaluation.  T is the
+     contract statement; NON_CONST is true if its condition was not a constant
+     expression (false if it was constant but evaluated to false).  Keeps
+     CONTRACT_STATEMENT as the representative violation, preferring a
+     terminating one so evaluation order cannot mask an enforce, and
+     accumulates every violation for reporting.  EXCEPTION is as for
+     constexpr_contract_violation.  */
+  void record_contract_violation (tree t, bool non_const,
+				  tree exception = NULL_TREE)
+  {
+    if (!contract_statement
+	|| (contract_constexpr_terminating_p (t)
+	    && !contract_constexpr_terminating_p (contract_statement)))
+      {
+	contract_statement = t;
+	contract_condition_non_const = non_const;
+      }
+    /* The same assertion violated again in this evaluation (in a loop, say)
+       is one problem.  */
+    for (const constexpr_contract_violation &cv : contract_violations)
+      if (cv.stmt == t)
+	return;
+    if (contract_violations.length () < constexpr_contract_violation_limit)
+      {
+	constexpr_contract_violation cv = { t, non_const, exception };
+	contract_violations.safe_push (cv);
+      }
+    else
+      ++contract_extra_violations;
+  }
 
   bool is_outside_lifetime (tree t)
   {
@@ -2019,6 +2083,44 @@ diagnose_uncaught_exception (location_t loc, const constexpr_ctx *ctx, tree exc)
       else
 	error_at (loc, "uncaught exception of type %qT", type);
     }
+}
+
+/* The predicate of a contract assertion exited via exception EXC during
+   constant evaluation, which is a contract violation ([basic.contract.eval]).
+   The exception is not caught anywhere in the enclosing evaluation, so end
+   it here: free every heap object the predicate allocated and left live --
+   EXC itself and whatever it owns -- and drop it from the uncaught
+   exceptions, so the enclosing evaluation neither sees the exception nor
+   reports the storage as never deallocated.  HEAP_START is the number of
+   heap objects there were when the predicate's evaluation began.  Return
+   what to report: a TREE_LIST whose TREE_VALUE is EXC's type and whose
+   TREE_PURPOSE is its what () string, when the evaluation is manifestly
+   constant-evaluated (so the violation can be reported) and one can be
+   had.  */
+
+static tree
+discard_contract_predicate_exception (const constexpr_ctx *ctx, tree exc,
+				      unsigned heap_start)
+{
+  tree type = strip_array_types (TREE_TYPE (exc));
+  tree what = NULL_TREE;
+  if (ctx->manifestly_const_eval == mce_true)
+    if (char *str = exception_what_str (ctx, exc))
+      {
+	what = build_string (strlen (str) + 1, str);
+	free (str);
+      }
+  --ctx->global->uncaught_exceptions;
+  unsigned i;
+  tree var;
+  FOR_EACH_VEC_ELT_FROM (ctx->global->heap_vars, i, var, heap_start)
+    if (DECL_NAME (var) != heap_deleted_identifier)
+      {
+	DECL_NAME (var) = heap_deleted_identifier;
+	ctx->global->destroy_value (var);
+	ctx->global->heap_dealloc_count++;
+      }
+  return build_tree_list (what, type);
 }
 
 /* Kinds of __cxa_* functions (and a few other EH related ones) we handle as
@@ -11556,10 +11658,16 @@ cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
     case POSTCONDITION_STMT:
       {
 	r = void_node;
-	/* Only record the first fail, and do not go further is the semantic
-	   is 'ignore'.  */
-	if (*non_constant_p || ctx->global->contract_statement
-	    || contract_ignored_p (t))
+	/* Populate the constexpr semantic slot lazily; skip if ignored.  */
+	{
+	  ensure_evaluation_semantic (t, cxx_constexpr_caller (ctx),
+				      /*in_ce=*/true);
+	}
+	/* Skip once the outer evaluation has gone non-constant.  Every other
+	   contract is evaluated, even after a violation has been recorded:
+	   each problem is reported, and whether any is reported at all depends
+	   on whether the rest of the evaluation completes as a constant.  */
+	if (*non_constant_p || contract_constexpr_ignored_p (t))
 	  break;
 
 	/* A named-result postcondition refers to a synthetic result variable
@@ -11592,8 +11700,8 @@ cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
 	tree cond = CONTRACT_CONDITION (t);
  	if (!potential_rvalue_constant_expression (cond))
  	  {
- 	    ctx->global->contract_statement = t;
- 	    ctx->global->contract_condition_non_const = true;
+	    /* Record this violation (condition is not constant).  */
+	    ctx->global->record_contract_violation (t, /*non_const=*/true);
  	    break;
 	  }
 
@@ -11604,6 +11712,8 @@ cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
 	bool ctrct_overflow_p = false;
 	tree jmp_target = NULL_TREE;
 	tree eval;
+	tree exc_report = NULL_TREE;
+	unsigned heap_start = ctx->global->heap_vars.length ();
 	{
 	  constexpr_ctx new_ctx = *ctx;
 	  new_ctx.quiet = true;
@@ -11617,18 +11727,37 @@ cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
 	  eval = cxx_eval_constant_expression (&new_ctx, cond, vc_prvalue,
 					       &ctrct_non_const_p,
 					       &ctrct_overflow_p, &jmp_target);
+	  /* Before the rollback, while the exception object still has its
+	     value.  */
+	  if (throws (&jmp_target))
+	    exc_report
+	      = discard_contract_predicate_exception (&new_ctx, jmp_target,
+						      heap_start);
 	}
 
 	/* Not a constant.  */
 	if (ctrct_non_const_p)
  	  {
- 	    ctx->global->contract_statement = t;
- 	    ctx->global->contract_condition_non_const = true;
+	    ctx->global->record_contract_violation (t, /*non_const=*/true);
  	    break;
+	  }
+	/* Exited via an exception.  */
+	if (exc_report)
+	  {
+	    ctx->global->record_contract_violation (t, /*non_const=*/false,
+						    exc_report);
+	    break;
+	  }
+	/* No value, without exiting via an exception: not a constant
+	   either.  */
+	if (!eval)
+	  {
+	    ctx->global->record_contract_violation (t, /*non_const=*/true);
+	    break;
 	  }
 	/* Constant, but check failed.  */
 	if (integer_zerop (eval))
-	  ctx->global->contract_statement = t;
+	  ctx->global->record_contract_violation (t, /*non_const=*/false);
       }
       break;
 
@@ -11849,6 +11978,67 @@ mark_non_constant (tree t)
   return t;
 }
 
+/* Identifies a contract problem already reported: the assertion's location,
+   that of the outermost expression it was found in, and the function that
+   expression is in (so each instantiation of a template reports its own).  */
+
+struct contract_report_key
+{
+  location_t stmt_loc;
+  location_t outer_loc;
+  int fn_uid;
+};
+
+/* The contract problems reported so far in this translation unit.  */
+static vec<contract_report_key> reported_contract_problems;
+
+/* Emit the diagnostic (of severity KIND) for a single contract violation STMT
+   found during constant evaluation.  NON_CONST is true when the condition was
+   not a constant expression, false when it was constant but evaluated to
+   false.  EXCEPTION is non-null when the predicate exited via an exception,
+   as for constexpr_contract_violation.  */
+
+static void
+emit_contract_violation_diagnostic (enum diagnostics::kind kind, tree stmt,
+				    bool non_const, tree exception)
+{
+  location_t loc = EXPR_LOCATION (stmt);
+  /* [basic.contract.eval]/7.3 */
+  if (non_const)
+    {
+      emit_diagnostic (kind, loc, 0, "contract condition is not constant");
+      return;
+    }
+
+  /* [basic.contract.eval]/7.2 */
+  if (exception)
+    {
+      tree type = TREE_VALUE (exception);
+      if (tree what = TREE_PURPOSE (exception))
+	emit_diagnostic (kind, loc, 0,
+			 "contract predicate exited via an exception of type"
+			 " %qT in constant expression; %<what()%>: %qs",
+			 type, TREE_STRING_POINTER (what));
+      else
+	emit_diagnostic (kind, loc, 0,
+			 "contract predicate exited via an exception of type"
+			 " %qT in constant expression", type);
+      return;
+    }
+
+  /* Otherwise, the evaluation was const, but determined to be false.  */
+  tree message = CONTRACT_MESSAGE (stmt);
+  if (message)
+    emit_diagnostic (kind, loc, 0,
+		     "contract predicate is false in constant expression"
+		     " (%.*s)",
+		     (int) TREE_STRING_LENGTH (message) - 1,
+		     TREE_STRING_POINTER (message));
+  else
+    emit_diagnostic (kind, loc, 0,
+		     "contract predicate is false in constant expression");
+}
+
 /* If we have a successful constant evaluation, now check whether there is
    a failed or non-constant contract that would invalidate this.  */
 
@@ -11859,35 +12049,45 @@ check_for_failed_contracts (constexpr_ctx *ctx)
   if (!flag_contracts || !global_ctx->contract_statement)
     return false;
 
-  location_t loc = EXPR_LOCATION (global_ctx->contract_statement);
-  enum diagnostics::kind kind;
-  bool error = false;
   /* [intro.compliance.general]/2.3.4. */
   /* [basic.contract.eval]/8. */
   if (ctx->manifestly_const_eval != mce_true)
-    {
-      /* When !MCE, silently return not constant.  */
-      return true;
-    }
-  else if (contract_terminating_p (global_ctx->contract_statement))
-    {
-      kind = diagnostics::kind::error;
-      error = true;
-    }
-  else
-    kind = diagnostics::kind::warning;
+    /* When !MCE, silently return not constant.  */
+    return true;
 
-  /* [basic.contract.eval]/7.3 */
-  if (global_ctx->contract_condition_non_const)
+  /* Report every violation, in evaluation order, each with its own
+     semantic's severity.  One construct can be constant-evaluated more than
+     once -- an array bound is evaluated both to check the conversion to
+     size_t for narrowing and for its value -- so a problem already reported
+     for this assertion in this construct is not reported again.  */
+  int fn_uid = current_function_decl ? DECL_UID (current_function_decl) : 0;
+  unsigned i;
+  constexpr_contract_violation *cv;
+  FOR_EACH_VEC_ELT (global_ctx->contract_violations, i, cv)
     {
-      emit_diagnostic (kind, loc, 0, "contract condition is not constant");
-      return error;
+      contract_report_key key = { EXPR_LOCATION (cv->stmt),
+				  global_ctx->contract_outer_loc, fn_uid };
+      bool seen = false;
+      for (const contract_report_key &k : reported_contract_problems)
+	if (k.stmt_loc == key.stmt_loc && k.outer_loc == key.outer_loc
+	    && k.fn_uid == key.fn_uid)
+	  seen = true;
+      if (seen)
+	continue;
+      reported_contract_problems.safe_push (key);
+      emit_contract_violation_diagnostic
+	(contract_constexpr_terminating_p (cv->stmt)
+	 ? diagnostics::kind::error : diagnostics::kind::warning,
+	 cv->stmt, cv->non_const, cv->exception);
     }
-
-  /* Otherwise, the evaluation was const, but determined to be false.  */
-  emit_diagnostic (kind, loc, 0,
-		   "contract predicate is false in constant expression");
-  return error;
+  if (global_ctx->contract_extra_violations == 1)
+    inform (EXPR_LOCATION (global_ctx->contract_statement),
+	    "and 1 more contract violation not shown");
+  else if (global_ctx->contract_extra_violations)
+    inform (EXPR_LOCATION (global_ctx->contract_statement),
+	    "and %u more contract violations not shown",
+	    global_ctx->contract_extra_violations);
+  return contract_constexpr_terminating_p (global_ctx->contract_statement);
 }
 
 /* ALLOW_NON_CONSTANT is false if T is required to be a constant expression.
@@ -11918,6 +12118,7 @@ cxx_eval_outermost_constant_expr (tree t, bool allow_non_constant,
     }
 
   constexpr_global_ctx global_ctx;
+  global_ctx.contract_outer_loc = cp_expr_loc_or_input_loc (t);
   constexpr_ctx ctx = { &global_ctx, NULL, NULL, NULL, NULL, NULL, NULL,
 			allow_non_constant, strict,
 			!allow_non_constant ? mce_true : manifestly_const_eval };
