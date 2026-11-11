@@ -1,0 +1,4 @@
+[
+  {"match": {"caller": {"location": "open-bug-caller-side-unwrapped-k.cc:10"}}, "output": {"semantic": "enforce"}},
+  {"match": {"caller": false}, "output": {"semantic": "ignore"}}
+]
