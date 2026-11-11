@@ -75,6 +75,31 @@ location_compute_display_column (diagnostics::file_cache &fc,
 
 extern char *
 get_source_text_between (diagnostics::file_cache &, location_t, location_t);
+extern char *
+get_source_text_between (diagnostics::file_cache &, expanded_location,
+			 expanded_location);
+
+/* A sequence of tokens whose text get_source_text_of_tokens forms.  */
+
+class source_token_sequence
+{
+public:
+  virtual unsigned length () const = 0;
+  /* The location of token I.  */
+  virtual location_t location (unsigned i) const = 0;
+  /* True if whitespace preceded token I.  */
+  virtual bool prev_white_p (unsigned i) const = 0;
+  /* True if token I is a literal, which is spelled as written where its
+     location allows.  */
+  virtual bool literal_p (unsigned i) const = 0;
+  /* Append to OB the spelling of token I from the token itself, and
+     return false if it has none.  */
+  virtual bool spell (unsigned i, struct obstack *ob) const = 0;
+};
+
+extern char *
+get_source_text_of_tokens (diagnostics::file_cache &,
+			   const source_token_sequence &, location_t, bool);
 
 extern expanded_location
 expand_location_to_spelling_point (location_t,
