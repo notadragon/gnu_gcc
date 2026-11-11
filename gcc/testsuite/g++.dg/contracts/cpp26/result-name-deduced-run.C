@@ -1,0 +1,46 @@
+// A postcondition result name on a function with a deduced return type is
+// checked at run time against the deduced result: a function, a member, a
+// function template, a lambda naming a capture and a generic lambda.  The
+// predicate never sees a declaration of the same name in the body (hidden,
+// lam).  (EDG-9 shapes.)
+//
+// Mirror: clang/test/Contracts/Runnable/result-name-deduced.cpp in the
+// llvm_llvm-project fork; the constant-evaluation half is
+// result-name-deduced.C.
+// { dg-do run { target c++26 } }
+// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe" }
+// { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
+
+#include <contracts>
+
+static int n = 0;
+void handle_contract_violation (const std::contracts::contract_violation &)
+{
+  ++n;
+}
+
+int gl = 1;
+auto f (const int x) post (r: r == x) { return x; }            // OK
+auto g (const int x) post (r: r == x) { return x + 1; }        // violation
+auto hidden () post (r: r == gl) { int gl = 2; return gl; }    // violation
+template <class T> auto t (T x) post (r: r > 0) { return x; }
+struct S {
+  auto m (const int x) post (r: r == x) { return x; }          // OK
+};
+
+int main ()
+{
+  f (1);
+  g (1);
+  hidden ();
+  t (1);                                                        // OK
+  t (-1);                                                       // violation
+  S{}.m (2);
+  int k = 1;
+  auto lam = [k] (int x) post (r: r == k) { int k = 5; return k + x; };
+  lam (0);                                                      // violation
+  auto gen = [] (const auto x) post (r: r == x) { return x + 1; };
+  gen (1);                                                      // violation
+  if (n != 5)
+    __builtin_abort ();
+}

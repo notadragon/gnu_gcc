@@ -1,6 +1,7 @@
 // ensure contracts on friend declarations are a complete class context
-// { dg-do compile { target c++23 } }
+// { dg-do run { target c++23 } }
 // { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe" }
+// { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 
 
 struct X {
@@ -30,7 +31,11 @@ int main(int, char**) {
   return 0;
 }
 
-// { dg-output "contract violation in function void fn0.X. at .*.C:7: .*(\n|\r\n|\r)" }
-// { dg-output "contract violation in function static void X::fns0.X. at .*.C:9: .*(\n|\r\n|\r)" }
-// { dg-output "contract violation in function static void X::fns1.X. at .*.C:10: .*(\n|\r\n|\r)" }
-// { dg-output "contract violation in function static void X::fns2.X. at .*.C:19: .*(\n|\r\n|\r)" }
+// { dg-output "contract violation in function void fn0.X. at .*.C:8: x.a > 0(\n|\r\n|\r)" }
+// { dg-output ".assertion_kind: pre, semantic: observe, mode: predicate_false, terminating: no.(\n|\r\n|\r)" }
+// { dg-output "contract violation in function static void X::fns0.X. at .*.C:10: x.a > 0(\n|\r\n|\r)" }
+// { dg-output ".assertion_kind: pre, semantic: observe, mode: predicate_false, terminating: no.(\n|\r\n|\r)" }
+// { dg-output "contract violation in function static void X::fns1.X. at .*.C:11: x.a > 0(\n|\r\n|\r)" }
+// { dg-output ".assertion_kind: pre, semantic: observe, mode: predicate_false, terminating: no.(\n|\r\n|\r)" }
+// { dg-output "contract violation in function static void X::fns2.X. at .*.C:20: x.a > 0(\n|\r\n|\r)" }
+// { dg-output ".assertion_kind: pre, semantic: observe, mode: predicate_false, terminating: no.(\n|\r\n|\r)" }
