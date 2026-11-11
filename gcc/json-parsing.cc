@@ -105,6 +105,10 @@ struct token
     /* Value for TOK_INTEGER_NUMBER.  */
     long integer_number;
   } u;
+
+  /* For TOK_STRING, the length in bytes of u.string, which may contain
+     NUL bytes (from "\u0000" escapes).  */
+  size_t string_len;
 };
 
 /* A class for lexing JSON.  */
@@ -809,6 +813,7 @@ lexer::lex_string (token *out)
   for (unsigned i = 0; i < utf8_buf.length (); i++)
     out->u.string[i] = utf8_buf[i];
   out->u.string[utf8_buf.length ()] = '\0';
+  out->string_len = utf8_buf.length ();
 }
 
 /* Having consumed FIRST_CHAR, an initial digit or '-' character from
@@ -1092,7 +1097,7 @@ parser::parse_value (int depth)
 
     case TOK_STRING:
       {
-	auto val = std::make_unique<string> (tok->u.string);
+	auto val = std::make_unique<string> (tok->u.string, tok->string_len);
 	m_lexer.consume ();
 	maybe_record_range (val.get (), tok->range);
 	return parser_result_t (std::move (val));
@@ -1940,6 +1945,17 @@ test_parse_string ()
     ASSERT_RANGE_EQ (*range,
 		     0, line_1, 0,
 		     24, line_1, 24);
+  }
+
+  /* A "\u0000" escape is kept, and so is the rest of the string.  */
+  {
+    parser_testcase tc ("\"a\\u0000b\"");
+    ASSERT_EQ (tc.get_error (), nullptr);
+    const json::value *jv = tc.get_value ();
+    ASSERT_EQ (jv->get_kind (), JSON_STRING);
+    const json::string *str = as_a <const json::string *> (jv);
+    ASSERT_EQ (str->get_length (), 3);
+    ASSERT_EQ (memcmp (str->get_string (), "a\0b", 3), 0);
   }
 
   /* Test of non-ASCII input.  This string is the Japanese word "mojibake",
