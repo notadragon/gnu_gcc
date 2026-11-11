@@ -146,6 +146,14 @@ proc g++_link_flags { paths } {
 	  append flags " -L${gccpath}/libstdc++-v3/src/experimental/.libs "
 	  append ld_library_path ":${gccpath}/libstdc++-v3/src/experimental/.libs"
       }
+      # The driver links libcontracts for C++ contracts (via libstdc++exp)
+      # and for -fcontracts-p4299; accept the shared library too, since a
+      # --disable-static build has no archive.
+      if { [file exists "${gccpath}/libcontracts/.libs/libcontracts.a"]
+	   || [file exists "${gccpath}/libcontracts/.libs/libcontracts.${shlib_ext}"] } {
+	  append flags " -L${gccpath}/libcontracts/.libs "
+	  append ld_library_path ":${gccpath}/libcontracts/.libs"
+      }
 
       if [file exists "${gccpath}/libiberty/libiberty.a"] {
           append flags "-L${gccpath}/libiberty "

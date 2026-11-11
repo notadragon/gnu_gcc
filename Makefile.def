@@ -209,6 +209,7 @@ target_modules = { module= libga68; lib_path=.libs; };
 target_modules = { module= libgomp; bootstrap= true; lib_path=.libs; };
 target_modules = { module= libitm; lib_path=.libs; };
 target_modules = { module= libatomic; bootstrap=true; lib_path=.libs; };
+target_modules = { module= libcontracts; lib_path=.libs; };
 target_modules = { module= libgrust; };
 target_modules = { module= libgcobol; };
 
@@ -693,6 +694,10 @@ dependencies = { module=install-target-libgo; on=install-target-libatomic; };
 dependencies = { module=install-target-libgfortran; on=install-target-libquadmath; };
 dependencies = { module=install-target-libgfortran; on=install-target-libgcc; };
 dependencies = { module=install-target-libphobos; on=install-target-libatomic; };
+// libstdc++exp's contracts runtime calls into libcontracts, and the libstdc++
+// testsuite finds libcontracts' shared library to run contracts programs.
+dependencies = { module=all-target-libstdc++-v3; on=all-target-libcontracts; };
+dependencies = { module=install-target-libstdc++-v3; on=install-target-libcontracts; };
 dependencies = { module=install-target-libsanitizer; on=install-target-libstdc++-v3; };
 dependencies = { module=install-target-libsanitizer; on=install-target-libgcc; };
 dependencies = { module=install-target-libvtv; on=install-target-libstdc++-v3; };
