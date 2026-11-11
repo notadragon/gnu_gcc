@@ -5481,8 +5481,11 @@ keep_unused_object_arg (tree result, tree obj, tree fn)
 {
   if (result == NULL_TREE
       || result == error_mark_node
-      || DECL_OBJECT_MEMBER_FUNCTION_P (fn)
-      || !TREE_SIDE_EFFECTS (obj))
+      || DECL_OBJECT_MEMBER_FUNCTION_P (fn))
+    return result;
+
+  check_postcondition_object_odr_use (obj);
+  if (!TREE_SIDE_EFFECTS (obj))
     return result;
 
   /* But avoid the implicit lvalue-rvalue conversion when `obj' is
