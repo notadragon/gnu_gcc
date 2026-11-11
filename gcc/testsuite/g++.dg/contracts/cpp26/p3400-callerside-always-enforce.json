@@ -1,0 +1,5 @@
+[
+  {"match": {"caller": true,
+             "location": "p3400-callerside-always-enforce.C:41,47"},
+   "output": {"semantic": "observe"}}
+]
