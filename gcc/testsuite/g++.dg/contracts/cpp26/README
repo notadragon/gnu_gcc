@@ -1,0 +1,96 @@
+Tests for C++26 contracts (P2900) and the contracts extensions on this
+branch.  g++.dg/dg.exp runs every *.C here, including the three
+subdirectories, which have no .exp of their own.  *.cc and *.h files are
+extra translation units and headers that a test pulls in with
+dg-additional-sources or #include; *.json files are contract configurations
+(P3595) named by a test's -fcontract-configuration-file option.
+
+Naming
+------
+
+basic.contract.*, dcl.contract.*, expr.prim.*, basic.scope.*, over.call.*
+	Named after the stable name and paragraph of the working draft that
+	the test checks, for the base C++26 feature.
+
+pNNNN-*
+	A proposal that extends the base feature, enabled by its own
+	-fcontracts-pNNNN option (see c.opt): p3097 virtual functions, p3098
+	postcondition captures, p3099 diagnostic messages, p3100 implicit
+	contract assertions for undefined behaviour (including the routing of
+	sanitizer checks, -fsanitize-semantic=), p3290 the trigger API and
+	assert, p3400 assertion-control labels, p4283 requires clauses, p4298
+	the noexcept semantics, p4299 contracts for C (its C++ side), p4301
+	contract_violation::report(), and p3850 the umbrella option.  p3595
+	is configuration, which has no option of its own: its tests use
+	-fcontract-configuration-file=.
+
+prNNNNNN.C, prNNNNNN-*.C
+	A regression test for GCC PR NNNNNN.
+
+open-bug-*
+	A watch test for an issue that is open on this branch.  The failing
+	expectation is xfailed and labelled with the issue's ID (GCC-NN) from
+	the branch's open-issues/ or bug-reports/ tracker, so the day the
+	issue is fixed the test XPASSes and says so.  A few instead pin
+	behaviour that is correct here and open in the Clang fork, whose
+	mirror carries the xfail; such a file says so at the top.
+
+matrix-*
+	Generated; see "The matrix-* files" below.
+
+callerside-checks/, outline-checks/, definition-checks/
+	Caller-side checking (-fcontracts-client-check=), outlined checks
+	(-fcontract-checks-outlined) and -fcontracts-definition-check=.
+
+Everything else has a descriptive name, usually starting with what it
+tests: contract-*, lambda-*, postcondition-*, constexpr-*, ce-* (constant
+evaluation under a configured semantic), and so on.
+
+Options
+-------
+
+Most tests select the dialect with { target c++26 } and add their options
+with dg-additional-options, so the harness runs them in each C++26-or-later
+dialect it tests, with its usual flags.  Most of the tests that set
+-fsanitize= (the p3100-* sanitizer-routing tests) instead use dg-options
+with an explicit -std=c++26, and run once.
+
+A test names the contracts options it relies on: -fcontracts, or the
+-fcontracts-pNNNN option of each proposal it tests (which implies
+-fcontracts).  The umbrella -fcontracts-p3850 turns on every extension;
+it is for the p3850-* tests and for tests that exercise the extensions
+together.
+
+A test whose result depends on the evaluation semantic pins it with
+-fcontract-evaluation-semantic=, even when the value is the default
+(enforce): the semantic also applies during constant evaluation, and with
+ignore a static_assert-driven test passes having tested nothing, so the
+explicit option guards against the default changing.  Runtime tests that
+must survive a violation use observe; enforce terminates.
+
+Every dg-do run test that can be linked with contracts enabled carries
+
+  // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
+
+because the driver links -lstdc++exp and -lcontracts whenever contracts
+are on -- any contracts option, or any C++26-or-later dialect -- and those
+libraries do not exist in a freestanding libstdc++.
+
+Many tests name their counterpart in the Clang fork's suite on a
+"Mirror:" line (clang/test/Contracts/...); the two are kept in step.
+
+The matrix-* files
+------------------
+
+The matrix-* tests are generated from a cross-product specification
+maintained outside this tree, which writes each file and its Clang mirror
+(clang/test/Contracts/matrix-*.cpp) together, so the two ask the same
+question.  Each file holds the cells of one group that share a phase
+(-fsyntax-only, code generation, or run), an expectation, a feature set, an
+evaluation semantic and a configuration, among other axes; a file's banner
+says what the group is about.  A configuration is written once per group,
+feature set and caller-side setting, and shared by the files that need it
+(for example matrix-readers-caller.json).  The expected diagnostics in the
+error files are the compiler's own messages as observed when the files were
+generated.  An edit made by hand here, rather than in the specification, is
+lost the next time the files are generated.
