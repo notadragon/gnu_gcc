@@ -196,7 +196,7 @@ get_source_text_between (diagnostics::file_cache &fc,
       if (lnum == expstart.line)
 	{
 	  unsigned off = expstart.column - 1;
-	  if (line.length () < off)
+	  if (line.length () <= off)
 	    return NULL;
 	  line = line.subspan (off, line.length() - off);
 	}
@@ -208,18 +208,18 @@ get_source_text_between (diagnostics::file_cache &fc,
 	  line = line.subspan (0, expend.column);
 	}
 
-      /* Combine spaces at the beginning of later lines.  */
+      /* Replace the line break and any spaces at the beginning of later
+	 lines with a single space, and skip a line that is only spaces.  */
       if (lnum > expstart.line)
 	{
 	  unsigned off;
 	  for (off = 0; off < line.length(); ++off)
 	    if (line[off] != ' ' && line[off] != '\t')
 	      break;
-	  if (off > 0)
-	    {
-	      obstack_1grow (&buf_obstack, ' ');
-	      line = line.subspan (off, line.length() - off);
-	    }
+	  if (off == line.length ())
+	    continue;
+	  obstack_1grow (&buf_obstack, ' ');
+	  line = line.subspan (off, line.length() - off);
 	}
 
       /* This does not include any trailing newlines.  */
