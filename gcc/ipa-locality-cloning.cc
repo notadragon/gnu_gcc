@@ -771,7 +771,7 @@ edge_redirectable_p (cgraph_edge *edge, lto_locality_cloning_model cm)
     {
       /* Interposability may change on edge basis.  */
       enum availability avail;
-      avail = edge->callee->get_availability (edge->caller);
+      avail = edge->callee->get_availability (edge->caller, true);
       if (avail <= AVAIL_INTERPOSABLE)
 	return false;
     }
@@ -1131,7 +1131,7 @@ suitable_for_locality_cloning_p (cgraph_edge *edge,
     {
       /* Interposability may change on edge basis.  */
       enum availability avail;
-      edge->callee->ultimate_alias_target (&avail, edge->caller);
+      edge->callee->ultimate_alias_target (&avail, edge->caller, true);
       if (avail <= AVAIL_INTERPOSABLE)
 	return false;
     }

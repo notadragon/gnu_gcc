@@ -389,7 +389,9 @@ can_inline_edge_p (struct cgraph_edge *e, bool report,
   enum availability avail;
   cgraph_node *caller = (e->caller->inlined_to
 			 ? e->caller->inlined_to : e->caller);
-  cgraph_node *callee = e->callee->ultimate_alias_target (&avail, caller);
+  /* Inlining copies the body, so a refinable body may be inlined.  */
+  cgraph_node *callee = e->callee->ultimate_alias_target (&avail, caller,
+							  true);
 
   if (!callee->definition)
     {
@@ -1699,8 +1701,8 @@ update_callee_keys (edge_heap_t *heap, struct cgraph_node *node,
 	   growth should have just increased and consequently badness metric
            don't need updating.  */
 	else if (e->inline_failed
-		 && (callee = e->callee->ultimate_alias_target (&avail,
-		  						e->caller))
+		 && (callee = e->callee->ultimate_alias_target
+				(&avail, e->caller, true))
 		 && avail >= AVAIL_AVAILABLE
 		 && ipa_fn_summaries->get (callee) != NULL
 		 && ipa_fn_summaries->get (callee)->inlinable
@@ -1758,7 +1760,7 @@ lookup_recursive_calls (struct cgraph_node *node, struct cgraph_node *where,
 
   for (e = where->callees; e; e = e->next_callee)
     if (e->callee == node
-	|| (e->callee->ultimate_alias_target (&avail, e->caller) == node
+	|| (e->callee->ultimate_alias_target (&avail, e->caller, true) == node
 	    && avail > AVAIL_INTERPOSABLE))
     {
       inline_badness b (e, -e->sreal_frequency ());
@@ -2079,13 +2081,14 @@ sum_callers (struct cgraph_node *node, void *data)
   return false;
 }
 
-/* We only propagate across edges with non-interposable callee.  */
+/* We only propagate across edges with non-interposable callee.  A
+   refinable callee can still be inlined, so it counts as available.  */
 
 inline bool
 ignore_edge_p (struct cgraph_edge *e)
 {
   enum availability avail;
-  e->callee->function_or_virtual_thunk_symbol (&avail, e->caller);
+  e->callee->function_or_virtual_thunk_symbol (&avail, e->caller, true);
   return (avail <= AVAIL_INTERPOSABLE);
 }
 

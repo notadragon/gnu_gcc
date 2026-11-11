@@ -904,7 +904,8 @@ ipa_profile (void)
 				     "Not speculating: "
 				     "probability is too low.\n");
 			}
-		      else if (n2->get_availability () <= AVAIL_INTERPOSABLE
+		      else if (n2->get_availability (NULL, true)
+				 <= AVAIL_INTERPOSABLE
 			       && n2->can_be_discarded_p ())
 			{
 			  nuseless++;
