@@ -977,6 +977,24 @@ expand_vec_init_expr (tree target, tree vec_init, tsubst_flags_t complain,
 			 from_array, complain, flags);
 }
 
+/* Return the initialization of a single element that VEC_INIT stands for,
+   as build_vec_init_expr computed it: the element initialization itself is
+   built only when the VEC_INIT_EXPR is expanded.  */
+
+tree
+vec_init_expr_elt_init (tree vec_init, tsubst_flags_t complain)
+{
+  tree type = TREE_TYPE (VEC_INIT_EXPR_SLOT (vec_init));
+  tree init = VEC_INIT_EXPR_INIT (vec_init);
+  if (VEC_INIT_EXPR_VALUE_INIT (vec_init))
+    init = void_type_node;
+  else if (init && TREE_CODE (init) == CONSTRUCTOR
+	   && !BRACE_ENCLOSED_INITIALIZER_P (init))
+    /* digest_init built any needed constructor calls.  */
+    return init;
+  return build_vec_init_elt (type, init, complain);
+}
+
 /* Give a helpful diagnostic for a non-constexpr VEC_INIT_EXPR in a context
    that requires a constant expression.  */
 
