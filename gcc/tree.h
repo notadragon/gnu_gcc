@@ -1003,11 +1003,12 @@ extern void omp_clause_range_check_failed (const_tree, const char *, int,
 #define TYPE_OVERFLOW_TRAPS(TYPE) \
   (!ANY_INTEGRAL_TYPE_CHECK(TYPE)->base.u.bits.unsigned_flag && flag_trapv)
 
-/* True if an overflow is to be preserved for sanitization.  */
+/* True if an overflow is to be preserved for sanitization, or for a P3100
+   implicit contract assertion, which pass_ubsan lowers after folding.  */
 #define TYPE_OVERFLOW_SANITIZED(TYPE)			\
   (ANY_INTEGRAL_TYPE_P (TYPE)				\
    && !TYPE_OVERFLOW_WRAPS (TYPE)			\
-   && (flag_sanitize & SANITIZE_SI_OVERFLOW))
+   && ((flag_sanitize & SANITIZE_SI_OVERFLOW) || flag_contracts_p3100))
 
 /* Nonzero in a VAR_DECL or STRING_CST means assembler code has been written.
    Nonzero in a FUNCTION_DECL means that the function has been compiled.
