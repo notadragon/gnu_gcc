@@ -1326,6 +1326,12 @@ UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-p4298)
 fcontracts-p4405
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-p4405)
 
+fcontracts-prove-assume
+UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-prove-assume)
+
+fcontracts-prove-fold
+UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-prove-fold)
+
 fcoroutines
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcoroutines)
 
