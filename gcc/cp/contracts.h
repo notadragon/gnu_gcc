@@ -162,6 +162,8 @@ extern void diagnose_coroutine_postcondition_params (tree);
 extern tree constify_contract_access		(tree);
 extern bool constify_in_contract_predicate_p	(tree);
 extern tree view_as_const			(tree);
+extern tree contract_const_this		(tree);
+extern bool contract_this_is_const_p		(void);
 
 extern void set_fn_contract_specifiers		(tree, tree);
 extern void update_fn_contract_specifiers	(tree, tree);

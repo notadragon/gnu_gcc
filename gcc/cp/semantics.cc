@@ -3702,6 +3702,11 @@ finish_this_expr (void)
   else
     gcc_checking_assert (!current_class_ptr);
 
+  /* Within a contract predicate `this' is a pointer to const
+     ([expr.prim.this]).  */
+  if (result && result != error_mark_node && contract_this_is_const_p ())
+    result = contract_const_this (result);
+
   if (result)
     /* The keyword 'this' is a prvalue expression.  */
     return rvalue (result);

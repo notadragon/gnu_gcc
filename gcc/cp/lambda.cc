@@ -704,8 +704,51 @@ add_capture (tree lambda, tree id, tree orig_init, bool by_reference_p,
       if (id == this_identifier && !by_reference_p)
 	{
 	  gcc_assert (INDIRECT_TYPE_P (type));
+	  /* A copy of *this made by a lambda in a contract predicate is the
+	     closure's own member, which a mutable lambda may modify
+	     ([expr.prim.id.unqual], whose example has `++z' on a captured
+	     *this marked OK): look through the const that `this' acquired in
+	     the predicate (contract_const_this) for the type of the object
+	     itself.  */
+	  if (flag_contracts && LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (lambda))
+	    {
+	      tree orig = tree_strip_nop_conversions (initializer);
+	      if (INDIRECT_TYPE_P (TREE_TYPE (orig)))
+		{
+		  initializer = orig;
+		  type = non_reference (TREE_TYPE (orig));
+		}
+	    }
 	  type = TREE_TYPE (type);
 	  initializer = cp_build_fold_indirect_ref (initializer);
+	}
+      else if (id == this_identifier
+	       && flag_contracts
+	       && LAMBDA_EXPR_IN_CONTRACT_PREDICATE_P (lambda)
+	       && TYPE_PTR_P (type))
+	{
+	  /* A lambda in a contract predicate that captures `this' from
+	     outside it captures a pointer to const, the type `this' has in
+	     the predicate ([expr.prim.this]), so that the object cannot be
+	     modified through it -- unless it is the `this' of an enclosing
+	     lambda that captured *this by copy, which points to that
+	     closure's own copy.  */
+	  tree init = tree_strip_nop_conversions (initializer);
+	  STRIP_ANY_LOCATION_WRAPPER (init);
+	  bool copy_p = false;
+	  if (is_capture_proxy (init))
+	    {
+	      tree val = DECL_VALUE_EXPR (init);
+	      STRIP_NOPS (val);
+	      copy_p = TREE_CODE (val) == ADDR_EXPR;
+	    }
+	  if (!copy_p)
+	    {
+	      tree obj = TREE_TYPE (type);
+	      obj = cp_build_qualified_type (obj, (cp_type_quals (obj)
+						   | TYPE_QUAL_CONST));
+	      type = build_pointer_type (obj);
+	    }
 	}
 
       if (!dependent_type_p (type) && !by_reference_p)
@@ -1153,7 +1196,14 @@ maybe_resolve_dummy (tree object, bool add_capture_p)
   if (tree lam = resolvable_dummy_lambda (object))
     if (tree cap = lambda_expr_this_capture (lam, add_capture_p))
       if (cap != error_mark_node)
-	object = build_fold_indirect_ref (cap);
+	{
+	  /* An implicit member access in a contract predicate reaches the
+	     object through a `this' that is a pointer to const there
+	     ([expr.prim.this]).  */
+	  if (contract_this_is_const_p ())
+	    cap = contract_const_this (cap);
+	  object = build_fold_indirect_ref (cap);
+	}
 
   return object;
 }
