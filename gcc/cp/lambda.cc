@@ -219,6 +219,19 @@ lambda_capture_field_type (tree expr, bool explicit_init_p,
   tree type;
   bool is_this = is_this_parameter (tree_strip_nop_conversions (expr));
 
+  /* In a contract predicate an entity declared outside it is named as const
+     ([expr.prim.id.unqual]), but that does not change its type: a by-copy
+     capture of it is a closure member of the entity's own type, which a
+     mutable lambda may modify, as [=] captures it.  A by-reference capture
+     names the entity, and stays const.  */
+  if (!explicit_init_p && !by_reference_p)
+    {
+      tree e = expr;
+      STRIP_ANY_LOCATION_WRAPPER (e);
+      if (contract_const_wrapper_p (e))
+	expr = strip_contract_const_wrapper (e);
+    }
+
   if (explicit_init_p)
     {
       if (uses_parameter_packs (expr))
