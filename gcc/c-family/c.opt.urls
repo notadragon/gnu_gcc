@@ -1341,6 +1341,9 @@ UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-prove-callee-pre
 fcontracts-prove-fold
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-prove-fold)
 
+fcontracts-prove-override
+UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-prove-override)
+
 fcontracts-prove-shadow
 UrlSuffix(gcc/C_002b_002b-Dialect-Options.html#index-fcontracts-prove-shadow)
 

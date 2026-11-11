@@ -367,6 +367,19 @@ extern bool contract_prove_shadow_assumable_p (tree pred,
    end's contracts-shadow.cc makes and uses.  */
 extern const contract_proof_strategy contract_prove_callee_premises_strategy;
 
+/* -fcontracts-prove-override (contracts-prove-override.cc): the override
+   shadows (D4405R0, "Virtual Functions"), which decide the evaluations of
+   an override pair made in its override shadow
+   (contract_proof_query's override_shadow), using the proof shadows'
+   regions and middle end.  */
+extern const contract_proof_strategy contract_prove_override_strategy;
+
+/* True if the evaluations of the override pairs of FNDECL, a virtual
+   function being defined, are made in override shadows: the strategy is
+   enabled and may defer them.  Otherwise each is an obligation of FNDECL
+   itself (contract_proof_query's override_shadow).  */
+extern bool contract_proof_override_shadows_p (tree fndecl);
+
 /* Defined by each front end, for the folding strategy: EXPR folded as far
    as the front end can fold it -- in C++ including constant evaluation that
    is not manifestly constant-evaluated -- without changing EXPR or anything
