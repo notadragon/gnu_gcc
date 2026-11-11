@@ -3,7 +3,7 @@
 // When the declared return type of a non-templated function contains a placeholder type, a postcondition-
 // specifier with a result-name-introducer shall be present only on a definition.
 // { dg-do compile { target c++23 } }
-// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe " }
+// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe" }
 
 
 auto no_deduced_res_types_on_non_defs (int x) // { dg-error "postconditions with deduced result name types must only appear on function definitions" }

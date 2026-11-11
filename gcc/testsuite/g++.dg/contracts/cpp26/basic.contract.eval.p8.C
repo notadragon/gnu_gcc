@@ -3,7 +3,7 @@
 // constant-evaluated ([expr.const]), and the evaluation semantic is a
 // terminating semantic, the program is ill-formed.
 // { dg-do compile { target c++23 } }
-// { dg-additional-options "-fcontracts  " }
+// { dg-additional-options "-fcontracts" }
 
 consteval void foo( auto x ) pre( false ) {}
 // { dg-error {contract predicate is false in constant expression} "" { target *-*-* } .-1 }

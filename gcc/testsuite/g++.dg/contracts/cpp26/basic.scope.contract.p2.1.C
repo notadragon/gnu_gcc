@@ -4,7 +4,7 @@
 // assertion is associated with a function F potentially conflicts with a declaration whose target scope is
 //	- the function parameter scope of F or
 // { dg-do compile { target c++23 } }
-// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe " }
+// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe" }
 
 int bad_mr_shadow (int r)
   post (r: r > 5) // { dg-error "contract postcondition result name shadows a function parameter" }

@@ -1,6 +1,6 @@
 // Check contract assertion on a vaarg function
 // { dg-do run { target c++23 } }
-// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=enforce " }
+// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=enforce" }
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 #include <stdio.h>
 #include <stdarg.h>

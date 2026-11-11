@@ -1,9 +1,9 @@
 // Throwing violation handler in a pre/post check on a noexcept function
 // behaves as if the function exited via an exception.
-// This tests the behaviour of a post condition on a member function
+// This tests the behaviour of a precondition on a free function
 // with caller side checks.
 // { dg-do run { target c++26 } }
-// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe -fcontracts-client-check=all " }
+// { dg-additional-options "-fcontracts -fcontract-evaluation-semantic=observe -fcontracts-client-check=all" }
 // { dg-skip-if "requires hosted libstdc++ for stdc++exp" { ! hostedlib } }
 
 #include <contracts>

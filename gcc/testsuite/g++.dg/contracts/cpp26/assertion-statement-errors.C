@@ -11,21 +11,21 @@ static_assert (__cpp_contracts >= 202502L);
 
 contract_assert f(); // { dg-error "expected unqualified-id before .contract_assert." }
 
-void f(contract_assert); // { dg-error "expected primary-expression before|declared void" }
-struct contract_assert{}; // { dg-error "expected unqualified-id before|expected identifier" }
+void f(contract_assert); // { dg-error "(expected primary-expression before|declared void)" }
+struct contract_assert{}; // { dg-error "(expected unqualified-id before|expected identifier)" }
 void contract_assert(); // { dg-error "expected unqualified-id before" }
 
 void g(){};
 int main()
 {
     contract_assert(x==0); // { dg-error ".x. was not declared in this scope"}
-    contract_assert int i = 0; // // { dg-error "expected primary-expression before|before .int." }
+    contract_assert int i = 0; // // { dg-error "(expected primary-expression before|before .int.)" }
 
     i = 7;
 
     int j = 4;
 
-    contract_assert( x = 0); // { dg-error  "expected primary-expression before|expected .\\). before .=. token" }
+    contract_assert( x = 0); // { dg-error  "(expected primary-expression before|expected .\\). before .=. token)" }
 
     contract_assert( y == 0); // { dg-error ".y. was not declared in this scope" }
 
