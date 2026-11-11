@@ -63,6 +63,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-ssa.h"
 #include "tree-eh.h"
 #include "diagnostic-core.h"
+#include "file-prefix-map.h" /* remap_macro_filename()  */
 
 /* AddressSanitizer finds out-of-bounds and use-after-free bugs
    with <2x slowdown on average.
@@ -3348,7 +3349,7 @@ asan_dynamic_init_call (bool after_p)
   if (!after_p)
     {
       pretty_printer module_name_pp;
-      pp_string (&module_name_pp, main_input_filename);
+      pp_string (&module_name_pp, remap_macro_filename (main_input_filename));
 
       module_name_cst = asan_pp_string (&module_name_pp);
       module_name_cst = fold_convert (const_ptr_type_node,
@@ -3493,7 +3494,7 @@ asan_add_global (tree decl, tree type, vec<constructor_elt, va_gc> *v)
   str_cst = asan_pp_string (&asan_pp);
 
   if (!in_lto_p)
-    pp_string (&module_name_pp, main_input_filename);
+    pp_string (&module_name_pp, remap_macro_filename (main_input_filename));
   else
     {
       const_tree tu = get_ultimate_context ((const_tree)decl);
@@ -3560,7 +3561,10 @@ asan_add_global (tree decl, tree type, vec<constructor_elt, va_gc> *v)
       DECL_ARTIFICIAL (var) = 1;
       DECL_IGNORED_P (var) = 1;
       pretty_printer filename_pp;
-      pp_string (&filename_pp, xloc.file);
+      /* Remap the filename as __FILE__ is, except in LTO, whose streamed
+	 locations already went through remap_debug_filename.  */
+      pp_string (&filename_pp,
+		 in_lto_p ? xloc.file : remap_macro_filename (xloc.file));
       tree str = asan_pp_string (&filename_pp);
       tree ctor = build_constructor_va (TREE_TYPE (var), 3,
 					NULL_TREE, str, NULL_TREE,

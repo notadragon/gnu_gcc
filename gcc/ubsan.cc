@@ -50,6 +50,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "gimple-fold.h"
 #include "varasm.h"
 #include "realmpfr.h"
+#include "file-prefix-map.h" /* remap_macro_filename()  */
 #include "target.h"
 #include "langhooks.h"
 
@@ -322,9 +323,14 @@ ubsan_source_location (location_t loc)
     }
   else
     {
-      /* Fill in the values from LOC.  */
-      size_t len = strlen (xloc.file) + 1;
-      str = build_string (len, xloc.file);
+      /* Fill in the values from LOC.  Remap the filename as __FILE__ is,
+	 except in LTO, whose streamed locations already went through
+	 remap_debug_filename.  */
+      const char *file = xloc.file;
+      if (!in_lto_p)
+	file = remap_macro_filename (file);
+      size_t len = strlen (file) + 1;
+      str = build_string (len, file);
       TREE_TYPE (str) = build_array_type_nelts (char_type_node, len);
       TREE_READONLY (str) = 1;
       TREE_STATIC (str) = 1;
@@ -1875,10 +1881,15 @@ ubsan_use_new_style_p (location_t loc)
   if (loc == UNKNOWN_LOCATION)
     return false;
 
+  /* The filename libubsan sees is the remapped one (see
+     ubsan_source_location).  */
   expanded_location xloc = expand_location (loc);
-  if (xloc.file == NULL || startswith (xloc.file, "\1")
-      || xloc.file[0] == '\0' || xloc.file[0] == '\xff'
-      || xloc.file[1] == '\xff')
+  const char *file = xloc.file;
+  if (file && !in_lto_p)
+    file = remap_macro_filename (file);
+  if (file == NULL || startswith (file, "\1")
+      || file[0] == '\0' || file[0] == '\xff'
+      || file[1] == '\xff')
     return false;
 
   return true;

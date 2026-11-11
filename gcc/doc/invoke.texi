@@ -17535,6 +17535,14 @@ program may yield backtraces with different addresses due to ASLR (Address
 Space Layout Randomization), it may be desirable to turn ASLR off.  On Linux,
 this can be achieved with @samp{setarch `uname -m` -R ./prog}.
 
+The name of the file that defines a global variable, which
+AddressSanitizer records for its reports, is remapped as @code{__FILE__}
+is, by @option{-fmacro-prefix-map} and @option{-ffile-prefix-map}.  With
+@option{-flto} the record is made at link time from the debugging
+information's file name instead, so it follows @option{-fdebug-prefix-map}
+and @option{-ffile-prefix-map}, and is not remapped by
+@option{-fmacro-prefix-map} alone.
+
 @opindex fsanitize=kernel-address
 @item -fsanitize=kernel-address
 Enable AddressSanitizer for Linux kernel.
