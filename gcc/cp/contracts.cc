@@ -1072,6 +1072,49 @@ check_postcondition_param_odr_uses (tree condition, tree fndecl,
     *diagnosed = data.diagnosed;
 }
 
+/* [dcl.fct.def.coroutine]/5 says a coroutine behaves as if the top-level
+   cv-qualifiers on all its parameters were removed -- so a by-value
+   parameter is never truly const within the coroutine's real definition,
+   however it is spelled.  A postcondition odr-using such a parameter must
+   have it const ([dcl.contract.func]), and the two requirements cannot
+   both be met.  The standard states the consequence outright, as a note
+   ([dcl.fct.def.coroutine]/6): "An odr-use of a non-reference parameter in
+   a postcondition assertion of a coroutine is ill-formed."
+
+   A reference parameter is fine: its copy is bound to the same object.  So is
+   a precondition, which is not subject to the const rule.
+
+   This cannot be checked where the const rule is, because a function is not
+   known to be a coroutine until its body has been parsed -- which is after
+   its contracts.  FNDECL's parameters carry the flag set by
+   check_postcondition_param_odr_uses, so the check is a walk once we know.  */
+
+void
+diagnose_coroutine_postcondition_params (tree fndecl)
+{
+  for (tree parm = DECL_ARGUMENTS (fndecl); parm; parm = DECL_CHAIN (parm))
+    if (parm_used_in_post_p (parm))
+      {
+	auto_diagnostic_group d;
+	error_at (DECL_SOURCE_LOCATION (parm),
+		  "parameter %qD is odr-used in a postcondition of a "
+		  "coroutine", parm);
+	inform (DECL_SOURCE_LOCATION (parm),
+		"a coroutine copies its parameters at the beginning of the "
+		"replacement body, so a postcondition cannot name one; "
+		"consider a reference parameter");
+      }
+}
+
+/* OBJECT is the object expression of a class member access, or of a call,
+   naming a static member or an enumerator, in a postcondition predicate
+   being built.  Its potential results are not the member access's
+   ([basic.def.odr]/3 includes them only for a non-static data member), so a
+   parameter that is OBJECT is odr-used however the access is used -- but
+   build_class_member_access_expr and keep_unused_object_arg drop an object
+   without side effects, and the walk over the finished predicate never sees
+   it (GCC-666).  Apply [dcl.contract.func]/7 to it here.  */
+
 void
 check_postcondition_object_odr_use (tree object)
 {
