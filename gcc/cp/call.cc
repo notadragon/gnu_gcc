@@ -10420,6 +10420,8 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
   int nargs;
   tree *argarray;
   bool already_used = false;
+  /* P3100: whether a virtual call was resolved statically below.  */
+  bool p3100_devirtualized = false;
 
   /* In a template, there is no need to perform all of the work that
      is normally done.  We are only interested in the type of the call
@@ -10729,6 +10731,7 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
 	      fn = ov;
 	      base_binfo = obinfo;
 	      flags |= LOOKUP_NONVIRTUAL;
+	      p3100_devirtualized = true;
 	    }
 	}
 
@@ -11310,6 +11313,11 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
       if (TREE_CODE (c) == CALL_EXPR)
 	TREE_NO_WARNING (c) = true;
     }
+
+  /* P3100: a virtual call resolved statically to a pure virtual function,
+     whether a member function call or an operator.  */
+  if (p3100_devirtualized)
+    call = build_implicit_pure_virtual_direct_check (input_location, call);
 
   return call;
 }
