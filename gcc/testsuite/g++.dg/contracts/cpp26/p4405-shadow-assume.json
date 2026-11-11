@@ -1,0 +1,4 @@
+[
+  {"match": {"location": "p4405-shadow-assume.C:18,25"}, "output": {"semantic": "assume"}},
+  {"match": {}, "output": {"semantic": "prove"}}
+]
