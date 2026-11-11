@@ -841,6 +841,468 @@ group_names_begin_end (tree range, tree *begin, tree *end)
   return true;
 }
 
+/* What build_group_names_query asks of a label's group_names.  */
+
+enum group_names_query { GNQ_COUNT, GNQ_LENGTHS, GNQ_CHARS };
+
+/* The most names a label's group_names may hold; one more is an error
+   (notadragon_wg21 DECISIONS.md E187 (a), E190).  */
+
+#define GROUP_NAMES_MAX 4096
+
+/* Build an expression that constant-evaluates to one fact about GN, a
+   label's group_names (an lvalue), each element converted to NAME_TYPE:
+   with GNQ_COUNT, the number of its elements, counting no further than
+   GROUP_NAMES_MAX + 1; with GNQ_LENGTHS, an array of the lengths of its
+   first COUNT names; with GNQ_CHARS, an array of the TOTAL characters of
+   its first COUNT names, one after another.  The range is walked once, as
+   a range-based for walks it -- the iterator from begin incremented until
+   it compares equal to end, or COUNT times -- so any range works, whether
+   or not its type says how many names it holds, and the reading costs
+   time linear in the size of the names.  A name is read within the
+   full-expression that dereferences the iterator, so an iterator may
+   return its names by value.  NULL_TREE if some step does not form.  */
+
+static tree
+build_group_names_query (location_t loc, tree gn, group_names_query what,
+			 unsigned HOST_WIDE_INT count,
+			 unsigned HOST_WIDE_INT total, tree name_type)
+{
+  /* GN is named once, through a pointer, so that a label that is not a
+     variable is not materialized twice.  */
+  tree p = get_target_expr (build_address (gn), tf_none);
+  if (error_operand_p (p))
+    return NULL_TREE;
+  tree range = cp_build_fold_indirect_ref (TARGET_EXPR_SLOT (p));
+  tree b, e;
+  if (!group_names_begin_end (range, &b, &e))
+    return NULL_TREE;
+
+  /* The iterator and the sentinel are modified and compared, so give them
+     cv-unqualified types, as finish_expansion_stmt does.  */
+  tree btype = cv_unqualified (TREE_TYPE (b));
+  tree etype = cv_unqualified (TREE_TYPE (e));
+  if (TREE_CODE (b) == TARGET_EXPR)
+    b = TARGET_EXPR_INITIAL (b);
+  if (TREE_CODE (e) == TARGET_EXPR)
+    e = TARGET_EXPR_INITIAL (e);
+  b = force_target_expr (btype, b, tf_none);
+  e = force_target_expr (etype, e, tf_none);
+  tree r = get_target_expr (build_zero_cst (ptrdiff_type_node), tf_none);
+  if (error_operand_p (b) || error_operand_p (e) || error_operand_p (r))
+    return NULL_TREE;
+  tree rs = TARGET_EXPR_SLOT (r);
+
+  tree binc = build_x_unary_op (loc, PREINCREMENT_EXPR, TARGET_EXPR_SLOT (b),
+				NULL_TREE, tf_none);
+  tree rinc = build2 (PREINCREMENT_EXPR, ptrdiff_type_node, rs,
+		      build_int_cst (ptrdiff_type_node, 1));
+  tree cond;
+  if (what == GNQ_COUNT)
+    {
+      cond = build_x_binary_op (loc, NE_EXPR, TARGET_EXPR_SLOT (b),
+				ERROR_MARK, TARGET_EXPR_SLOT (e), ERROR_MARK,
+				NULL_TREE, NULL, tf_none);
+      if (error_operand_p (cond))
+	return NULL_TREE;
+      cond = contextual_conv_bool (cond, tf_none);
+      if (error_operand_p (cond))
+	return NULL_TREE;
+      cond = build2 (TRUTH_ANDIF_EXPR, boolean_type_node,
+		     build2 (NE_EXPR, boolean_type_node, rs,
+			     build_int_cst (ptrdiff_type_node,
+					    GROUP_NAMES_MAX + 1)),
+		     cond);
+    }
+  else
+    cond = build2 (NE_EXPR, boolean_type_node, rs,
+		   build_int_cst (ptrdiff_type_node, count));
+  if (error_operand_p (binc))
+    return NULL_TREE;
+
+  warning_sentinel wur (warn_unused_result);
+  tree body, tail, res = NULL_TREE, k = NULL_TREE;
+  if (what == GNQ_COUNT)
+    {
+      body = build_compound_expr (loc, binc, rinc);
+      tail = rs;
+    }
+  else
+    {
+      /* The result array, and for GNQ_CHARS the index of the next
+	 character in it.  */
+      tree elt_type = what == GNQ_LENGTHS ? ptrdiff_type_node
+					  : char_type_node;
+      unsigned HOST_WIDE_INT n = what == GNQ_LENGTHS ? count : total;
+      tree arr_type = build_cplus_array_type (elt_type,
+					      build_index_type (size_int (n
+									  - 1)));
+      res = get_target_expr (build_value_init (arr_type, tf_none), tf_none);
+      if (error_operand_p (res))
+	return NULL_TREE;
+      tree ress = TARGET_EXPR_SLOT (res);
+      if (what == GNQ_CHARS)
+	{
+	  k = get_target_expr (build_zero_cst (ptrdiff_type_node), tf_none);
+	  if (error_operand_p (k))
+	    return NULL_TREE;
+	}
+
+      /* The name: *b converted to NAME_TYPE, in a temporary of its own,
+	 and an index J into it.  */
+      tree elt = build_x_indirect_ref (loc, TARGET_EXPR_SLOT (b),
+				       RO_UNARY_STAR, NULL_TREE, tf_none);
+      if (error_operand_p (elt))
+	return NULL_TREE;
+      tree name = perform_implicit_conversion (name_type, elt, tf_none);
+      if (error_operand_p (name))
+	return NULL_TREE;
+      tree nm = get_target_expr (name, tf_none);
+      tree j = get_target_expr (build_zero_cst (ptrdiff_type_node), tf_none);
+      if (error_operand_p (nm) || error_operand_p (j))
+	return NULL_TREE;
+      tree nms = TARGET_EXPR_SLOT (nm), js = TARGET_EXPR_SLOT (j);
+      tree jinc = build2 (PREINCREMENT_EXPR, ptrdiff_type_node, js,
+			  build_int_cst (ptrdiff_type_node, 1));
+
+      /* Character J of the name, as an int.  */
+      tree ch = grok_array_decl (loc, nms, js, NULL, tf_none);
+      if (error_operand_p (ch))
+	return NULL_TREE;
+      ch = cp_convert (integer_type_node, convert_from_reference (ch),
+		       tf_none);
+      if (error_operand_p (ch))
+	return NULL_TREE;
+
+      /* Whether J is within the name: below its size for a string_view,
+	 before the terminating NUL for a const char *.  */
+      tree jcond;
+      if (name_type != const_string_type_node)
+	{
+	  tree size = finish_class_member_access_expr
+	    (nms, get_identifier ("size"), false, tf_none);
+	  if (error_operand_p (size))
+	    return NULL_TREE;
+	  releasing_vec noargs;
+	  size = finish_call_expr (size, &noargs, /*disallow_virtual=*/false,
+				   /*koenig_p=*/false, tf_none);
+	  if (error_operand_p (size))
+	    return NULL_TREE;
+	  size = cp_convert (ptrdiff_type_node, size, tf_none);
+	  if (error_operand_p (size))
+	    return NULL_TREE;
+	  jcond = build2 (NE_EXPR, boolean_type_node, js, size);
+	}
+      else
+	jcond = build2 (NE_EXPR, boolean_type_node, ch, integer_zero_node);
+
+      /* The inner loop: J to the end of the name, for GNQ_CHARS copying
+	 each character to the result.  */
+      tree jbody = jinc;
+      if (what == GNQ_CHARS)
+	{
+	  tree dst = cp_build_array_ref (loc, ress, TARGET_EXPR_SLOT (k),
+					 tf_none);
+	  if (error_operand_p (dst))
+	    return NULL_TREE;
+	  tree set = cp_build_modify_expr (loc, dst, NOP_EXPR,
+					   cp_convert (char_type_node, ch,
+						       tf_none),
+					   tf_none);
+	  if (error_operand_p (set))
+	    return NULL_TREE;
+	  tree kinc = build2 (PREINCREMENT_EXPR, ptrdiff_type_node,
+			      TARGET_EXPR_SLOT (k),
+			      build_int_cst (ptrdiff_type_node, 1));
+	  jbody = build_compound_expr (loc, set,
+				       build_compound_expr (loc, kinc, jinc));
+	}
+      tree jw = build_stmt (loc, WHILE_STMT, NULL_TREE, NULL_TREE, NULL_TREE,
+			    NULL_TREE, NULL_TREE);
+      WHILE_BODY (jw) = fold_build_cleanup_point_expr
+	(void_type_node, convert_to_void (jbody, ICV_STATEMENT, tf_none));
+      WHILE_COND (jw) = jcond;
+
+      tree each = build_compound_expr (loc, j, jw);
+      if (what == GNQ_LENGTHS)
+	{
+	  tree dst = cp_build_array_ref (loc, ress, rs, tf_none);
+	  if (error_operand_p (dst))
+	    return NULL_TREE;
+	  tree set = cp_build_modify_expr (loc, dst, NOP_EXPR, js, tf_none);
+	  if (error_operand_p (set))
+	    return NULL_TREE;
+	  each = build_compound_expr (loc, each, set);
+	}
+      each = build_compound_expr (loc, nm, each);
+      /* One full-expression per name, so that its temporaries are new
+	 each time round.  */
+      each = fold_build_cleanup_point_expr
+	(void_type_node, convert_to_void (each, ICV_STATEMENT, tf_none));
+      body = build_compound_expr (loc, each,
+				  build_compound_expr (loc, binc, rinc));
+      tail = ress;
+    }
+
+  tree w = build_stmt (loc, WHILE_STMT, NULL_TREE, NULL_TREE, NULL_TREE,
+		       NULL_TREE, NULL_TREE);
+  WHILE_BODY (w) = body;
+  WHILE_COND (w) = cond;
+
+  tree expr = build_compound_expr (loc, w, tail);
+  if (k)
+    expr = build_compound_expr (loc, k, expr);
+  if (res)
+    expr = build_compound_expr (loc, res, expr);
+  expr = build_compound_expr (loc, r, expr);
+  if (what == GNQ_COUNT)
+    expr = build_compound_expr (loc, e, expr);
+  expr = build_compound_expr (loc, b, expr);
+  expr = build_compound_expr (loc, p, expr);
+  return fold_build_cleanup_point_expr (TREE_TYPE (expr), expr);
+}
+
+/* Store the N integers of V, the constant value of an array of N integers,
+   into OUT.  False if V is not such a value.  */
+
+static bool
+group_names_array_values (tree v, unsigned HOST_WIDE_INT n,
+			  vec<HOST_WIDE_INT> &out)
+{
+  out.safe_grow_cleared (n);
+  if (TREE_CODE (v) == STRING_CST)
+    {
+      if ((unsigned HOST_WIDE_INT) TREE_STRING_LENGTH (v) < n)
+	return false;
+      for (unsigned HOST_WIDE_INT i = 0; i < n; ++i)
+	out[i] = (unsigned char) TREE_STRING_POINTER (v)[i];
+      return true;
+    }
+  if (TREE_CODE (v) != CONSTRUCTOR)
+    return false;
+  /* An element not present is zero: the array was value-initialized.  */
+  unsigned HOST_WIDE_INT next = 0, ix;
+  tree idx, val;
+  FOR_EACH_CONSTRUCTOR_ELT (CONSTRUCTOR_ELTS (v), ix, idx, val)
+    {
+      unsigned HOST_WIDE_INT lo, hi;
+      if (!idx)
+	lo = next;
+      else if (TREE_CODE (idx) == INTEGER_CST && tree_fits_uhwi_p (idx))
+	lo = tree_to_uhwi (idx);
+      else if (TREE_CODE (idx) == RANGE_EXPR
+	       && tree_fits_uhwi_p (TREE_OPERAND (idx, 0)))
+	lo = tree_to_uhwi (TREE_OPERAND (idx, 0));
+      else
+	return false;
+      if (TREE_CODE (val) == RAW_DATA_CST)
+	{
+	  hi = lo + RAW_DATA_LENGTH (val) - 1;
+	  if (hi >= n)
+	    return false;
+	  for (unsigned HOST_WIDE_INT i = lo; i <= hi; ++i)
+	    out[i] = RAW_DATA_UCHAR_ELT (val, i - lo);
+	  next = hi + 1;
+	  continue;
+	}
+      if (idx && TREE_CODE (idx) == RANGE_EXPR)
+	{
+	  if (!tree_fits_uhwi_p (TREE_OPERAND (idx, 1)))
+	    return false;
+	  hi = tree_to_uhwi (TREE_OPERAND (idx, 1));
+	}
+      else
+	hi = lo;
+      if (hi >= n || TREE_CODE (val) != INTEGER_CST
+	  || !tree_fits_shwi_p (val))
+	return false;
+      for (unsigned HOST_WIDE_INT i = lo; i <= hi; ++i)
+	out[i] = tree_to_shwi (val);
+      next = hi + 1;
+    }
+  return true;
+}
+
+/* What eval_group_names_query found.  */
+
+enum group_names_read { GNR_OK, GNR_SHAPE, GNR_NOT_CONSTANT };
+
+/* Constant-evaluate build_group_names_query (LOC, GN, WHAT, COUNT, TOTAL,
+   NAME_TYPE) into *OUT: one integer for GNQ_COUNT, else COUNT lengths or
+   TOTAL characters.  GNR_SHAPE if it does not form: group_names is not a
+   range whose elements convert to NAME_TYPE, so the label has no groups,
+   as when it has no group_names at all.  GNR_NOT_CONSTANT if it forms but
+   reading it is not a constant expression -- UB in the range's begin, the
+   operation limit, a name that is not a constant: then the label is
+   diagnosed at LOC (notadragon_wg21 DECISIONS.md E189 (a)), naming
+   LABEL_TYPE, followed by the evaluator's account of why, since a label
+   silently in no group would configure the assertion as unlabelled.  */
+
+static group_names_read
+eval_group_names_query (location_t loc, tree gn, group_names_query what,
+			unsigned HOST_WIDE_INT count,
+			unsigned HOST_WIDE_INT total, tree name_type,
+			tree label_type, vec<HOST_WIDE_INT> &out)
+{
+  /* Build the query at LOC, so that a reason given at a location of the
+     query's own is given at the label too.  */
+  iloc_sentinel ils (loc);
+  tree q = build_group_names_query (loc, gn, what, count, total, name_type);
+  if (!q)
+    return GNR_SHAPE;
+  tree v = cxx_constant_value (q, NULL_TREE, tf_none);
+  if (v && what == GNQ_COUNT
+      && TREE_CODE (v) == INTEGER_CST && tree_fits_shwi_p (v))
+    {
+      out.safe_push (tree_to_shwi (v));
+      return GNR_OK;
+    }
+  if (v && what != GNQ_COUNT
+      && group_names_array_values (v, what == GNQ_LENGTHS ? count : total,
+				   out))
+    return GNR_OK;
+  auto_diagnostic_group d;
+  error_at (loc,
+	    "the %qs facet of assertion-control object %qT must be usable "
+	    "in a constant expression", "group_names",
+	    TYPE_MAIN_VARIANT (label_type));
+  cxx_constant_value (q, NULL_TREE, tf_warning_or_error);
+  return GNR_NOT_CONSTANT;
+}
+
+/* Extract the group names from the label's group_names facet and cache
+   them as a TREE_LIST of STRING_CSTs in CONTRACT_GROUPS.  Uses
+   error_mark_node as sentinel for "checked, no groups".  A read that fails
+   is diagnosed at LABEL_LOC, or where the label is if that is unknown.
+   resolve_contract_label reads them as soon as the label is resolved, so
+   that every copy of the contract -- the saved constexpr body, a
+   caller-side check -- carries the result and a failed read is diagnosed
+   once; a later query reads here only a contract in a template.  */
+
+static void
+ensure_contract_groups (tree contract,
+			location_t label_loc = UNKNOWN_LOCATION)
+{
+  if (CONTRACT_GROUPS (contract) != NULL_TREE)
+    return;
+
+  tree label = CONTRACT_LABEL (contract);
+  if (!label || label == error_mark_node
+      || !TREE_TYPE (label)
+      || !CLASS_TYPE_P (TREE_TYPE (label)))
+    {
+      CONTRACT_GROUPS (contract) = error_mark_node;
+      return;
+    }
+
+  tree label_type = TREE_TYPE (label);
+  tree gn_member = lookup_member (label_type,
+				  get_identifier ("group_names"),
+				  /*protect=*/0, /*want_type=*/false,
+				  tf_none);
+  /* The concept requires `is_const_v<decltype (t.group_names)>'.  A
+     `static constexpr' member is const-qualified already, and so is an array
+     of const elements; a non-const member is not a facet.  P3400 requires
+     const so that nothing implies a label's group membership could change at
+     run time and have an effect -- nothing reads it after translation.  */
+  tree gn_decl = (gn_member && gn_member != error_mark_node
+		  && BASELINK_P (gn_member)
+		  ? BASELINK_FUNCTIONS (gn_member) : gn_member);
+  if (!gn_member || gn_member == error_mark_node
+      || !label_facet_accessible_p (label_type, gn_member)
+      || !gn_decl || !DECL_P (gn_decl)
+      || !CP_TYPE_CONST_P (TREE_TYPE (gn_decl)))
+    {
+      CONTRACT_GROUPS (contract) = error_mark_node;
+      return;
+    }
+
+  processing_template_decl_sentinel ptds;
+  tree gn_val = finish_class_member_access_expr
+    (label_facet_object (label), get_identifier ("group_names"), false,
+     tf_none);
+  if (!gn_val || gn_val == error_mark_node)
+    {
+      CONTRACT_GROUPS (contract) = error_mark_node;
+      return;
+    }
+
+  /* Read the names as the concept has them ([support.contract.control.ident]):
+     each element of the range group_names, converted to string_view.  If
+     group_names is not such a range the label has no groups; if it is but
+     some read is not a constant expression, or it holds more than
+     GROUP_NAMES_MAX names, the label is diagnosed (once: the reading stops)
+     and has no groups.  An empty name is skipped.  A
+     label that is still dependent is read again once instantiated
+     (resolve_contract_label), so it is never diagnosed here.  */
+  location_t loc = label_loc;
+  if (loc == UNKNOWN_LOCATION)
+    loc = EXPR_LOC_OR_LOC (label, EXPR_LOC_OR_LOC (contract,
+						   input_location));
+  if (instantiation_dependent_expression_p (label))
+    {
+      CONTRACT_GROUPS (contract) = error_mark_node;
+      return;
+    }
+  tree name_type = group_name_type ();
+  CONTRACT_GROUPS (contract) = error_mark_node;
+
+  /* Count the names, then read their lengths, then their characters: three
+     walks of the range, each linear.  */
+  auto_vec<HOST_WIDE_INT> counted;
+  if (eval_group_names_query (loc, gn_val, GNQ_COUNT, 0, 0, name_type,
+			      label_type, counted) != GNR_OK)
+    return;
+  HOST_WIDE_INT count = counted[0];
+  if (count > GROUP_NAMES_MAX)
+    {
+      error_at (loc, "the %qs facet of assertion-control object %qT holds "
+		"more than %d names", "group_names",
+		TYPE_MAIN_VARIANT (label_type), GROUP_NAMES_MAX);
+      return;
+    }
+  if (count <= 0)
+    return;
+
+  auto_vec<HOST_WIDE_INT> lens;
+  if (eval_group_names_query (loc, gn_val, GNQ_LENGTHS, count, 0, name_type,
+			      label_type, lens) != GNR_OK)
+    return;
+  unsigned HOST_WIDE_INT total = 0;
+  for (HOST_WIDE_INT len : lens)
+    {
+      gcc_checking_assert (len >= 0);
+      total += len;
+    }
+
+  auto_vec<HOST_WIDE_INT> chars;
+  if (total
+      && eval_group_names_query (loc, gn_val, GNQ_CHARS, count, total,
+				 name_type, label_type, chars) != GNR_OK)
+    return;
+
+  tree groups_list = NULL_TREE;
+  unsigned HOST_WIDE_INT at = 0;
+  for (HOST_WIDE_INT len : lens)
+    {
+      auto_vec<char, 32> name;
+      for (HOST_WIDE_INT j = 0; j < len; ++j)
+	name.safe_push ((char) chars[at++]);
+      name.safe_push ('\0');
+      /* The name is the whole string_view, NUL bytes included
+	 (notadragon_wg21 DECISIONS.md E191 (a)), and it is matched on all
+	 of its bytes (E192 (2)): the STRING_CST holds LEN bytes and a
+	 terminating NUL.  An empty name is skipped.  */
+      if (len != 0)
+	groups_list = tree_cons (NULL_TREE,
+				 build_string (len + 1, name.address ()),
+				 groups_list);
+    }
+
+  if (groups_list)
+    CONTRACT_GROUPS (contract) = nreverse (groups_list);
+}
+
 /* Populate the groups vec from the contract's cached group names.  */
 
 static void
@@ -6605,6 +7067,9 @@ resolve_contract_label (tree contract, tree label, location_t loc)
      predicate, turning "this label has no local handler" into a diagnostic.  */
   deferring_access_check_sentinel access_sentinel (dk_no_deferred);
 
+  /* Where the label is, before it may be materialized below.  */
+  location_t label_loc = EXPR_LOC_OR_LOC (label, loc);
+
   /* Use the main variant as the trampoline-map key: substituting a
      dependent label can yield a distinct cv-variant tree per instantiation
      for one and the same type, and keying on that would build a fresh
@@ -6952,6 +7417,20 @@ resolve_contract_label (tree contract, tree label, location_t loc)
   if (allowed_mask != CES_ALL_ALLOWED_WITH_EXTENSIONS)
     CONTRACT_ALLOWED_MASK (contract)
       = build_int_cst (uint16_type_node, allowed_mask);
+
+  /* Read the label's group names now, once, and diagnose a failed read at
+     the label.  Left to the first query, each copy of the contract made
+     before it -- the saved constexpr body is taken before the function is
+     genericized -- would read them again and diagnose the failure again.
+     The cache is cleared first: at instantiation it holds what copy_node
+     brought from the pattern.  In a template the label is read once
+     instantiated, by this function again.  */
+  if (!processing_template_decl)
+    {
+      CONTRACT_GROUPS (contract) = NULL_TREE;
+      ensure_contract_groups (contract, label_loc);
+    }
+}
 
 {
   if (condition == error_mark_node)
