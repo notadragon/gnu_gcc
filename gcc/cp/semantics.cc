@@ -5160,6 +5160,35 @@ finish_id_expression_1 (tree id_expression,
 
 	  cp_warn_deprecated_use_scopes (scope);
 
+	  /* A qualified name of a non-static member of the class names the
+	     member through (*this) too ([expr.prim.id.general]), so it is
+	     ill-formed where the unqualified name is (see the FIELD_DECL case
+	     below); forming a pointer to member is not such a use.  */
+	  if (flag_contracts && processing_contract_condition
+	      && contract_class_ptr
+	      && contract_class_ptr == current_class_ptr
+	      && !cp_unevaluated_operand
+	      && !address_p
+	      && TYPE_P (scope)
+	      && current_class_type
+	      && DERIVED_FROM_P (scope, current_class_type))
+	    {
+	      tree first_fn = (is_overloaded_fn (decl)
+			       ? STRIP_TEMPLATE (get_first_fn (decl))
+			       : NULL_TREE);
+	      if (TREE_CODE (decl) == FIELD_DECL
+		  || (first_fn
+		      && TREE_CODE (first_fn) == FUNCTION_DECL
+		      && DECL_FUNCTION_MEMBER_P (first_fn)
+		      && !shared_member_p (decl)))
+		{
+		  error ("%qD 'this' required when accessing a member within a "
+			 "constructor precondition or destructor postcondition "
+			 "contract check", decl);
+		  return error_mark_node;
+		}
+	    }
+
 	  if (TYPE_P (scope))
 	    decl = finish_qualified_id_expr (scope,
 					     decl,
