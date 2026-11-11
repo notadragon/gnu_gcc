@@ -432,7 +432,10 @@ foreach src [lsort [find $srcdir/$subdir {*_a.[CHX}]] {
 			break
 		    }
 		    set testcase [string range $test [string length "$srcdir/"] end]
-		    lappend mod_files [module_cmi_p $testcase $module_cmis $std]
+		    # One element per CMI, not one per test: a test naming several
+		    # (--compile-std-module) would otherwise leave them behind.
+		    set mod_files [concat $mod_files \
+				       [module_cmi_p $testcase $module_cmis $std]]
 		}
 	    }
 	    set testcase [regsub {_a.[CH]} $src {}]
